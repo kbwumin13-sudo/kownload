@@ -185,6 +185,9 @@ struct PanelHostTest {
     precondition(window.contentView!.bounds.size == NSSize(width: 920, height: 650))
     window.setContentSize(NSSize(width: 980, height: 690))
     geometry("settings resize", width: 980, height: 690)
+    let savedSize = call("getState", nil) as! [String: Any]
+    precondition(savedSize["width"] as? CGFloat == 980 && savedSize["height"] as? CGFloat == 690,
+                 "settings persistence must use content size, excluding the title bar")
     window.rebuildSurface(reduceTransparency: false)
     geometry("settings appearance rebuild", width: 980, height: 690)
     call("setPresentation", ["mode": "panel", "show": true])

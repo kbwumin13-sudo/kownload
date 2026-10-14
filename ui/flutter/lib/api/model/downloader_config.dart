@@ -33,6 +33,10 @@ class ProtocolConfig {
   BtConfig bt = BtConfig();
   Ed2kConfig ed2k = Ed2kConfig();
   MediaConfig media = MediaConfig();
+  // The native netdisk downloader owns this HTTP-shaped configuration.
+  // Retain it unchanged when saving unrelated frontend preferences.
+  @JsonKey(includeIfNull: false)
+  Map<String, dynamic>? netdisk;
 
   ProtocolConfig();
 

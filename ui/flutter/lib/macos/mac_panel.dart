@@ -92,6 +92,7 @@ class MacPanel {
 
   static Future<void> showPanel({CreateTask? task}) async {
     cancelAutoHide();
+    if (presentation.value == 'settings') await rememberSettingsSize();
     presentation.value = 'panel';
     if (task != null) incoming.value = task;
     await _invoke('setPresentation',
@@ -112,15 +113,34 @@ class MacPanel {
     if (!_settingsInitialized) {
       _settingsInitialized = true;
       try {
-        final saved = Database.instance.getWindowState();
-        arguments['width'] = saved?.width ?? 900;
-        arguments['height'] = saved?.height ?? 700;
+        final saved = Database.instance.get<Map<String, dynamic>>(
+            'macPanelSettingsSize', (json) => Map<String, dynamic>.from(json));
+        arguments['width'] = saved?['width'] ?? 900;
+        arguments['height'] = saved?['height'] ?? 700;
       } catch (_) {
         arguments.addAll({'width': 900, 'height': 700});
       }
     }
     await _invoke('setPresentation', arguments);
     visible.value = true;
+  }
+
+  static Future<void> rememberSettingsSize() async {
+    if (presentation.value != 'settings') return;
+    final state = await _invoke('getState');
+    if (state is! Map || state['mode'] != 'settings') return;
+    final width = state['width'];
+    final height = state['height'];
+    if (width is! num ||
+        height is! num ||
+        !width.isFinite ||
+        !height.isFinite ||
+        width < 800 ||
+        height < 560) return;
+    try {
+      Database.instance.save('macPanelSettingsSize',
+          {'width': width.toDouble(), 'height': height.toDouble()});
+    } catch (_) {}
   }
 
   static Future<void> toggle() async {

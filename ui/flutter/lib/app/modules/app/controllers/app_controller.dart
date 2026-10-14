@@ -175,6 +175,10 @@ class AppController extends GetxController with WindowListener, TrayListener {
   }
 
   final _windowsResizeSave = Util.debounce(() async {
+    if (Util.isMacos()) {
+      await MacPanel.rememberSettingsSize();
+      return;
+    }
     final size = await windowManager.getSize();
     Database.instance.saveWindowState(
         WindowStateEntity(width: size.width, height: size.height));

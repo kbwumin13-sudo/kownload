@@ -44,15 +44,26 @@ ProtocolConfig _$ProtocolConfigFromJson(Map<String, dynamic> json) =>
       ..http = HttpConfig.fromJson(json['http'] as Map<String, dynamic>)
       ..bt = BtConfig.fromJson(json['bt'] as Map<String, dynamic>)
       ..ed2k = Ed2kConfig.fromJson(json['ed2k'] as Map<String, dynamic>?)
-      ..media = MediaConfig.fromJson(json['media'] as Map<String, dynamic>?);
+      ..media = MediaConfig.fromJson(json['media'] as Map<String, dynamic>?)
+      ..netdisk = json['netdisk'] as Map<String, dynamic>?;
 
-Map<String, dynamic> _$ProtocolConfigToJson(ProtocolConfig instance) =>
-    <String, dynamic>{
-      'http': instance.http.toJson(),
-      'bt': instance.bt.toJson(),
-      'ed2k': instance.ed2k.toJson(),
-      'media': instance.media.toJson(),
-    };
+Map<String, dynamic> _$ProtocolConfigToJson(ProtocolConfig instance) {
+  final val = <String, dynamic>{
+    'http': instance.http.toJson(),
+    'bt': instance.bt.toJson(),
+    'ed2k': instance.ed2k.toJson(),
+    'media': instance.media.toJson(),
+  };
+
+  void writeNotNull(String key, dynamic value) {
+    if (value != null) {
+      val[key] = value;
+    }
+  }
+
+  writeNotNull('netdisk', instance.netdisk);
+  return val;
+}
 
 MediaConfig _$MediaConfigFromJson(Map<String, dynamic> json) => MediaConfig(
       ytDlpPath: json['ytDlpPath'] as String? ?? '',

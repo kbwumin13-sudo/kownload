@@ -402,7 +402,10 @@ class MainFlutterWindow: NSWindow {
       guard let code = uint32("keyCode"), let modifiers = uint32("modifiers") else { invalid("keyCode and modifiers must be UInt32 integers"); return }
       let status = hotKey.register(keyCode: code, modifiers: modifiers)
       result(["registered": status == noErr, "status": Int(status)])
-    case "getState": result(["visible": visibleToUser, "mode": presentation.rawValue])
+    case "getState":
+      let size = contentView?.bounds.size ?? .zero
+      result(["visible": visibleToUser, "mode": presentation.rawValue,
+              "width": size.width, "height": size.height])
     default: result(FlutterMethodNotImplemented)
     }
   }
