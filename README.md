@@ -191,12 +191,12 @@ kownload 默认使用 `~/.local/bin/yt-dlp`、`/opt/homebrew/bin/ffmpeg` 和 `/o
 
 ```mermaid
 flowchart TB
-    ext["kownload 下载助手<br/>Chrome / Edge<br/>媒体嗅探 · 网盘勾选"]
+    ext["浏览器助手<br/>Chrome · Edge"]
     subgraph app["kownload.app"]
-        host["AppKit 宿主<br/>玻璃面板 · 快捷键 · 菜单栏"]
-        ui["Flutter 界面<br/>创建流程 · 任务 · 设置"]
+        host["AppKit 宿主<br/>玻璃面板 · 热键"]
+        ui["Flutter 界面<br/>任务 · 设置"]
         nm["Native 主机"]
-        core["Go 下载内核<br/>HTTP · BT · ED2K<br/>媒体 · 网盘"]
+        core["Go 下载内核<br/>Gopeed v1.9.3"]
     end
     tools["yt-dlp · FFmpeg"]
     disks["网盘 Web API"]
@@ -204,8 +204,8 @@ flowchart TB
     nm -- "REST" --> core
     host --- ui
     ui -- "REST · Unix socket" --> core
-    core --> tools
-    core --> disks
+    core -- "媒体" --> tools
+    core -- "网盘" --> disks
 ```
 
 | 层 | 技术 | 职责 |
