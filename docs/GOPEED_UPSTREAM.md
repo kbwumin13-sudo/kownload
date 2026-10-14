@@ -1,4 +1,4 @@
-# [![](_docs/img/banner.svg)](https://gopeed.com)
+# [![](../_docs/img/banner.svg)](https://gopeed.com)
 
 [![Test Status](https://github.com/GopeedLab/gopeed/workflows/test/badge.svg)](https://github.com/GopeedLab/gopeed/actions?query=workflow%3Atest)
 [![Codecov](https://codecov.io/gh/GopeedLab/gopeed/branch/main/graph/badge.svg)](https://codecov.io/gh/GopeedLab/gopeed)
@@ -183,7 +183,7 @@ Gopeed also provides a browser extension to take over browser downloads, support
 
 Follow our WeChat Official Account to get the latest updates and news.
 
-<img src="_docs/img/weixin.png" width="200" />
+<img src="../_docs/img/weixin.png" width="200" />
 
 ## 💝 Donate
 
@@ -191,7 +191,7 @@ If you like this project, please consider [donating](https://gopeed.com/docs/don
 
 ## 🖼️ Showcase
 
-![](_docs/img/ui-demo.png)
+![](../_docs/img/ui-demo.png)
 
 ## 👨‍💻 Development
 
@@ -297,7 +297,7 @@ go build -tags nosqlite,web -ldflags="-s -w" -o bin/ github.com/GopeedLab/gopeed
 
 ### 🏢 JetBrains
 
-[![goland](_docs/img/goland.svg)](https://www.jetbrains.com/?from=gopeed)
+[![goland](../_docs/img/goland.svg)](https://www.jetbrains.com/?from=gopeed)
 
 ## 📄 License
 
