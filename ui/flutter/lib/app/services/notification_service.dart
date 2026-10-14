@@ -55,7 +55,7 @@ class NotificationService extends GetxService {
 
     final WindowsInitializationSettings initializationSettingsWindows =
         WindowsInitializationSettings(
-      appName: 'Gopeed',
+      appName: 'kownload',
       appUserModelId: 'com.gopeed.gopeed',
       guid: '3c1bf3f4-3d91-4eaa-a33f-8705e71cf1ce', // unique guid
       iconPath: windowsIconPath,

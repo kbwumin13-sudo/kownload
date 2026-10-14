@@ -348,7 +348,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
     ]);
     if (!Util.isLinux()) {
       // Linux seems not support setToolTip, refer to: https://github.com/GopeedLab/gopeed/issues/241
-      await trayManager.setToolTip('Gopeed');
+      await trayManager.setToolTip('kownload');
     }
     await trayManager.setContextMenu(menu);
     trayManager.addListener(this);
@@ -420,7 +420,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'gopeed_service',
-        channelName: 'Gopeed Background Service',
+        channelName: 'kownload Background Service',
         channelImportance: NotificationChannelImportance.LOW,
         showWhen: true,
         priority: NotificationPriority.LOW,

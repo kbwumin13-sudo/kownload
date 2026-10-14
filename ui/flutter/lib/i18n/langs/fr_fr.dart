@@ -104,7 +104,7 @@ const frFR = {
     'password': 'Mot de passe',
     'thanks': 'Merci',
     'thanksDesc':
-        'Merci à tous les contributeurs qui ont aidé à construire et développer la communauté Gopeed !',
+        'Merci à tous les contributeurs qui ont aidé à construire et développer la communauté kownload !',
     'browserExtension': 'Extension du navigateur',
     'launchAtStartup': 'Lancer au démarrage',
     'runAsMenubarApp': 'Exécuter en tant qu\'application de barre de menus',

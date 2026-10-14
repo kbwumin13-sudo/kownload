@@ -140,7 +140,7 @@ const zhCN = {
     'username': '用户名',
     'password': '密码',
     'thanks': '鸣谢',
-    'thanksDesc': '感谢所有为 Gopeed 社区建设添砖加瓦的贡献者们！',
+    'thanksDesc': '感谢 kownload 及上游开源项目的所有贡献者！',
     'browserExtension': '浏览器扩展',
     'launchAtStartup': '开机自动运行',
     'runAsMenubarApp': '以菜单栏应用运行',

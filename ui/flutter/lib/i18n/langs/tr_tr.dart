@@ -150,7 +150,7 @@ const trTR = {
     'password': 'Şifre',
     'thanks': 'Teşekkürler',
     'thanksDesc':
-        'Gopeed topluluğunu oluşturmaya ve geliştirmeye yardımcı olan herkese teşekkürler!',
+        'kownload topluluğunu oluşturmaya ve geliştirmeye yardımcı olan herkese teşekkürler!',
     'browserExtension': 'Tarayıcı Eklentisi',
     'launchAtStartup': 'Başlangıçta çalıştır',
     'runAsMenubarApp': 'Menü çubuğu uygulaması olarak çalıştır',

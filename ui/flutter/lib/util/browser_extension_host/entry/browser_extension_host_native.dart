@@ -279,7 +279,7 @@ Future<String> _getManifestContent(Browser browser) async {
   final hostPath = await Util.homePathJoin(_hostExecName);
   final manifest = {
     'name': _hostName,
-    'description': 'Gopeed browser extension host',
+    'description': 'kownload browser extension host',
     'path': hostPath,
     'type': 'stdio',
     if (browser != Browser.firefox)

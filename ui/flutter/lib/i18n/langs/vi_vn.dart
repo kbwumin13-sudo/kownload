@@ -92,7 +92,7 @@ const viVN = {
     'password': 'Mật khẩu',
     'thanks': 'Cảm ơn',
     'thanksDesc':
-        'Cảm ơn tất cả những người đóng góp đã giúp xây dựng và phát triển cộng đồng Gopeed!',
+        'Cảm ơn tất cả những người đóng góp đã giúp xây dựng và phát triển cộng đồng kownload!',
     'browserExtension': 'Tiện ích mở rộng trình duyệt',
     'skipVerifyCert': 'Bỏ qua xác thực chứng chỉ',
     'archives': 'Tập tin nén',

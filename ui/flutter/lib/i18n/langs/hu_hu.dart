@@ -109,7 +109,7 @@ const huHU = {
     'password': 'Jelszó',
     'thanks': 'Köszönet',
     'thanksDesc':
-        'Köszönet minden hozzájárulónak, aki segített a Gopeed közösség építésében és fejlesztésében!',
+        'Köszönet minden hozzájárulónak, aki segített a kownload közösség építésében és fejlesztésében!',
     'browserExtension': 'Böngésző bővítmény',
     'launchAtStartup': 'Indítás indításkor',
     'runAsMenubarApp': 'Futtatás menüsáv alkalmazásként',

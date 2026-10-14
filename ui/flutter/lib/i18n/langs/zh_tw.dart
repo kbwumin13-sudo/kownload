@@ -101,7 +101,7 @@ const zhTW = {
     'username': '使用者名稱',
     'password': '密碼',
     'thanks': '感謝',
-    'thanksDesc': '感謝所有幫助建立和發展 Gopeed 社群的貢獻者！',
+    'thanksDesc': '感謝 kownload 及上游開源專案的所有貢獻者！',
     'browserExtension': '瀏覽器擴充功能',
     'launchAtStartup': '開機自動執行',
     'runAsMenubarApp': '以選單列應用程式執行',

@@ -97,7 +97,7 @@ const plPL = {
     'password': 'Hasło',
     'thanks': 'Dzięki',
     'thanksDesc':
-        'Dziękuję wszystkim za pomoc przy powstawaniu aplikacji Gopeed!',
+        'Dziękuję wszystkim za pomoc przy powstawaniu aplikacji kownload!',
     'browserExtension': 'Wtyczka dla przeglądarki',
     'launchAtStartup': 'Uruchom na starcie',
     'runAsMenubarApp': 'Uruchom jako aplikacja paska menu',

@@ -143,7 +143,7 @@ const enUS = {
     'password': 'Password',
     'thanks': 'Thanks',
     'thanksDesc':
-        'Thanks to all the contributors who have helped build and develop the Gopeed community!',
+        'Thanks to everyone who contributes to kownload and its upstream open-source projects!',
     'browserExtension': 'Browser Extension',
     'launchAtStartup': 'Launch at Startup',
     'runAsMenubarApp': 'Run as menubar app',

@@ -121,7 +121,7 @@ class _NetdiskViewState extends State<NetdiskView> {
       }
       if (['helper_missing', 'unsupported_browser']
           .contains(error.reasonCode)) {
-        return '请在所选浏览器个人资料中启用 Gopeed 网页助手，再回到原网盘页面同步。';
+        return '请在所选浏览器个人资料中启用 kownload 网页助手，再回到原网盘页面同步。';
       }
       return error.message;
     }
@@ -601,7 +601,7 @@ class _NetdiskViewState extends State<NetdiskView> {
                         const Padding(
                             padding: EdgeInsets.only(top: 6),
                             child: Text(
-                                '请在所选个人资料中启用 Gopeed 网页助手，登录原网盘页面。同步超时可取消后重试。',
+                                '请在所选个人资料中启用 kownload 网页助手，登录原网盘页面。同步超时可取消后重试。',
                                 style: TextStyle(fontSize: 12))),
                       if (_browsers.isEmpty &&
                           (_resumeOnly || _sessionId.isEmpty))

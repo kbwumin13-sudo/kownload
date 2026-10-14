@@ -92,7 +92,7 @@ class LoginView extends GetView<LoginController> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                'Gopeed',
+                                'kownload',
                                 style: Get.textTheme.headlineLarge?.copyWith(
                                   fontWeight: FontWeight.w900,
                                   color: Get.theme.colorScheme.onSurface,

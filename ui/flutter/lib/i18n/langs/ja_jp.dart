@@ -65,7 +65,7 @@ const jaJP = {
     'newVersionUpdate': 'アップデート',
     'newVersionLater': '後で',
     'thanks': '感謝',
-    'thanksDesc': 'Gopeedコミュニティの建設に協力してくださったすべての貢献者の方々に感謝します！',
+    'thanksDesc': 'kownloadコミュニティの建設に協力してくださったすべての貢献者の方々に感謝します！',
     'browserExtension': 'ブラウザ拡張機能',
     'skipVerifyCert': '証明書の検証をスキップ',
     'archives': 'アーカイブ',

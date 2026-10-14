@@ -11,7 +11,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 source_app="$project_dir/artifacts/baseline/Gopeed.app"
 core_dir="$project_dir/artifacts/build/media-core"
 core_version="${GOPEED_CORE_VERSION:-1.9.3-kownload.1}"
-build_number="${GOPEED_BUILD_NUMBER:-6}"
+build_number="${GOPEED_BUILD_NUMBER:-7}"
 mkdir -p "$core_dir"
 export CGO_ENABLED=1
 export PATH="$(dirname "$go_bin"):$PATH"

@@ -152,7 +152,7 @@ const caES = {
     'password': 'Contrasenya',
     'thanks': 'Gràcies',
     'thanksDesc':
-        'Gràcies a tots els col·laboradors que han ajudat a construir i desenvolupar la comunitat del Gopeed!',
+        'Gràcies a tots els col·laboradors que han ajudat a construir i desenvolupar la comunitat del kownload!',
     'browserExtension': 'Extensió del navegador',
     'launchAtStartup': 'Executa a l\'inici',
     'runAsMenubarApp': 'Executa com a aplicació de barra de menú',
