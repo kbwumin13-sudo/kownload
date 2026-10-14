@@ -164,7 +164,7 @@ Future<void> continueTask(String id) async {
 Future<void> pauseAllTasks(List<String>? ids) async {
   return _parse(
       () => _client.dio.put("api/v1/tasks/pause", queryParameters: {
-            "id": ids,
+            if (ids != null) "id": ids,
           }),
       null);
 }
@@ -172,7 +172,7 @@ Future<void> pauseAllTasks(List<String>? ids) async {
 Future<void> continueAllTasks(List<String>? ids) async {
   return _parse(
       () => _client.dio.put("api/v1/tasks/continue", queryParameters: {
-            "id": ids,
+            if (ids != null) "id": ids,
           }),
       null);
 }
@@ -185,7 +185,7 @@ Future<void> deleteTask(String id, bool force) async {
 Future<void> deleteTasks(List<String>? ids, bool force) async {
   return _parse(
       () => _client.dio.delete("api/v1/tasks", queryParameters: {
-            "id": ids,
+            if (ids != null) "id": ids,
             "force": force,
           }),
       null);

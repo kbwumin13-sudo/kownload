@@ -10,6 +10,8 @@ import (
 	"github.com/GopeedLab/gopeed/internal/protocol/bt"
 	"github.com/GopeedLab/gopeed/internal/protocol/ed2k"
 	"github.com/GopeedLab/gopeed/internal/protocol/http"
+	"github.com/GopeedLab/gopeed/internal/protocol/media"
+	"github.com/GopeedLab/gopeed/internal/protocol/netdisk"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/util"
 	gonanoid "github.com/matoous/go-nanoid/v2"
@@ -34,8 +36,13 @@ type Task struct {
 	fetcherManager fetcher.FetcherManager
 	fetcher        fetcher.Fetcher
 	timer          *util.Timer
-	statusLock     *sync.Mutex
-	lock           *sync.Mutex
+	// dataLock protects the serialized task view; statusLock serializes lifecycle decisions.
+	dataLock   sync.RWMutex
+	statusLock *sync.Mutex
+	lock       *sync.Mutex
+	// Guarded by statusLock; invalidates queued start work after a pause.
+	runGeneration  uint64
+	pauseDone      chan struct{} // Guarded by statusLock; closes after pause persistence.
 	speedArr       []int64
 	uploadSpeedArr []int64
 }
@@ -56,6 +63,15 @@ func NewTask() *Task {
 
 // Name returns the display name of the task.
 func (t *Task) Name() string {
+	t.dataLock.RLock()
+	defer t.dataLock.RUnlock()
+	return t.nameLocked()
+}
+
+func (t *Task) nameLocked() string {
+	if t.Meta == nil || t.Meta.Opts == nil {
+		return "unknown"
+	}
 	// Custom name first
 	if t.Meta.Opts.Name != "" {
 		return t.Meta.Opts.Name
@@ -80,28 +96,51 @@ func (t *Task) Name() string {
 	}
 
 	// Get the name of the first file
+	if len(t.Meta.Res.Files) == 0 {
+		return "unknown"
+	}
 	return t.Meta.Res.Files[0].Name
 }
 
 func (t *Task) MarshalJSON() ([]byte, error) {
-	type rawTaskType Task
-	jsonTask := struct {
-		rawTaskType
-		Name string `json:"name"`
-	}{
-		rawTaskType(*t),
-		t.Name(),
-	}
-	return json.Marshal(jsonTask)
+	t.dataLock.RLock()
+	defer t.dataLock.RUnlock()
+	// An explicit view avoids copying mutexes and preserves the public JSON shape.
+	return json.Marshal(struct {
+		ID        string               `json:"id"`
+		Protocol  string               `json:"protocol"`
+		Meta      *fetcher.FetcherMeta `json:"meta"`
+		Status    base.Status          `json:"status"`
+		Uploading bool                 `json:"uploading"`
+		Progress  *Progress            `json:"progress"`
+		IsCreated bool                 `json:"isCreated"`
+		CreatedAt time.Time            `json:"createdAt"`
+		UpdatedAt time.Time            `json:"updatedAt"`
+		Name      string               `json:"name"`
+	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked()})
+}
+
+func (t *Task) getStatus() base.Status {
+	t.dataLock.RLock()
+	defer t.dataLock.RUnlock()
+	return t.Status
 }
 
 func (t *Task) updateStatus(status base.Status) {
+	t.dataLock.Lock()
+	defer t.dataLock.Unlock()
 	t.UpdatedAt = time.Now()
 	t.Status = status
 }
 
 func (t *Task) clone() *Task {
-	return util.DeepClone(t)
+	if t == nil {
+		return nil
+	}
+	snapshot := util.DeepClone(t)
+	snapshot.fetcherManager = t.fetcherManager
+	return snapshot
 }
 
 func (t *Task) updateSpeed(downloaded int64, usedTime float64) int64 {
@@ -165,6 +204,8 @@ func (cfg *DownloaderConfig) Init() *DownloaderConfig {
 	}
 	if len(cfg.FetchManagers) == 0 {
 		cfg.FetchManagers = []fetcher.FetcherManager{
+			new(netdisk.FetcherManager),
+			new(media.FetcherManager),
 			new(http.FetcherManager),
 			new(bt.FetcherManager),
 			new(ed2k.FetcherManager),

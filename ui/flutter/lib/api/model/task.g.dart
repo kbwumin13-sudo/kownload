@@ -52,12 +52,14 @@ const _$ProtocolEnumMap = {
   Protocol.http: 'http',
   Protocol.bt: 'bt',
   Protocol.ed2k: 'ed2k',
+  Protocol.media: 'media',
 };
 
 Progress _$ProgressFromJson(Map<String, dynamic> json) => Progress(
       used: (json['used'] as num).toInt(),
       speed: (json['speed'] as num).toInt(),
       downloaded: (json['downloaded'] as num).toInt(),
+      mediaPhase: json['mediaPhase'] as String? ?? '',
       uploadSpeed: (json['uploadSpeed'] as num).toInt(),
       uploaded: (json['uploaded'] as num).toInt(),
       extractStatus:
@@ -70,6 +72,7 @@ Map<String, dynamic> _$ProgressToJson(Progress instance) => <String, dynamic>{
       'used': instance.used,
       'speed': instance.speed,
       'downloaded': instance.downloaded,
+      'mediaPhase': instance.mediaPhase,
       'uploadSpeed': instance.uploadSpeed,
       'uploaded': instance.uploaded,
       'extractStatus': _$ExtractStatusEnumMap[instance.extractStatus]!,

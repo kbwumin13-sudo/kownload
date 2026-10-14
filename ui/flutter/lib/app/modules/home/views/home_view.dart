@@ -4,6 +4,9 @@ import 'package:get/get.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/responsive_builder.dart';
 import '../controllers/home_controller.dart';
+import '../../../../macos/mac_shell.dart';
+import '../../../../util/util.dart';
+import '../../../../macos/mac_navigation.dart';
 
 class HomeView extends GetView<HomeController> {
   const HomeView({Key? key}) : super(key: key);
@@ -11,7 +14,10 @@ class HomeView extends GetView<HomeController> {
   @override
   Widget build(BuildContext context) {
     return GetRouterOutlet.builder(builder: (context, delegate, currentRoute) {
-      switch (currentRoute?.uri.path) {
+      final contentRoute = Util.isMacos() && currentRoute != null
+          ? macContentRoute(currentRoute)
+          : currentRoute;
+      switch (contentRoute?.uri.path) {
         case Routes.EXTENSION:
           controller.currentIndex.value = 1;
           break;
@@ -23,6 +29,18 @@ class HomeView extends GetView<HomeController> {
           break;
       }
 
+      if (Util.isMacos()) {
+        return MacShell(
+            selectedIndex: controller.currentIndex.value,
+            child: GetRouterOutlet.pickPages(
+              pickPages: (config) => macContentRoute(config)
+                  .currentTreeBranch
+                  .skip(2)
+                  .take(2)
+                  .toList(),
+              emptyPage: (_) => Get.routeTree.matchRoute(Routes.TASK).route!,
+            ));
+      }
       return Scaffold(
         // extendBody: true,
         body: Row(

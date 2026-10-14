@@ -209,9 +209,11 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
-	ctl    *controller.Controller
-	config *config
-	doneCh chan error
+	requestPolicy  func(*http.Request)
+	responsePolicy func(*http.Request, *http.Response) error
+	ctl            *controller.Controller
+	config         *config
+	doneCh         chan error
 
 	meta *fetcher.FetcherMeta
 
@@ -247,9 +249,9 @@ type Fetcher struct {
 	prefetchFile     *os.File      // Temporary file for prefetch data
 	prefetchFilePath string        // Path to temporary file
 	prefetchSize     atomic.Int64  // Bytes prefetched so far
-	prefetchDone     atomic.Bool   // Prefetch completed or stopped
 	prefetchErr      error         // Error during prefetch (if any)
 	prefetchStopCh   chan struct{} // Signal to stop prefetch
+	prefetchDoneCh   chan struct{} // Closed after all prefetch file writes and cleanup
 
 	// Target file
 	file         *os.File
@@ -266,8 +268,9 @@ type Fetcher struct {
 	downloadLoopDone chan struct{} // Closed when downloadLoop exits
 
 	// Resolve connection control
-	resolveCtx    context.Context
-	resolveCancel context.CancelFunc
+	resolveCtx      context.Context
+	resolveCancel   context.CancelFunc
+	resolveCancelMu sync.Mutex
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -307,6 +310,36 @@ func (f *Fetcher) updateMaxConnTime(d time.Duration) {
 }
 
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
+	return f.ResolveContext(context.Background(), req, opts)
+}
+
+func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) error {
+	parent := ctx
+	ctx, cancel := context.WithCancel(context.Background())
+	headersReady := make(chan struct{})
+	var headersOnce sync.Once
+	finishHeaders := func() { headersOnce.Do(func() { close(headersReady) }) }
+	go func() {
+		select {
+		case <-headersReady:
+		case <-parent.Done():
+			select {
+			case <-headersReady:
+			default:
+				cancel()
+			}
+		}
+	}()
+	keepResponse := false
+	f.resolveCancelMu.Lock()
+	f.resolveCancel = cancel
+	f.resolveCancelMu.Unlock()
+	defer func() {
+		finishHeaders()
+		if !keepResponse {
+			cancel()
+		}
+	}()
 	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
 		return err
 	}
@@ -335,7 +368,7 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 
 	// Build HTTP request WITHOUT Range header (normal request)
 	// This allows the response to be reused for downloading (important for one-time URLs)
-	httpReq, err := f.buildRequest(context.TODO(), req)
+	httpReq, err := f.buildRequest(ctx, req)
 	if err != nil {
 		f.setState(stateError)
 		return err
@@ -347,6 +380,7 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 	// Track connection time for adaptive timeout in download phase
 	connStartTime := time.Now()
 	resp, err := client.Do(httpReq)
+	finishHeaders()
 	if err != nil {
 		f.setState(stateError)
 		return err
@@ -423,23 +457,30 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 	f.resolveResp = resp
 	f.resolveRespLock.Unlock()
 
+	// Publish prefetch lifecycle channels before resolvedCh lets Start proceed.
+	// Non-range responses remain open for the one-time download connection.
+	keepResponse = true
+	if res.Range && res.Size > 0 {
+		f.prefetchStopCh = make(chan struct{})
+		f.prefetchDoneCh = make(chan struct{})
+		go f.asyncPrefetch()
+	}
 	f.setState(stateResolved)
-
-	// Signal that resolve is complete
 	f.resolvedOnce.Do(func() {
 		close(f.resolvedCh)
 	})
 
-	// Start async prefetch in background (only for range-supported resources)
-	// For non-range resources, the response will be used directly in Start
-	if res.Range && res.Size > 0 {
-		f.prefetchStopCh = make(chan struct{})
-		go f.asyncPrefetch()
-	}
-
 	// If start was called before resolve completed, auto-start
 	if f.startPending.Load() {
-		go f.doStart()
+		go func() {
+			if err := f.doStart(); err != nil {
+				f.setState(stateError)
+				select {
+				case f.doneCh <- err:
+				default:
+				}
+			}
+		}()
 	}
 
 	return nil
@@ -449,7 +490,7 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 // This data can be reused when Start is called to save time
 func (f *Fetcher) asyncPrefetch() {
 	defer func() {
-		f.prefetchDone.Store(true)
+		close(f.prefetchDoneCh)
 	}()
 
 	// Get the resolve response
@@ -511,56 +552,60 @@ func (f *Fetcher) asyncPrefetch() {
 	}
 }
 
-// stopPrefetchAndGetData stops the async prefetch and returns prefetched bytes
-// It also copies prefetched data to the target file
-func (f *Fetcher) stopPrefetchAndCopyData() int64 {
-	// Signal prefetch to stop (safely)
-	if f.prefetchStopCh != nil {
-		select {
-		case <-f.prefetchStopCh:
-			// Already closed
-		default:
-			close(f.prefetchStopCh)
-		}
+// stopPrefetch interrupts any blocked response read and joins its owner before
+// the caller accesses the temporary file. A timeout is not proof of completion.
+func (f *Fetcher) stopPrefetch() {
+	if f.prefetchStopCh == nil {
+		return
 	}
-
-	// Wait for prefetch to finish (with timeout)
-	for i := 0; i < 1000 && !f.prefetchDone.Load(); i++ {
-		time.Sleep(10 * time.Millisecond)
+	f.resolveRespLock.Lock()
+	select {
+	case <-f.prefetchStopCh:
+	default:
+		close(f.prefetchStopCh)
 	}
+	resp := f.resolveResp
+	f.resolveResp = nil
+	f.resolveRespLock.Unlock()
+	if resp != nil {
+		resp.Body.Close()
+	}
+	<-f.prefetchDoneCh
+}
 
-	prefetched := f.prefetchSize.Load()
+// stopPrefetchAndCopyData joins prefetch, then copies its bytes to the target.
+func (f *Fetcher) stopPrefetchAndCopyData() (int64, error) {
+	f.stopPrefetch()
+	defer f.cleanupPrefetchFile()
+
+	// Consume the prefetch once; retries and resumes must not reuse its count
+	// after the temporary file has been removed.
+	prefetched := f.prefetchSize.Swap(0)
 	if prefetched == 0 {
-		f.cleanupPrefetchFile()
-		return 0
+		return 0, nil
 	}
-
-	// Copy prefetch data to target file
-	if f.prefetchFile != nil && f.file != nil {
-		// Seek to beginning of prefetch file
-		f.prefetchFile.Seek(0, io.SeekStart)
-
-		// Copy to target file at position 0
-		buf := make([]byte, 32*1024)
-		var copied int64
-		for copied < prefetched {
-			n, err := f.prefetchFile.Read(buf)
-			if n > 0 {
-				f.file.WriteAt(buf[:n], copied)
-				copied += int64(n)
-			}
-			if err != nil {
-				break
-			}
-		}
+	if f.prefetchFile == nil || f.file == nil {
+		return 0, fmt.Errorf("prefetch copy requires source and target files")
 	}
+	return copyPrefetchData(f.file, f.prefetchFile, prefetched)
+}
 
-	f.cleanupPrefetchFile()
-	return prefetched
+func copyPrefetchData(target io.WriterAt, source io.ReadSeeker, size int64) (int64, error) {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	// Bound reads to the recorded prefix and count only bytes actually written.
+	// Preserve copy errors even when the writer reports the full byte count.
+	copied, err := io.Copy(io.NewOffsetWriter(target, 0), io.LimitReader(source, size))
+	if err == nil && copied != size {
+		err = io.ErrUnexpectedEOF
+	}
+	return copied, err
 }
 
 // cleanupPrefetchFile closes and removes the prefetch temporary file
 func (f *Fetcher) cleanupPrefetchFile() {
+	f.prefetchSize.Store(0)
 	if f.prefetchFile != nil {
 		f.prefetchFile.Close()
 		f.prefetchFile = nil
@@ -608,6 +653,11 @@ func (f *Fetcher) doStart() error {
 
 	// If retrying after error, reset connection states for retry
 	if state == stateError {
+		// Completion signals precede the loop's deferred cleanup. Join the old
+		// loop before replacing its context/channel for a retry.
+		if f.downloadLoopDone != nil {
+			<-f.downloadLoopDone
+		}
 		// Drain any pending error from doneCh before retry
 		select {
 		case <-f.doneCh:
@@ -654,7 +704,20 @@ func (f *Fetcher) doStart() error {
 	var prefetchedBytes int64
 	if f.meta.Res.Range {
 		// Stop async prefetch and copy data to target file
-		prefetchedBytes = f.stopPrefetchAndCopyData()
+		prefetchedBytes, err = f.stopPrefetchAndCopyData()
+		if err != nil {
+			// Do not publish a partial prefix as downloaded. A retry will fetch
+			// from byte zero now that the prefetch file has been consumed.
+			f.resolveDataPos.Store(0)
+			f.fileMu.Lock()
+			if f.file != nil {
+				f.file.Close()
+				f.file = nil
+			}
+			f.fileMu.Unlock()
+			f.setState(stateError)
+			return fmt.Errorf("copy prefetch data: %w", err)
+		}
 		f.resolveDataPos.Store(prefetchedBytes)
 
 		// Also close resolve response if still open
@@ -707,6 +770,12 @@ func (f *Fetcher) downloadLoop() {
 	if !isResume {
 		// Fresh start: begin with resolve connection
 		f.startResolveDownload()
+		if f.getState() == stateDone {
+			return
+		}
+		if !f.meta.Res.Range || f.meta.Res.Size == 0 {
+			return
+		}
 	} else {
 		// Resume: restart existing connections
 		f.resumeConnections()
@@ -750,7 +819,9 @@ func (f *Fetcher) startResolveDownload() {
 			Chunk: newChunk(0, 0), // For non-range, end doesn't matter
 		}
 		conn.ctx, conn.cancel = context.WithCancel(f.ctx)
+		f.connMu.Lock()
 		f.connections = append(f.connections, conn)
+		f.connMu.Unlock()
 
 		f.wg.Add(1)
 		// Use the resolve response directly
@@ -788,6 +859,7 @@ func (f *Fetcher) expandConnections() {
 
 		// If prefetched all data, mark as done
 		if prefetched >= totalSize {
+			f.resolveConn = &connection{ID: 0, Role: roleResolve, State: connCompleted, Downloaded: totalSize, Completed: true}
 			f.connMu.Unlock()
 
 			// Close the file before signaling completion
@@ -875,7 +947,6 @@ func (f *Fetcher) expandConnections() {
 	if len(newConns) == 0 {
 		// No new connections could be created, stop expansion
 		f.setState(stateSteady)
-		go f.waitForCompletion()
 		return
 	}
 
@@ -901,7 +972,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 	buf := make([]byte, 8192)
 
 	retries := 0
+	f.connMu.Lock()
 	conn.retryTimes = 0
+	f.connMu.Unlock()
 
 	for {
 		// Rebuild client with updated fast-fail timeout on retries
@@ -921,7 +994,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 
 			// Reset counters after a successful help switch
 			retries = 0
+			f.connMu.Lock()
 			conn.retryTimes = 0
+			f.connMu.Unlock()
 			continue
 		}
 
@@ -946,8 +1021,8 @@ func (f *Fetcher) runConnection(conn *connection) {
 				}
 				return
 			}
-			conn.retryTimes++
 			f.connMu.Lock()
+			conn.retryTimes++
 			conn.failed = true
 			f.connMu.Unlock()
 			if f.slowStart != nil {
@@ -1192,8 +1267,10 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 			}
 			f.fileMu.Unlock()
 
+			f.connMu.Lock()
 			conn.Chunk.Downloaded += int64(n)
 			conn.Downloaded += int64(n)
+			f.connMu.Unlock()
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -1287,8 +1364,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 					}
 					f.fileMu.Unlock()
 
+					f.connMu.Lock()
 					conn.Chunk.Downloaded += int64(n)
 					conn.Downloaded += int64(n)
+					f.connMu.Unlock()
 				}
 				if err != nil {
 					if err == io.EOF {
@@ -1329,7 +1408,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				}
 				return
 			}
+			f.connMu.Lock()
 			conn.retryTimes++
+			f.connMu.Unlock()
 			countedRetries++
 			if countedRetries >= 3 {
 				f.connMu.Lock()
@@ -1663,19 +1744,13 @@ func (f *Fetcher) Pause() error {
 	if f.cancel != nil {
 		f.cancel()
 	}
+	f.resolveCancelMu.Lock()
 	if f.resolveCancel != nil {
 		f.resolveCancel()
 	}
+	f.resolveCancelMu.Unlock()
 
-	// Stop prefetch if running
-	if f.prefetchStopCh != nil {
-		select {
-		case <-f.prefetchStopCh:
-			// Already closed
-		default:
-			close(f.prefetchStopCh)
-		}
-	}
+	f.stopPrefetch()
 
 	// Wait for downloadLoop to exit first (it will call wg.Wait internally)
 	if f.downloadLoopDone != nil {
@@ -1684,11 +1759,6 @@ func (f *Fetcher) Pause() error {
 
 	// Wait for all connection goroutines to stop
 	f.wg.Wait()
-
-	// Wait for prefetch to finish
-	for f.prefetchStopCh != nil && !f.prefetchDone.Load() {
-		time.Sleep(10 * time.Millisecond)
-	}
 
 	// Clean up prefetch file
 	f.cleanupPrefetchFile()
@@ -1739,6 +1809,8 @@ func (f *Fetcher) Stats() any {
 }
 
 func (f *Fetcher) Progress() fetcher.Progress {
+	f.connMu.Lock()
+	defer f.connMu.Unlock()
 	p := make(fetcher.Progress, 0)
 
 	total := int64(0)
@@ -1746,11 +1818,9 @@ func (f *Fetcher) Progress() fetcher.Progress {
 		total += f.resolveConn.Downloaded
 	}
 
-	f.connMu.Lock()
 	for _, conn := range f.connections {
 		total += conn.Downloaded
 	}
-	f.connMu.Unlock()
 
 	p = append(p, total)
 	return p

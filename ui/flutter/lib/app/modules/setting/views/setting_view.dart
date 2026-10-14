@@ -4,13 +4,15 @@ import 'dart:io';
 import 'package:badges/badges.dart' as badges;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:gopeed/app/views/copy_button.dart';
 import 'package:intl/intl.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
+import 'package:gopeed/macos/mac_panel.dart';
 
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/downloader_config.dart';
@@ -31,6 +33,7 @@ import '../../../views/open_in_new.dart';
 import '../../../views/outlined_button_loading.dart';
 import '../../../views/text_button_loading.dart';
 import '../../app/controllers/app_controller.dart';
+import '../../extension/views/extension_view.dart';
 import '../controllers/setting_controller.dart';
 
 const _padding = SizedBox(height: 10);
@@ -101,6 +104,7 @@ class SettingView extends GetView<SettingController> {
         showAndoirdToggle: true,
         allowEdit: true,
         showPlaceholderButton: true,
+        inlineActions: Util.isMacos(),
         onEditComplete: onEditComplete,
       );
     });
@@ -282,7 +286,7 @@ class SettingView extends GetView<SettingController> {
       final categories = downloaderCfg.value.extra.downloadCategories
           .where((c) => !c.isDeleted) // Filter out deleted categories
           .toList();
-      return ListTile(
+      final tile = ListTile(
         title: Text('downloadCategories'.tr),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -402,9 +406,32 @@ class SettingView extends GetView<SettingController> {
           ],
         ),
       );
+      if (Util.isMacos()) {
+        return ExpansionTile(
+          key: const PageStorageKey('mac-download-categories'),
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+          childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+          maintainState: true,
+          shape: const Border(),
+          collapsedShape: const Border(),
+          title: Text('downloadCategories'.tr,
+              style: const TextStyle(fontSize: 13)),
+          children: [tile.subtitle!],
+        );
+      }
+      return tile;
     }
 
     buildBrowserExtension() {
+      if (Util.isMacos()) {
+        return const ListTile(
+          title: Text('网页助手'),
+          subtitle: OpenInNew(
+              text: 'Chrome / Edge · 安装与使用',
+              url:
+                  'https://github.com/kbwumin13-sudo/kownload/tree/main/browser-media-extension'),
+        );
+      }
       return ListTile(
           title: Text('browserExtension'.tr),
           subtitle: const Row(
@@ -458,45 +485,14 @@ class SettingView extends GetView<SettingController> {
             );
           });
 
-    // Menubar mode only for macOS
+    // The launcher always remains available from the menu bar.
     final buildMenubarMode = !Util.isMacos()
         ? () => null
-        : _buildConfigItem('runAsMenubarApp', () {
-            return Database.instance.getRunAsMenubarApp() ? 'on'.tr : 'off'.tr;
-          }, (Key key) {
-            return Container(
-              alignment: Alignment.centerLeft,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Switch(
-                    value: Database.instance.getRunAsMenubarApp(),
-                    onChanged: (bool value) async {
-                      // Save to database (single source of truth)
-                      Database.instance.saveRunAsMenubarApp(value);
-                      // Apply dock icon visibility
-                      await windowManager.setSkipTaskbar(value);
-                      // Small delay to let macOS process the activation policy change
-                      await Future.delayed(const Duration(milliseconds: 100));
-                      // Ensure window stays visible after toggle
-                      await windowManager.show();
-                      await windowManager.focus();
-                      // Force UI refresh
-                      controller.clearTap();
-                      await debounceSave();
-                    },
-                  ),
-                  Text(
-                    'runAsMenubarAppDesc'.tr,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).hintColor,
-                    ),
-                  ),
-                ],
-              ),
+        : () => const ListTile(
+              title: Text('菜单栏入口'),
+              subtitle: Text('kownload 常驻菜单栏。点击图标或使用全局快捷键打开轻面板，添加下载或进入设置。'),
+              trailing: Switch.adaptive(value: true, onChanged: null),
             );
-          });
 
     final buildDesktopNotification = !Util.isDesktop()
         ? () => null
@@ -520,6 +516,72 @@ class SettingView extends GetView<SettingController> {
               ),
             );
           });
+
+    final mediaConfig = downloaderCfg.value.protocolConfig.media;
+    final chinese = Get.locale?.languageCode == 'zh';
+    final buildYtDlpPath = _buildConfigItem(
+        chinese ? '视频解析工具路径' : 'Video resolver path',
+        () => mediaConfig.ytDlpPath, (Key key) {
+      return TextField(
+        key: key,
+        controller: TextEditingController(text: mediaConfig.ytDlpPath),
+        decoration: const InputDecoration(hintText: 'yt-dlp'),
+        onChanged: (value) {
+          mediaConfig.ytDlpPath = value.trim();
+          debounceSave();
+        },
+      );
+    });
+    final buildFfmpegPath = _buildConfigItem(
+        chinese ? '音视频合并工具路径' : 'Media merger path',
+        () => mediaConfig.ffmpegPath, (Key key) {
+      return TextField(
+        key: key,
+        controller: TextEditingController(text: mediaConfig.ffmpegPath),
+        decoration: const InputDecoration(hintText: 'ffmpeg'),
+        onChanged: (value) {
+          mediaConfig.ffmpegPath = value.trim();
+          debounceSave();
+        },
+      );
+    });
+    final buildJsRuntimePath = _buildConfigItem(
+        chinese ? 'JavaScript 运行工具路径' : 'JavaScript runtime path',
+        () => mediaConfig.jsRuntimePath ?? '', (Key key) {
+      return TextField(
+        key: key,
+        controller:
+            TextEditingController(text: mediaConfig.jsRuntimePath ?? ''),
+        decoration: InputDecoration(
+            hintText: chinese ? '默认 Node 路径' : 'Default Node path'),
+        onChanged: (value) {
+          mediaConfig.jsRuntimePath =
+              value.trim().isEmpty ? null : value.trim();
+          debounceSave();
+        },
+      );
+    });
+    final buildMediaConnections = _buildConfigItem(
+        chinese ? '分片并发数' : 'Concurrent fragments',
+        () => mediaConfig.connections.toString(), (Key key) {
+      return TextField(
+        key: key,
+        controller:
+            TextEditingController(text: mediaConfig.connections.toString()),
+        keyboardType: TextInputType.number,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          NumericalRangeFormatter(min: 1, max: 16)
+        ],
+        onChanged: (value) {
+          final number = int.tryParse(value);
+          if (number != null) {
+            mediaConfig.connections = number;
+            debounceSave();
+          }
+        },
+      );
+    });
 
     // http config items start
     final httpConfig = downloaderCfg.value.protocolConfig.http;
@@ -970,7 +1032,7 @@ class SettingView extends GetView<SettingController> {
 
     // about config items start
     buildHomepage() {
-      const homePage = 'https://gopeed.com';
+      const homePage = 'https://github.com/kbwumin13-sudo/kownload';
       return ListTile(
         title: Text('homepage'.tr),
         subtitle: const Text(homePage),
@@ -1021,13 +1083,17 @@ class SettingView extends GetView<SettingController> {
       return ListTile(
         title: Text('analyticsEnabled'.tr),
         subtitle: Text('analyticsEnabledDesc'.tr),
-        trailing: Obx(() => Switch(
-              value: analyticsEnabled.value,
-              onChanged: (bool value) {
-                analyticsEnabled.value = value;
-                Database.instance.saveAnalyticsEnabled(value);
-              },
-            )),
+        trailing: Obx(() {
+          void onChanged(bool value) {
+            analyticsEnabled.value = value;
+            Database.instance.saveAnalyticsEnabled(value);
+          }
+
+          return Util.isMacos()
+              ? Switch.adaptive(
+                  value: analyticsEnabled.value, onChanged: onChanged)
+              : Switch(value: analyticsEnabled.value, onChanged: onChanged);
+        }),
       );
     }
 
@@ -1700,6 +1766,159 @@ class SettingView extends GetView<SettingController> {
           ));
     }
 
+    if (Util.isMacos()) {
+      return ValueListenableBuilder<String>(
+        valueListenable: MacPanel.settingsSection,
+        builder: (context, section, _) => Obx(() => Scaffold(
+              body: MacPage(
+                title: const {
+                      'general': '通用',
+                      'download': '下载',
+                      'connections': '连接与能力',
+                      'advanced': '高级',
+                    }[section] ??
+                    '通用',
+                child: ListTileTheme(
+                  dense: true,
+                  minVerticalPadding: 5,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
+                  child: Center(
+                      child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 900),
+                    child: ListView(
+                      key: ValueKey('mac-settings-$section'),
+                      padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
+                      children: [
+                        if (section == 'general' ||
+                            !const {
+                              'download',
+                              'connections',
+                              'advanced',
+                            }.contains(section)) ...[
+                          _macGroup(context, '通用', CupertinoIcons.gear, [
+                            buildAutoStartup(),
+                            buildMenubarMode(),
+                            const MacHotKeyEditor(),
+                            buildDesktopNotification(),
+                          ]),
+                          _macGroup(
+                              context, 'ui'.tr, CupertinoIcons.paintbrush, [
+                            buildTheme(),
+                            buildLocale(),
+                          ]),
+                          _macGroup(
+                              context, 'about'.tr, CupertinoIcons.info_circle, [
+                            buildHomepage(),
+                            buildVersion(),
+                            buildAutoCheckUpdate(),
+                            if (Config.isConfigured) buildAnalyticsEnabled(),
+                            buildThanks(),
+                          ]),
+                        ],
+                        if (section == 'download') ...[
+                          _macGroup(
+                              context, '下载', CupertinoIcons.arrow_down_circle, [
+                            buildDownloadDir(),
+                            buildDownloadCategories(),
+                            buildMaxRunning(),
+                            buildDefaultDirectDownload(),
+                            buildAutoStartTasks(),
+                            buildAutoTorrentEnable(),
+                            if (downloaderCfg.value.autoTorrent.enable)
+                              buildAutoTorrentDeleteAfterDownload(),
+                            buildAutoDeleteMissingFileTasks(),
+                          ]),
+                          _macGroup(context, 'archives'.tr,
+                              CupertinoIcons.archivebox, [
+                            buildAutoExtract(),
+                            if (downloaderCfg.value.archive.autoExtract)
+                              buildDeleteAfterExtract(),
+                          ]),
+                          _macGroup(context, 'HTTP', CupertinoIcons.globe, [
+                            buildHttpUa(),
+                            buildHttpConnections(),
+                            buildHttpUseServerCtime(),
+                          ]),
+                          _macGroup(
+                              context,
+                              chinese ? '媒体下载' : 'Media downloads',
+                              CupertinoIcons.film, [
+                            buildYtDlpPath(),
+                            buildFfmpegPath(),
+                            buildJsRuntimePath(),
+                            buildMediaConnections(),
+                          ]),
+                          _macGroup(context, 'BitTorrent',
+                              CupertinoIcons.arrow_down_circle, [
+                            buildBtListenPort(),
+                            buildBtTrackerSubscribeUrls(),
+                            buildBtTrackers(),
+                            buildBtSeedConfig(),
+                            buildBtDefaultClientConfig(),
+                          ]),
+                          _macGroup(context, 'ed2k'.tr, CupertinoIcons.link, [
+                            buildEd2kListenPort(),
+                            buildEd2kUdpPort(),
+                            buildEd2kServerAddr(),
+                            buildEd2kServerMet(),
+                            buildEd2kNodesDat(),
+                          ]),
+                        ],
+                        if (section == 'connections') ...[
+                          _macGroup(context, '浏览器与网盘', CupertinoIcons.globe, [
+                            buildBrowserExtension(),
+                            const ListTile(
+                              title: Text('网盘下载'),
+                              subtitle:
+                                  Text('使用已安装的浏览器助手发送网页勾选文件，或在轻面板粘贴网盘分享链接。'),
+                              trailing: MacButton(
+                                  onPressed: MacPanel.showPanel,
+                                  child: Text('打开轻面板')),
+                            ),
+                          ]),
+                          _macGroup(
+                              context, 'network'.tr, CupertinoIcons.globe, [
+                            buildProxy(),
+                            buildGithubMirror(),
+                          ]),
+                          const ExtensionView(embedded: true),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: MacButton(
+                                onPressed: () =>
+                                    MacPanel.showSettings(section: 'advanced'),
+                                child: const Text('扩展安装与维护…'),
+                              ),
+                            ),
+                          ),
+                        ],
+                        if (section == 'advanced') ...[
+                          const _MacExtensionMaintenance(),
+                          _macGroup(
+                              context, 'API', CupertinoIcons.chevron_left, [
+                            buildApiProtocol(),
+                            if (startCfg.value.network == 'tcp')
+                              buildApiToken(),
+                          ]),
+                          _macGroup(
+                              context, 'developer'.tr, CupertinoIcons.gear, [
+                            buildWebhook(),
+                            buildScript(),
+                            buildLogsDir(),
+                          ]),
+                        ],
+                      ],
+                    ),
+                  )),
+                ),
+              ),
+            )),
+      );
+    }
+
     return Obx(() {
       return GestureDetector(
         onTap: () {
@@ -1771,6 +1990,15 @@ class SettingView extends GetView<SettingController> {
                             buildHttpUseServerCtime(),
                           ]),
                         )),
+                        Text(chinese ? '媒体下载' : 'Media downloads'),
+                        Card(
+                            child: Column(
+                                children: _addDivider([
+                          buildYtDlpPath(),
+                          buildFfmpegPath(),
+                          buildJsRuntimePath(),
+                          buildMediaConnections(),
+                        ]))),
                         const Text('BitTorrent'),
                         Card(
                             child: Column(
@@ -1868,6 +2096,38 @@ class SettingView extends GetView<SettingController> {
         ),
       );
     });
+  }
+
+  Widget _macGroup(
+      BuildContext context, String title, IconData icon, List<Widget?> items) {
+    final colors = MacColors.of(context);
+    final visible = items.whereType<Widget>().toList();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: ExpansionTile(
+        key: PageStorageKey(title),
+        initiallyExpanded: true,
+        maintainState: true,
+        tilePadding: const EdgeInsets.symmetric(horizontal: 3),
+        childrenPadding: EdgeInsets.zero,
+        shape: const Border(),
+        collapsedShape: const Border(),
+        leading: Icon(icon, size: 14, color: colors.secondary),
+        title: Text(title,
+            style: TextStyle(
+                color: colors.secondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600)),
+        children: [
+          for (var i = 0; i < visible.length; i++) ...[
+            visible[i],
+            if (i != visible.length - 1)
+              Divider(
+                  height: 1, indent: 14, endIndent: 14, color: colors.border),
+          ],
+        ],
+      ),
+    );
   }
 
   void _showWebhookDialog({int? index, String? initialUrl}) {
@@ -2236,15 +2496,132 @@ class SettingView extends GetView<SettingController> {
       String label, String Function() text, Widget Function(Key key) input) {
     final tapStatues = controller.tapStatues;
     final inputKey = GlobalKey();
-    return () => ListTile(
-        title: Text(label.tr),
-        subtitle: tapStatues[label] ?? false ? input(inputKey) : Text(text()),
-        onTap: () {
-          controller.onTap(label);
-          WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
-            _tapInputWidget(inputKey);
-          });
-        });
+    Widget? retainedMacInput;
+    void open() {
+      controller.onTap(label);
+      WidgetsBinding.instance.addPostFrameCallback((timeStamp) {
+        _tapInputWidget(inputKey);
+      });
+    }
+
+    return () {
+      if (Util.isMacos()) {
+        final editing = tapStatues[label] ?? false;
+        final colors = MacColors.of(Get.context!);
+        final complex = const {
+          'subscribeTracker',
+          'addTracker',
+          'seedConfig',
+          'proxy',
+          'githubMirror',
+          'protocol',
+          'webhook',
+          'script',
+        }.contains(label);
+        final editor = complex ? null : retainedMacInput ?? input(inputKey);
+        if (!complex) {
+          if (editor is TextField || editor is DirectorySelector) {
+            // Keep the controller and focus node while an Rx save rebuilds this row.
+            retainedMacInput = editor;
+          }
+          final switchWidget = editor is Container && editor.child is Switch
+              ? editor.child as Switch
+              : editor is Switch
+                  ? editor
+                  : null;
+          final dropdown = editor is DropdownButton<String> ? editor : null;
+          final Widget inlineEditor;
+          if (switchWidget != null) {
+            inlineEditor = Switch.adaptive(
+              value: switchWidget.value,
+              onChanged: switchWidget.onChanged,
+            );
+          } else if (dropdown != null) {
+            inlineEditor = Container(
+              width: 200,
+              constraints: const BoxConstraints(minHeight: 32),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                color: colors.surface,
+                border: Border.all(color: colors.border),
+                borderRadius: BorderRadius.circular(7),
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  key: dropdown.key,
+                  value: dropdown.value,
+                  onChanged: dropdown.onChanged,
+                  items: dropdown.items,
+                  isDense: true,
+                  isExpanded: true,
+                  style: TextStyle(color: colors.text, fontSize: 13),
+                ),
+              ),
+            );
+          } else if (editor is TextField) {
+            inlineEditor = ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth:
+                    editor.keyboardType == TextInputType.number ? 80 : 360,
+              ),
+              child: editor,
+            );
+          } else {
+            inlineEditor = editor!;
+          }
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(children: [
+              Expanded(
+                  flex: 2,
+                  child: Text(label.tr,
+                      style: TextStyle(color: colors.text, fontSize: 13))),
+              const SizedBox(width: 12),
+              Expanded(
+                  flex: 3,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: inlineEditor,
+                  )),
+            ]),
+          );
+        }
+        return InkWell(
+          onTap: open,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            child: Column(children: [
+              Row(children: [
+                Expanded(
+                    flex: 2,
+                    child: Text(label.tr,
+                        style: TextStyle(color: colors.text, fontSize: 13))),
+                Expanded(
+                    flex: 3,
+                    child: Text(editing ? '' : text(),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
+                        style:
+                            TextStyle(color: colors.secondary, fontSize: 12))),
+                const SizedBox(width: 7),
+                Icon(CupertinoIcons.chevron_right,
+                    size: 10, color: colors.secondary),
+              ]),
+              if (editing)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: input(inputKey),
+                ),
+            ]),
+          ),
+        );
+      }
+      return ListTile(
+          title: Text(label.tr),
+          subtitle: tapStatues[label] ?? false ? input(inputKey) : Text(text()),
+          onTap: open);
+    };
   }
 
   List<Widget> _addPadding(List<Widget> widgets) {
@@ -2360,6 +2737,295 @@ class SettingView extends GetView<SettingController> {
       ),
     );
   }
+}
+
+class _MacExtensionMaintenance extends StatefulWidget {
+  const _MacExtensionMaintenance();
+  @override
+  State<_MacExtensionMaintenance> createState() =>
+      _MacExtensionMaintenanceState();
+}
+
+class _MacExtensionMaintenanceState extends State<_MacExtensionMaintenance> {
+  bool _expanded = false;
+  @override
+  Widget build(BuildContext context) => ExpansionTile(
+        title: const Text('扩展安装与维护'),
+        subtitle: const Text('按需安装、检查更新、删除扩展或进入开发工具。'),
+        initiallyExpanded: false,
+        onExpansionChanged: (value) => setState(() => _expanded = value),
+        childrenPadding: const EdgeInsets.only(bottom: 12),
+        children: [
+          if (_expanded)
+            const ExtensionView(
+                embedded: true, mode: ExtensionViewMode.maintenance),
+        ],
+      );
+}
+
+/// Carbon uses virtual key codes, so derive them from the physical key rather
+/// than the user's input layout or the character produced by Shift/Option.
+class MacHotKeyChord {
+  final int keyCode;
+  final int modifiers;
+  final String label;
+  const MacHotKeyChord(this.keyCode, this.modifiers, this.label);
+
+  // USB HID usages -> Carbon virtual key codes (ANSI letters/punctuation,
+  // numbers, navigation, function keys and the numeric keypad).
+  static const _carbonKeys = <int, int>{
+    0x04: 0,
+    0x05: 11,
+    0x06: 8,
+    0x07: 2,
+    0x08: 14,
+    0x09: 3,
+    0x0a: 5,
+    0x0b: 4,
+    0x0c: 34,
+    0x0d: 38,
+    0x0e: 40,
+    0x0f: 37,
+    0x10: 46,
+    0x11: 45,
+    0x12: 31,
+    0x13: 35,
+    0x14: 12,
+    0x15: 15,
+    0x16: 1,
+    0x17: 17,
+    0x18: 32,
+    0x19: 9,
+    0x1a: 13,
+    0x1b: 7,
+    0x1c: 16,
+    0x1d: 6,
+    0x1e: 18,
+    0x1f: 19,
+    0x20: 20,
+    0x21: 21,
+    0x22: 23,
+    0x23: 22,
+    0x24: 26,
+    0x25: 28,
+    0x26: 25,
+    0x27: 29,
+    0x28: 36,
+    0x29: 53,
+    0x2a: 51,
+    0x2b: 48,
+    0x2c: 49,
+    0x2d: 27,
+    0x2e: 24,
+    0x2f: 33,
+    0x30: 30,
+    0x31: 42,
+    0x33: 41,
+    0x34: 39,
+    0x35: 50,
+    0x36: 43,
+    0x37: 47,
+    0x38: 44,
+    0x3a: 122,
+    0x3b: 120,
+    0x3c: 99,
+    0x3d: 118,
+    0x3e: 96,
+    0x3f: 97,
+    0x40: 98,
+    0x41: 100,
+    0x42: 101,
+    0x43: 109,
+    0x44: 103,
+    0x45: 111,
+    0x49: 114,
+    0x4a: 115,
+    0x4b: 116,
+    0x4c: 117,
+    0x4d: 119,
+    0x4e: 121,
+    0x4f: 124,
+    0x50: 123,
+    0x51: 125,
+    0x52: 126,
+    0x53: 71,
+    0x54: 75,
+    0x55: 67,
+    0x56: 78,
+    0x57: 69,
+    0x58: 76,
+    0x59: 83,
+    0x5a: 84,
+    0x5b: 85,
+    0x5c: 86,
+    0x5d: 87,
+    0x5e: 88,
+    0x5f: 89,
+    0x60: 91,
+    0x61: 92,
+    0x62: 82,
+    0x63: 65,
+    0x67: 81,
+    0x68: 105,
+    0x69: 107,
+    0x6a: 113,
+    0x6b: 106,
+    0x6c: 64,
+    0x6d: 79,
+    0x6e: 80,
+    0x6f: 90,
+    0x87: 94,
+    0x89: 93,
+  };
+
+  static MacHotKeyChord? fromPhysicalKey(
+    PhysicalKeyboardKey key, {
+    bool control = false,
+    bool option = false,
+    bool command = false,
+    bool shift = false,
+  }) {
+    if (key.usbHidUsage >> 16 != 0x07) return null;
+    final code = _carbonKeys[key.usbHidUsage & 0xffff];
+    final modifiers = (command ? 1 << 8 : 0) |
+        (shift ? 1 << 9 : 0) |
+        (option ? 1 << 11 : 0) |
+        (control ? 1 << 12 : 0);
+    if (code == null || modifiers == 0) return null;
+    final name = (key.debugName ?? 'Key')
+        .replaceFirst('Key ', '')
+        .replaceFirst('Digit ', '')
+        .replaceFirst('Arrow ', '');
+    return MacHotKeyChord(code, modifiers,
+        '${control ? '⌃' : ''}${option ? '⌥' : ''}${shift ? '⇧' : ''}${command ? '⌘' : ''}$name');
+  }
+}
+
+class MacHotKeyEditor extends StatelessWidget {
+  const MacHotKeyEditor({super.key});
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<String>(
+        valueListenable: MacPanel.hotKeyLabel,
+        builder: (context, label, _) => ValueListenableBuilder<String?>(
+          valueListenable: MacPanel.hotKeyError,
+          builder: (context, error, _) => ListTile(
+            title: const Text('全局快捷键'),
+            subtitle: Text(
+                error ??
+                    '唤起 kownload 轻面板；可组合 Control、Option、Command、Shift 与一个按键。',
+                style: error == null
+                    ? null
+                    : TextStyle(color: Theme.of(context).colorScheme.error)),
+            trailing: MacButton(
+              onPressed: () => MacPanel.transient(() => showDialog<void>(
+                    context: context,
+                    builder: (_) => const _MacHotKeyRecorder(),
+                  )),
+              child: Text(label),
+            ),
+          ),
+        ),
+      );
+}
+
+class _MacHotKeyRecorder extends StatefulWidget {
+  const _MacHotKeyRecorder();
+  @override
+  State<_MacHotKeyRecorder> createState() => _MacHotKeyRecorderState();
+}
+
+class _MacHotKeyRecorderState extends State<_MacHotKeyRecorder> {
+  MacHotKeyChord? _chord;
+  String? _error;
+  bool _saving = false;
+
+  Future<void> _save() async {
+    final chord = _chord;
+    if (chord == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final success = await MacPanel.changeHotKey(
+          keyCode: chord.keyCode,
+          modifiers: chord.modifiers,
+          label: chord.label);
+      if (!mounted) return;
+      if (success) {
+        Navigator.of(context).pop();
+      } else {
+        setState(() => _error = MacPanel.hotKeyError.value);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = '快捷键无法注册，请重试或更换组合。');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('录制全局快捷键'),
+        content: Focus(
+          autofocus: true,
+          onKeyEvent: (_, event) {
+            if (event is! KeyDownEvent) return KeyEventResult.handled;
+            if (event.logicalKey == LogicalKeyboardKey.escape) {
+              if (!_saving) Navigator.of(context).pop();
+              return KeyEventResult.handled;
+            }
+            if (_saving) return KeyEventResult.handled;
+            if (const [
+              LogicalKeyboardKey.controlLeft,
+              LogicalKeyboardKey.controlRight,
+              LogicalKeyboardKey.altLeft,
+              LogicalKeyboardKey.altRight,
+              LogicalKeyboardKey.metaLeft,
+              LogicalKeyboardKey.metaRight,
+              LogicalKeyboardKey.shiftLeft,
+              LogicalKeyboardKey.shiftRight,
+            ].contains(event.logicalKey)) {
+              return KeyEventResult.handled;
+            }
+            final keyboard = HardwareKeyboard.instance;
+            final chord = MacHotKeyChord.fromPhysicalKey(event.physicalKey,
+                control: keyboard.isControlPressed,
+                option: keyboard.isAltPressed,
+                command: keyboard.isMetaPressed,
+                shift: keyboard.isShiftPressed);
+            setState(() {
+              _chord = chord;
+              _error = chord == null ? '请按至少一个修饰键与受支持的实体按键。' : null;
+            });
+            return KeyEventResult.handled;
+          },
+          child: SizedBox(
+              width: 360,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('按下快捷键组合，点击保存。Esc 取消。'),
+                  const SizedBox(height: 16),
+                  Text(_chord?.label ?? '等待按键…',
+                      style: const TextStyle(fontSize: 22)),
+                  if (_error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(_error!,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error)),
+                    ),
+                ],
+              )),
+        ),
+        actions: [
+          TextButton(
+              onPressed: _saving ? null : () => Navigator.of(context).pop(),
+              child: const Text('取消')),
+          TextButton(
+              onPressed: _chord == null || _saving ? null : _save,
+              child: Text(_saving ? '保存中…' : '保存')),
+        ],
+      );
 }
 
 enum ProxyModeEnum {

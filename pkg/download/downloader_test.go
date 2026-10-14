@@ -1887,7 +1887,9 @@ func TestDownloader_CheckAllMultiPartTasksDone(t *testing.T) {
 	}
 	initTask(task2)
 
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{task1, task2}
+	downloader.lock.Unlock()
 
 	// All tasks are done
 	basePath := filepath.Join(tempDir, baseName)
@@ -1897,7 +1899,7 @@ func TestDownloader_CheckAllMultiPartTasksDone(t *testing.T) {
 	}
 
 	// Set task2 to running
-	task2.Status = base.DownloadStatusRunning
+	task2.updateStatus(base.DownloadStatusRunning)
 	allDone, missing = downloader.checkAllMultiPartTasksDone(basePath)
 	if allDone {
 		t.Error("checkAllMultiPartTasksDone() = true, want false")
@@ -1968,7 +1970,9 @@ func TestDownloader_TryClaimMultiPartExtraction(t *testing.T) {
 	}
 	initTask(task2)
 
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{task1, task2}
+	downloader.lock.Unlock()
 
 	// Task1 should be able to claim extraction (no one has claimed yet)
 	if !downloader.tryClaimMultiPartExtraction(task1, fullBaseName) {
@@ -2177,7 +2181,9 @@ func TestDownloader_UpdateMultiPartTasksStatus(t *testing.T) {
 	}
 	initTask(unrelatedTask)
 
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{sourceTask, relatedTask, unrelatedTask}
+	downloader.lock.Unlock()
 
 	// Test successful extraction
 	downloader.updateMultiPartTasksStatus(sourceTask, nil)
@@ -2232,7 +2238,9 @@ func TestDownloader_UpdateMultiPartTasksStatus_WithError(t *testing.T) {
 	}
 	initTask(relatedTask)
 
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{sourceTask, relatedTask}
+	downloader.lock.Unlock()
 
 	// Test failed extraction
 	downloader.updateMultiPartTasksStatus(sourceTask, fmt.Errorf("extraction failed"))
@@ -2271,7 +2279,9 @@ func TestDownloader_UpdateMultiPartTasksStatus_NoBaseName(t *testing.T) {
 	}
 	initTask(task)
 
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{task}
+	downloader.lock.Unlock()
 
 	// Should not panic or error
 	downloader.updateMultiPartTasksStatus(task, nil)
@@ -2307,7 +2317,9 @@ func TestDownloader_CheckMultiPartArchiveReady(t *testing.T) {
 		Progress: &Progress{},
 	}
 	initTask(task)
+	downloader.lock.Lock()
 	downloader.tasks = []*Task{task}
+	downloader.lock.Unlock()
 
 	partInfo := getArchivePartInfo(filePath)
 	ready, missing := downloader.checkMultiPartArchiveReady(filePath, tempDir, partInfo)

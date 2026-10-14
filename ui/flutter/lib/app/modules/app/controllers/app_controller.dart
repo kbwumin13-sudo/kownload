@@ -17,7 +17,6 @@ import 'package:uri_to_file/uri_to_file.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
-
 import '../../../../api/api.dart';
 import '../../../../api/model/create_task.dart';
 import '../../../../api/model/downloader_config.dart';
@@ -40,6 +39,7 @@ import '../../../routes/app_pages.dart';
 import '../../../rpc/rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
+import '../../../../macos/mac_panel.dart';
 
 const unixSocketPath = 'gopeed.sock';
 
@@ -98,7 +98,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
     _initWindows().onError((error, stackTrace) =>
         logger.w("initWindows error", error, stackTrace));
-        
+
     if (Util.isDesktop()) {
       Get.put(NotificationService());
     }
@@ -106,8 +106,10 @@ class AppController extends GetxController with WindowListener, TrayListener {
     _initTray().onError(
         (error, stackTrace) => logger.w("initTray error", error, stackTrace));
 
-    _initRpcServer().onError((error, stackTrace) =>
-        logger.w("initRpcServer error", error, stackTrace));
+    if (!Util.isIsolatedPreview) {
+      _initRpcServer().onError((error, stackTrace) =>
+          logger.w("initRpcServer error", error, stackTrace));
+    }
 
     _initForegroundTask().onError((error, stackTrace) =>
         logger.w("initForegroundTask error", error, stackTrace));
@@ -115,11 +117,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
     _initTrackerUpdate().onError((error, stackTrace) =>
         logger.w("initTrackerUpdate error", error, stackTrace));
 
-    _initLaunchAtStartup().onError((error, stackTrace) =>
-        logger.w("initLaunchAtStartup error", error, stackTrace));
-
-    _initCheckUpdate().onError((error, stackTrace) =>
-        logger.w("initCheckUpdate error", error, stackTrace));
+    if (!Util.isIsolatedPreview) {
+      _initLaunchAtStartup().onError((error, stackTrace) =>
+          logger.w("initLaunchAtStartup error", error, stackTrace));
+      _initCheckUpdate().onError((error, stackTrace) =>
+          logger.w("initCheckUpdate error", error, stackTrace));
+    }
   }
 
   @override
@@ -133,22 +136,27 @@ class AppController extends GetxController with WindowListener, TrayListener {
   void onWindowClose() async {
     final isPreventClose = await windowManager.isPreventClose();
     if (isPreventClose) {
-      windowManager.hide();
+      if (Util.isMacos()) {
+        MacPanel.hide();
+      } else {
+        windowManager.hide();
+      }
     }
   }
 
   // According to the system_manager document, make sure to call setState once on the onWindowFocus event.
   @override
   void onWindowFocus() {
-    refresh();
-    if (Util.isMacos() && Database.instance.getRunAsMenubarApp()) {
-      windowManager.setSkipTaskbar(true);
-    }
+    if (!Util.isMacos()) refresh();
   }
 
   @override
   void onTrayIconMouseDown() {
-    windowManager.show();
+    if (Util.isMacos()) {
+      MacPanel.toggle();
+    } else {
+      windowManager.show();
+    }
   }
 
   @override
@@ -174,7 +182,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
   @override
   void onWindowResize() {
-    _windowsResizeSave();
+    if (!Util.isMacos() || MacPanel.presentation.value == 'settings') {
+      _windowsResizeSave();
+    }
   }
 
   Future<void> _initDeepLinks() async {
@@ -209,8 +219,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
     // Show window if not hidden (desktop only)
     if (Util.isDesktop() && !shouldHide) {
-      await windowManager.show();
-      await windowManager.focus();
+      if (Util.isMacos()) {
+        await MacPanel.showPanel();
+      } else {
+        await windowManager.show();
+        await windowManager.focus();
+      }
     }
 
     // Handle initial link for deep link navigation
@@ -267,15 +281,22 @@ class AppController extends GetxController with WindowListener, TrayListener {
       MenuItem(
         label: "show".tr,
         onClick: (menuItem) async => {
-          await windowManager.show(),
+          if (Util.isMacos())
+            await MacPanel.showPanel()
+          else
+            await windowManager.show(),
         },
       ),
       MenuItem.separator(),
       MenuItem(
         label: "create".tr,
         onClick: (menuItem) async => {
-          await windowManager.show(),
-          await Get.rootDelegate.offAndToNamed(Routes.CREATE),
+          if (Util.isMacos())
+            await MacPanel.showPanel()
+          else ...[
+            await windowManager.show(),
+            await Get.rootDelegate.offAndToNamed(Routes.CREATE)
+          ],
         },
       ),
       MenuItem(
@@ -289,8 +310,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
       MenuItem(
         label: 'setting'.tr,
         onClick: (menuItem) async => {
-          await windowManager.show(),
-          await Get.rootDelegate.offAndToNamed(Routes.SETTING),
+          if (Util.isMacos())
+            await MacPanel.showSettings()
+          else ...[
+            await windowManager.show(),
+            await Get.rootDelegate.offAndToNamed(Routes.SETTING)
+          ],
         },
       ),
       MenuItem.separator(),
@@ -433,7 +458,11 @@ class AppController extends GetxController with WindowListener, TrayListener {
           _handleToCreate(params!);
           return;
         }
-        Get.rootDelegate.offAndToNamed(Routes.CREATE);
+        if (Util.isMacos()) {
+          await MacPanel.showPanel();
+        } else {
+          Get.rootDelegate.offAndToNamed(Routes.CREATE);
+        }
         return;
       }
       // gopeed:///extension?params=eyJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vbW9ua2V5V2llL2dvcGVlZC1leHRlbnNpb24tYmlsaWJpbGkiLCJkZXZNb2RlIjpmYWxzZX0=
@@ -443,7 +472,11 @@ class AppController extends GetxController with WindowListener, TrayListener {
           _handleToExtension(params!);
           return;
         }
-        Get.rootDelegate.offAndToNamed(Routes.EXTENSION);
+        if (Util.isMacos()) {
+          await MacPanel.showSettings(section: 'advanced');
+        } else {
+          Get.rootDelegate.offAndToNamed(Routes.EXTENSION);
+        }
         return;
       }
       Get.rootDelegate.offAndToNamed(Routes.HOME);
@@ -461,9 +494,13 @@ class AppController extends GetxController with WindowListener, TrayListener {
     } else {
       path = (await toFile(uri.toString())).path;
     }
-    Get.rootDelegate.offAndToNamed(Routes.REDIRECT,
-        arguments: RedirectArgs(Routes.CREATE,
-            arguments: CreateTask(req: Request(url: path))));
+    if (Util.isMacos()) {
+      await MacPanel.showPanel(task: CreateTask(req: Request(url: path)));
+    } else {
+      Get.rootDelegate.offAndToNamed(Routes.REDIRECT,
+          arguments: RedirectArgs(Routes.CREATE,
+              arguments: CreateTask(req: Request(url: path))));
+    }
   }
 
   String runningAddress() {
@@ -484,8 +521,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
       _defaultStartConfig!.address = "127.0.0.1:0";
     } else {
       _defaultStartConfig!.network = "unix";
-      _defaultStartConfig!.address =
-          "${(await getTemporaryDirectory()).path}/$unixSocketPath";
+      _defaultStartConfig!.address = Util.isIsolatedPreview
+          ? path.join(Util.getStorageDir(), unixSocketPath)
+          : "${(await getTemporaryDirectory()).path}/$unixSocketPath";
     }
     _defaultStartConfig!.apiToken = '';
     return _defaultStartConfig!;
@@ -580,7 +618,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
     final config = downloaderConfig.value;
     final extra = config.extra;
     if (extra.themeMode.isEmpty) {
-      extra.themeMode = ThemeMode.dark.name;
+      extra.themeMode =
+          Util.isMacos() ? ThemeMode.system.name : ThemeMode.dark.name;
     }
     if (extra.locale.isEmpty) {
       final systemLocale = getLocaleKey(PlatformDispatcher.instance.locale);
@@ -718,12 +757,22 @@ class AppController extends GetxController with WindowListener, TrayListener {
   }
 
   _handleToCreate0(CreateTask createTaskParams) {
+    if (Util.isMacos()) {
+      MacPanel.showPanel(task: createTaskParams);
+      return;
+    }
     Get.rootDelegate.offAndToNamed(Routes.REDIRECT,
         arguments: RedirectArgs(Routes.CREATE, arguments: createTaskParams));
   }
 
   _handleToExtension(String params) {
     final installExtension = InstallExtension.fromJson(_decodeParams(params));
+    if (Util.isMacos()) {
+      MacPanel.showSettings(section: 'advanced').then((_) {
+        Get.rootDelegate.toNamed(Routes.EXTENSION, arguments: installExtension);
+      });
+      return;
+    }
     Get.rootDelegate.offAndToNamed(Routes.REDIRECT,
         arguments: RedirectArgs(Routes.EXTENSION, arguments: installExtension));
   }

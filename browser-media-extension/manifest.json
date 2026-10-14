@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "kownload 下载助手",
+  "version": "0.4.0",
+  "description": "将选中的网盘文件与网页媒体交给 kownload 下载",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlCCU/HyM4Lv/d0TaB5Mh39aQoaqgXghQfxgEr1CwXR8KDqLFKTZxvmLywyTe8/uqHJwpBaRW9GeFWk17ZlDlzKdQSb1M9N1GNEbFypQRmt0jTHaP9OZr7G+SRfSyAay5YGD19Pk7yXR2h5SEAfb3vUwMO0mwcKT/xWWeGwyXelPvke/EhYOxcwRTSI8ge8IxkspdWQCyeY9FmAP9gVAOr/Lj0TLEomThfYmNxiQoITZGKqol4po5HMgA9nSmmOB07z41+0jlIBd7YHY/2O+uG+if8/n9gC6NzSpd84hcWDSFjmHOaBg+o9dWBmNdF1cEl5/g7tNibFlYOMpEOIe2lQIDAQAB",
+  "permissions": [
+    "webRequest",
+    "cookies",
+    "storage",
+    "tabs",
+    "webNavigation",
+    "nativeMessaging",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://pan.baidu.com/*", "*://yun.baidu.com/*",
+        "*://www.aliyundrive.com/*", "*://www.alipan.com/*",
+        "*://yun.139.com/*", "*://caiyun.139.com/*",
+        "*://cloud.189.cn/*", "*://pan.xunlei.com/*",
+        "*://pan.quark.cn/*", "*://drive.uc.cn/*",
+        "*://*.123pan.com/*", "*://*.123pan.cn/*",
+        "*://*.123684.com/*", "*://*.123865.com/*",
+        "*://*.123952.com/*", "*://*.123912.com/*",
+        "*://www.guangyapan.com/*"
+      ],
+      "js": ["netdisk-content.js"],
+      "all_frames": false,
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle",
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "action": {
+    "default_title": "kownload 下载助手",
+    "default_popup": "popup.html"
+  }
+}

@@ -30,3 +30,6 @@ cmd/web/dist/
 .test_storage/
 .test_download/
 /extensions
+# Python verification caches
+__pycache__/
+*.py[cod]

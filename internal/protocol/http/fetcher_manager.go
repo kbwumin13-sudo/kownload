@@ -75,8 +75,25 @@ func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	_f.redirectLock.Lock()
 	redirectURL := _f.redirectURL
 	_f.redirectLock.Unlock()
+	// Copy exported resume data while holding the same lock as download progress.
+	// Storage serializes this value after Store returns.
+	_f.connMu.Lock()
+	var connections []*connection
+	if _f.connections != nil {
+		connections = make([]*connection, len(_f.connections))
+	}
+	for i, conn := range _f.connections {
+		copyConn := &connection{ID: conn.ID, Role: conn.Role, State: conn.State,
+			Downloaded: conn.Downloaded, Completed: conn.Completed}
+		if conn.Chunk != nil {
+			copyChunk := *conn.Chunk
+			copyConn.Chunk = &copyChunk
+		}
+		connections[i] = copyConn
+	}
+	_f.connMu.Unlock()
 	return &fetcherData{
-		Connections: _f.connections,
+		Connections: connections,
 		RedirectURL: redirectURL,
 	}, nil
 }

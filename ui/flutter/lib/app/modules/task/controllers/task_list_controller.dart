@@ -14,6 +14,9 @@ abstract class TaskListController extends GetxController {
   final tasks = <Task>[].obs;
   final selectedTaskIds = <String>[].obs;
   final isRunning = false.obs;
+  final isLoading = true.obs;
+  final error = Rx<String?>(null);
+  bool _fetching = false;
 
   late final Timer _timer;
 
@@ -36,18 +39,27 @@ abstract class TaskListController extends GetxController {
   }
 
   void start() async {
-    await getTasksState();
     isRunning.value = true;
+    await getTasksState();
   }
 
   void stop() {
     isRunning.value = false;
   }
 
-  getTasksState() async {
-    final tasks = await getTasks(statuses);
-    // sort tasks by create time
-    tasks.sort(compare);
-    this.tasks.value = tasks;
+  Future<void> getTasksState() async {
+    if (_fetching) return;
+    _fetching = true;
+    try {
+      final result = await getTasks(statuses);
+      result.sort(compare);
+      tasks.value = result;
+      error.value = null;
+    } catch (e) {
+      error.value = e.toString();
+    } finally {
+      isLoading.value = false;
+      _fetching = false;
+    }
   }
 }

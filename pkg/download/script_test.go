@@ -191,13 +191,12 @@ func ensureScriptExecutable(t *testing.T, scriptPath string) {
 }
 
 func setupScriptTest(t *testing.T, fn func(downloader *Downloader)) {
-	defaultDownloader.Setup()
-	defaultDownloader.cfg.StorageDir = ".test_storage"
-	defaultDownloader.cfg.DownloadDir = ".test_download"
-	defer func() {
-		defaultDownloader.Clear()
-		os.RemoveAll(defaultDownloader.cfg.StorageDir)
-		os.RemoveAll(defaultDownloader.cfg.DownloadDir)
-	}()
-	fn(defaultDownloader)
+	t.Helper()
+	downloader := NewDownloader(&DownloaderConfig{StorageDir: t.TempDir()})
+	if err := downloader.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	downloader.cfg.DownloadDir = t.TempDir()
+	defer downloader.Clear()
+	fn(downloader)
 }

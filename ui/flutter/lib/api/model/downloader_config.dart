@@ -32,6 +32,7 @@ class ProtocolConfig {
   HttpConfig http = HttpConfig();
   BtConfig bt = BtConfig();
   Ed2kConfig ed2k = Ed2kConfig();
+  MediaConfig media = MediaConfig();
 
   ProtocolConfig();
 
@@ -39,6 +40,27 @@ class ProtocolConfig {
       json == null ? ProtocolConfig() : _$ProtocolConfigFromJson(json);
 
   Map<String, dynamic> toJson() => _$ProtocolConfigToJson(this);
+}
+
+@JsonSerializable()
+class MediaConfig {
+  String ytDlpPath;
+  String ffmpegPath;
+  @JsonKey(includeIfNull: false)
+  String? jsRuntimePath;
+  int connections;
+
+  MediaConfig({
+    this.ytDlpPath = '',
+    this.ffmpegPath = '',
+    this.jsRuntimePath,
+    this.connections = 4,
+  });
+
+  factory MediaConfig.fromJson(Map<String, dynamic>? json) =>
+      json == null ? MediaConfig() : _$MediaConfigFromJson(json);
+
+  Map<String, dynamic> toJson() => _$MediaConfigToJson(this);
 }
 
 @JsonSerializable()
@@ -97,8 +119,8 @@ class Ed2kConfig {
     this.nodesDat = '',
   });
 
-  factory Ed2kConfig.fromJson(Map<String, dynamic> json) =>
-      _$Ed2kConfigFromJson(json);
+  factory Ed2kConfig.fromJson(Map<String, dynamic>? json) =>
+      json == null ? Ed2kConfig() : _$Ed2kConfigFromJson(json);
 
   Map<String, dynamic> toJson() => _$Ed2kConfigToJson(this);
 }

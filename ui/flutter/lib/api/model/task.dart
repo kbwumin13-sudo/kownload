@@ -6,7 +6,7 @@ part 'task.g.dart';
 
 enum Status { ready, running, pause, wait, error, done }
 
-enum Protocol { http, bt, ed2k }
+enum Protocol { http, bt, ed2k, media, netdisk }
 
 // ExtractStatus enum matching Go backend
 enum ExtractStatus {
@@ -45,9 +45,19 @@ class Task {
     required this.updatedAt,
   });
 
-  factory Task.fromJson(Map<String, dynamic> json) => _$TaskFromJson(json);
+  // Keep the existing generated model intact while accepting the new protocol.
+  factory Task.fromJson(Map<String, dynamic> json) {
+    if (json['protocol'] == 'netdisk') {
+      return _$TaskFromJson({...json, 'protocol': null})
+        ..protocol = Protocol.netdisk;
+    }
+    return _$TaskFromJson(json);
+  }
 
-  Map<String, dynamic> toJson() => _$TaskToJson(this);
+  Map<String, dynamic> toJson() => {
+        ..._$TaskToJson(this),
+        if (protocol == Protocol.netdisk) 'protocol': 'netdisk',
+      };
 }
 
 @JsonSerializable()
@@ -55,6 +65,7 @@ class Progress {
   int used;
   int speed;
   int downloaded;
+  String mediaPhase;
   int uploadSpeed;
   int uploaded;
   ExtractStatus extractStatus;
@@ -64,6 +75,7 @@ class Progress {
     required this.used,
     required this.speed,
     required this.downloaded,
+    this.mediaPhase = '',
     required this.uploadSpeed,
     required this.uploaded,
     this.extractStatus = ExtractStatus.none,

@@ -63,7 +63,9 @@ func (d *Downloader) InstallExtensionByFolder(path string, devMode bool) (*Exten
 	}
 
 	// if extension is not installed, add it to the list, otherwise update it
-	installedExt := d.getExtension(ext.Identity)
+	d.extensionLock.Lock()
+	defer d.extensionLock.Unlock()
+	installedExt := d.getExtensionLocked(ext.Identity)
 	if installedExt == nil {
 		ext.CreatedAt = time.Now()
 		ext.UpdatedAt = ext.CreatedAt
@@ -72,7 +74,7 @@ func (d *Downloader) InstallExtensionByFolder(path string, devMode bool) (*Exten
 	} else {
 		installedExt.update(ext)
 	}
-	if err = d.storage.Put(bucketExtension, installedExt.Identity, installedExt); err != nil {
+	if err = d.storage.Put(bucketExtension, installedExt.Identity, util.DeepClone(installedExt)); err != nil {
 		return nil, err
 	}
 	return installedExt, nil
@@ -117,31 +119,37 @@ func (d *Downloader) UpgradeExtension(identity string) error {
 }
 
 func (d *Downloader) UpdateExtensionSettings(identity string, settings map[string]any) error {
-	ext, err := d.GetExtension(identity)
-	if err != nil {
-		return err
+	d.extensionLock.Lock()
+	defer d.extensionLock.Unlock()
+	ext := d.getExtensionLocked(identity)
+	if ext == nil {
+		return ErrExtensionNotFound
 	}
 	for _, setting := range ext.Settings {
 		if value, ok := settings[setting.Name]; ok {
 			setting.Value = tryParse(value, setting.Type)
 		}
 	}
-	return d.storage.Put(bucketExtension, ext.Identity, ext)
+	return d.storage.Put(bucketExtension, ext.Identity, util.DeepClone(ext))
 }
 
 func (d *Downloader) SwitchExtension(identity string, status bool) error {
-	ext, err := d.GetExtension(identity)
-	if err != nil {
-		return err
+	d.extensionLock.Lock()
+	defer d.extensionLock.Unlock()
+	ext := d.getExtensionLocked(identity)
+	if ext == nil {
+		return ErrExtensionNotFound
 	}
 	ext.Disabled = !status
-	return d.storage.Put(bucketExtension, ext.Identity, ext)
+	return d.storage.Put(bucketExtension, ext.Identity, util.DeepClone(ext))
 }
 
 func (d *Downloader) DeleteExtension(identity string) error {
-	ext, err := d.GetExtension(identity)
-	if err != nil {
-		return err
+	d.extensionLock.Lock()
+	defer d.extensionLock.Unlock()
+	ext := d.getExtensionLocked(identity)
+	if ext == nil {
+		return ErrExtensionNotFound
 	}
 	// remove from disk
 	if !ext.DevMode {
@@ -156,17 +164,31 @@ func (d *Downloader) DeleteExtension(identity string) error {
 			break
 		}
 	}
-	if err = d.storage.Delete(bucketExtension, identity); err != nil {
+	if err := d.storage.Delete(bucketExtension, identity); err != nil {
 		return err
 	}
-	if err = d.storage.Delete(bucketExtensionStorage, identity); err != nil {
+	if err := d.storage.Delete(bucketExtensionStorage, identity); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (d *Downloader) GetExtensions() []*Extension {
-	return d.extensions
+	d.extensionLock.RLock()
+	defer d.extensionLock.RUnlock()
+	return append([]*Extension{}, d.extensions...)
+}
+
+// Snapshot registration and settings before invoking scripts. A callback may
+// call downloader APIs, so no registry lock may be held while it executes.
+func (d *Downloader) extensionSnapshots() []*Extension {
+	d.extensionLock.RLock()
+	defer d.extensionLock.RUnlock()
+	extensions := make([]*Extension, 0, len(d.extensions))
+	for _, ext := range d.extensions {
+		extensions = append(extensions, util.DeepClone(ext))
+	}
+	return extensions
 }
 
 func (d *Downloader) GetExtension(identity string) (*Extension, error) {
@@ -178,6 +200,13 @@ func (d *Downloader) GetExtension(identity string) (*Extension, error) {
 }
 
 func (d *Downloader) getExtension(identity string) *Extension {
+	d.extensionLock.RLock()
+	defer d.extensionLock.RUnlock()
+	return d.getExtensionLocked(identity)
+}
+
+// Caller holds extensionLock.
+func (d *Downloader) getExtensionLocked(identity string) *Extension {
 	for _, ext := range d.extensions {
 		if ext.Identity == identity {
 			return ext
@@ -325,7 +354,7 @@ func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, c
 		Events: make(InstanceEvents),
 	}
 	var err error
-	for _, ext := range d.extensions {
+	for _, ext := range d.extensionSnapshots() {
 		if ext.Disabled {
 			continue
 		}

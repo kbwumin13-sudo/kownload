@@ -14,6 +14,9 @@ class Result<T> {
     this.data,
   });
 
+  @override
+  String toString() => 'Result(code: $code, msg: ${msg ?? "未知错误"})';
+
   factory Result.fromJson(
     Map<String, dynamic> json,
     T Function(dynamic json) fromJsonT,

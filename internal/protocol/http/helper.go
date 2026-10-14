@@ -227,8 +227,12 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 		TLSHandshakeTimeout: timeout,
 	}
 	jar, _ := cookiejar.New(nil)
+	var roundTripper http.RoundTripper = transport
+	if f.requestPolicy != nil || f.responsePolicy != nil {
+		roundTripper = &policyTransport{transport: transport, policy: f.requestPolicy, responsePolicy: f.responsePolicy}
+	}
 	return &http.Client{
-		Transport: transport,
+		Transport: roundTripper,
 		Jar:       jar,
 	}
 }

@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:get/get.dart';
 
+import '../../../../util/util.dart';
 import '../../../../api/api.dart';
 import '../../../../api/gopeed_site_api.dart';
 import '../../../../api/model/extension.dart';
@@ -67,10 +68,14 @@ class ExtensionController extends GetxController {
   final storeQuery = ''.obs;
   final storeSort = StoreExtensionSort.stars.obs;
 
-  final listFilter = ExtensionListFilter.market.obs;
+  final listFilter = (Util.isMacos()
+          ? ExtensionListFilter.installed
+          : ExtensionListFilter.market)
+      .obs;
 
   final loadingInstalled = false.obs;
   final loadingStore = false.obs;
+  final storeError = RxnString();
   final loadingMoreStore = false.obs;
   final busyExtensionIds = <String>{}.obs;
   final showInstallTools = false.obs;
@@ -108,6 +113,10 @@ class ExtensionController extends GetxController {
   }
 
   Future<void> loadInitialData() async {
+    if (Util.isMacos()) {
+      await loadInstalled();
+      return;
+    }
     await Future.wait([loadInstalled(refreshUpdates: true), refreshStore()]);
   }
 
@@ -140,6 +149,7 @@ class ExtensionController extends GetxController {
 
   Future<void> refreshStore() async {
     loadingStore.value = true;
+    storeError.value = null;
     try {
       final page = await GopeedSiteApi.instance.getExtensions(
         page: 1,
@@ -149,6 +159,8 @@ class ExtensionController extends GetxController {
       );
       storeExtensions.assignAll(page.data);
       storePagination.value = page.pagination;
+    } catch (error) {
+      storeError.value = '暂时无法连接扩展商店，请检查网络后重试。';
     } finally {
       loadingStore.value = false;
     }

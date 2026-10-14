@@ -5,6 +5,7 @@ part 'request.g.dart';
 @JsonSerializable(explicitToJson: true)
 class Request {
   String url;
+  String? protocol;
   Object? extra;
   Map<String, String>? labels;
   RequestProxy? proxy;
@@ -12,6 +13,7 @@ class Request {
 
   Request({
     required this.url,
+    this.protocol,
     this.extra,
     this.labels,
     this.proxy,

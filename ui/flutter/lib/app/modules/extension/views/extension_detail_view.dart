@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
 
 import '../../../../api/model/extension.dart';
 import '../../../../api/model/store_extension.dart';
@@ -26,26 +28,36 @@ class ExtensionDetailDrawer extends GetView<ExtensionController> {
 
   @override
   Widget build(BuildContext context) {
+    final mac = Util.isMacos();
+    final colors = MacColors.of(context);
     return Material(
-      color: Theme.of(context).colorScheme.surface,
+      color: mac ? colors.surface : Theme.of(context).colorScheme.surface,
       child: SafeArea(
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 12, 10),
+              padding: mac
+                  ? const EdgeInsets.fromLTRB(18, 12, 12, 10)
+                  : const EdgeInsets.fromLTRB(16, 14, 12, 10),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
                       extension.title,
-                      style: Theme.of(context).textTheme.titleLarge,
+                      style: mac
+                          ? TextStyle(
+                              color: colors.text,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600)
+                          : Theme.of(context).textTheme.titleLarge,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   IconButton(
                     onPressed: onClose,
-                    icon: const Icon(Icons.close),
+                    icon: Icon(mac ? CupertinoIcons.xmark : Icons.close,
+                        size: mac ? 16 : 24),
                   )
                 ],
               ),
@@ -63,13 +75,13 @@ class ExtensionDetailDrawer extends GetView<ExtensionController> {
                                 .contains(localInstalled.identity));
 
                 return ListView(
-                  padding: const EdgeInsets.all(16),
+                  padding: EdgeInsets.all(mac ? 18 : 16),
                   children: [
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         _buildIcon(),
-                        const SizedBox(width: 12),
+                        SizedBox(width: mac ? 10 : 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -86,72 +98,122 @@ class ExtensionDetailDrawer extends GetView<ExtensionController> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    SizedBox(height: mac ? 12 : 14),
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
                       children: [
                         if (localInstalled == null)
-                          ElevatedButton.icon(
-                            onPressed: busy
-                                ? null
-                                : () async {
-                                    try {
-                                      await controller
-                                          .installFromStore(extension);
-                                      showMessage('tip'.tr,
-                                          'extensionInstallSuccess'.tr);
-                                    } catch (e) {
-                                      showErrorMessage(e);
-                                    }
-                                  },
-                            icon: busy
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.download),
-                            label: Text('extensionInstall'.tr),
-                          ),
+                          mac
+                              ? MacButton(
+                                  primary: true,
+                                  onPressed: busy
+                                      ? null
+                                      : () async {
+                                          try {
+                                            await controller
+                                                .installFromStore(extension);
+                                            showMessage('tip'.tr,
+                                                'extensionInstallSuccess'.tr);
+                                          } catch (e) {
+                                            showErrorMessage(e);
+                                          }
+                                        },
+                                  icon: CupertinoIcons.arrow_down_to_line,
+                                  child: Text('extensionInstall'.tr),
+                                )
+                              : ElevatedButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () async {
+                                          try {
+                                            await controller
+                                                .installFromStore(extension);
+                                            showMessage('tip'.tr,
+                                                'extensionInstallSuccess'.tr);
+                                          } catch (e) {
+                                            showErrorMessage(e);
+                                          }
+                                        },
+                                  icon: busy
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.download),
+                                  label: Text('extensionInstall'.tr),
+                                ),
                         if (localInstalled != null && canUpdate)
-                          ElevatedButton.icon(
-                            onPressed: busy
-                                ? null
-                                : () async {
-                                    try {
-                                      await controller
-                                          .upgradeExtension(localInstalled);
-                                      showMessage('tip'.tr,
-                                          'extensionUpdateSuccess'.tr);
-                                    } catch (e) {
-                                      showErrorMessage(e);
-                                    }
-                                  },
-                            icon: busy
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.refresh_rounded),
-                            label: Text('newVersionUpdate'.tr),
-                          ),
+                          mac
+                              ? MacButton(
+                                  primary: true,
+                                  onPressed: busy
+                                      ? null
+                                      : () async {
+                                          try {
+                                            await controller.upgradeExtension(
+                                                localInstalled);
+                                            showMessage('tip'.tr,
+                                                'extensionUpdateSuccess'.tr);
+                                          } catch (e) {
+                                            showErrorMessage(e);
+                                          }
+                                        },
+                                  icon: CupertinoIcons.arrow_clockwise,
+                                  child: Text('newVersionUpdate'.tr),
+                                )
+                              : ElevatedButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () async {
+                                          try {
+                                            await controller.upgradeExtension(
+                                                localInstalled);
+                                            showMessage('tip'.tr,
+                                                'extensionUpdateSuccess'.tr);
+                                          } catch (e) {
+                                            showErrorMessage(e);
+                                          }
+                                        },
+                                  icon: busy
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2),
+                                        )
+                                      : const Icon(Icons.refresh_rounded),
+                                  label: Text('newVersionUpdate'.tr),
+                                ),
                         if ((extension.homepage ?? '').isNotEmpty)
-                          OutlinedButton.icon(
-                            onPressed: () =>
-                                launchUrl(Uri.parse(extension.homepage!)),
-                            icon: const Icon(Icons.home_outlined),
-                            label: Text('homepage'.tr),
-                          ),
-                        OutlinedButton.icon(
-                          onPressed: () =>
-                              launchUrl(Uri.parse(extension.repoUrl)),
-                          icon: const Icon(Icons.code),
-                          label: const Text('GitHub'),
-                        ),
+                          mac
+                              ? MacButton(
+                                  onPressed: () =>
+                                      launchUrl(Uri.parse(extension.homepage!)),
+                                  icon: CupertinoIcons.house,
+                                  child: Text('homepage'.tr),
+                                )
+                              : OutlinedButton.icon(
+                                  onPressed: () =>
+                                      launchUrl(Uri.parse(extension.homepage!)),
+                                  icon: const Icon(Icons.home_outlined),
+                                  label: Text('homepage'.tr),
+                                ),
+                        mac
+                            ? MacButton(
+                                onPressed: () =>
+                                    launchUrl(Uri.parse(extension.repoUrl)),
+                                icon: CupertinoIcons.chevron_left,
+                                child: const Text('GitHub'),
+                              )
+                            : OutlinedButton.icon(
+                                onPressed: () =>
+                                    launchUrl(Uri.parse(extension.repoUrl)),
+                                icon: const Icon(Icons.code),
+                                label: const Text('GitHub'),
+                              ),
                       ],
                     ),
                     const SizedBox(height: 14),

@@ -13,6 +13,7 @@ final _hostExecName = 'host${Platform.isWindows ? '.exe' : ''}';
 const _hostName = 'com.gopeed.gopeed';
 const _chromeExtensionId = 'mijpgljlfcapndmchhjffkpckknofcnd';
 const _edgeExtensionId = 'dkajnckekendchdleoaenoophcobooce';
+const _mediaExtensionId = 'jcalkpjhhaachliihlkojhmafniepnoj';
 const _firefoxExtensionId = '{c5d69a8f-2ed0-46a7-afa4-b3a00dc58088}';
 
 List<String> get _debugExtensionIds {
@@ -285,6 +286,7 @@ Future<String> _getManifestContent(Browser browser) async {
       'allowed_origins': [
         'chrome-extension://$_chromeExtensionId/',
         'chrome-extension://$_edgeExtensionId/',
+        'chrome-extension://$_mediaExtensionId/',
         ..._debugExtensionIds.map((id) => 'chrome-extension://$id/'),
       ],
     if (browser == Browser.firefox) 'allowed_extensions': [_firefoxExtensionId],

@@ -4,6 +4,22 @@ import app_links
 
 @main
 class AppDelegate: FlutterAppDelegate {
+  override func applicationWillFinishLaunching(_ notification: Notification) {
+    super.applicationWillFinishLaunching(notification)
+    NSApp.setActivationPolicy(.accessory)
+  }
+
+  override func applicationDidFinishLaunching(_ notification: Notification) {
+    super.applicationDidFinishLaunching(notification)
+    NSApp.setActivationPolicy(.accessory)
+    (mainFlutterWindow as? MainFlutterWindow)?.configureMenus()
+  }
+
+  override func applicationWillTerminate(_ notification: Notification) {
+    (mainFlutterWindow as? MainFlutterWindow)?.unregisterHotKey()
+    super.applicationWillTerminate(notification)
+  }
+
   public override func application(_ application: NSApplication,
                                   continue userActivity: NSUserActivity,
                                   restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void) -> Bool {
@@ -26,15 +42,7 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   override func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    if !flag {
-      for window in NSApp.windows {
-        if !window.isVisible {
-          window.setIsVisible(true)
-        }
-        window.makeKeyAndOrderFront(self)
-        NSApp.activate(ignoringOtherApps: true)
-      }
-    }
+    (mainFlutterWindow as? MainFlutterWindow)?.openPanel()
     return true
   }
 

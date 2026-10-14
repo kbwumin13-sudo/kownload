@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'asset_installer.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,14 @@ import 'package:path/path.dart' as path;
 
 class Util {
   static String? _storageDir;
+  static String? _previewStorage;
+
+  /// Development previews use a separate backend store and skip OS registration.
+  static bool get isIsolatedPreview =>
+      !kIsWeb &&
+      ((_previewStorage?.isNotEmpty ?? false) ||
+          (Platform.environment['GOPEED_PREVIEW_STORAGE']?.isNotEmpty ??
+              false));
 
   static String cleanPath(String path) {
     path = path.replaceAll(RegExp(r'\\'), "/");
@@ -51,9 +60,16 @@ class Util {
     }
   }
 
-  static Future<void> initStorageDir() async {
+  static Future<void> initStorageDir({String? previewStorage}) async {
+    _previewStorage = previewStorage;
     var storageDir = "";
-    if (Util.isWindows()) {
+    if (isIsolatedPreview) {
+      storageDir =
+          _previewStorage ?? Platform.environment['GOPEED_PREVIEW_STORAGE']!;
+      if (!path.isAbsolute(storageDir))
+        throw ArgumentError('GOPEED_PREVIEW_STORAGE must be absolute');
+      await Directory(storageDir).create(recursive: true);
+    } else if (Util.isWindows()) {
       storageDir =
           path.join(File(Platform.resolvedExecutable).parent.path, "storage");
     } else if (!Util.isWeb()) {
@@ -158,6 +174,7 @@ class Util {
   }
 
   static Future<String> homePathJoin(String fileName) async {
+    if (isIsolatedPreview) return path.join(getStorageDir(), fileName);
     if (Util.isWindows()) {
       final execPath = Platform.resolvedExecutable;
       final execDir = path.dirname(execPath);
@@ -178,19 +195,14 @@ class Util {
     // Check if target file is not installed
     if (!await File(targetPath).exists()) {
       final assetData = await getAssetData();
-      final file = File(targetPath);
-      await file.writeAsBytes(assetData);
-      // Add execute permission when file first created
-      if (executable && !Platform.isWindows) {
-        await Process.run('chmod', ['+x', targetPath]);
-      }
+      await writeInstalledAsset(assetData, targetPath, executable: executable);
       return;
     }
 
     // Check if target file needs to be updated
     final assetData = await getAssetData();
     if (_md5(assetData) != await _md5File(File(targetPath))) {
-      await File(targetPath).writeAsBytes(assetData);
+      await writeInstalledAsset(assetData, targetPath, executable: executable);
       return;
     }
   }

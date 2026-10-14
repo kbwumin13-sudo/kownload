@@ -1,10 +1,12 @@
 package rest
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/url"
 	"runtime"
+	"time"
 
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/download"
@@ -33,6 +35,21 @@ func Resolve(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteJson(w, model.NewOkResult(rr))
 	}
+}
+
+func InspectMedia(w http.ResponseWriter, r *http.Request) {
+	var req model.ResolveTask
+	if !ReadJson(r, w, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	inspection, err := Downloader.InspectMedia(ctx, req.Req)
+	if err != nil {
+		WriteJson(w, model.NewErrorResult(err.Error()))
+		return
+	}
+	WriteJson(w, model.NewOkResult(inspection))
 }
 
 func CreateTask(w http.ResponseWriter, r *http.Request) {

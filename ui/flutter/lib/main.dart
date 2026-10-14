@@ -21,12 +21,16 @@ import 'util/package_info.dart';
 import 'util/scheme_register/scheme_register.dart';
 import 'util/updater.dart';
 import 'util/util.dart';
+import 'macos/mac_appearance.dart';
+import 'macos/mac_panel.dart';
+import 'app/modules/task/controllers/task_controller.dart';
 
 class StartupArgs {
   static const flagHidden = "hidden";
 
   /// Command line --hidden flag (for auto-start)
   bool hiddenFromArgs = false;
+  String? previewStorage;
 
   StartupArgs._();
 
@@ -34,9 +38,12 @@ class StartupArgs {
   static StartupArgs parse(List<String> arguments) {
     final args = StartupArgs._();
     try {
-      final parser = ArgParser()..addFlag(flagHidden);
+      final parser = ArgParser()
+        ..addFlag(flagHidden)
+        ..addOption('preview-storage');
       final results = parser.parse(arguments);
       args.hiddenFromArgs = results.flag(flagHidden);
+      args.previewStorage = results.option('preview-storage');
     } catch (e) {
       // ignore parse errors
     }
@@ -60,23 +67,29 @@ Future<void> init(StartupArgs args) async {
   if (Util.isMobile()) {
     FlutterForegroundTask.initCommunicationPort();
   }
-  await Util.initStorageDir();
+  await Util.initStorageDir(previewStorage: args.previewStorage);
   await Database.instance.init();
   if (Util.isDesktop()) {
     await windowManager.ensureInitialized();
+    if (Util.isMacos()) await MacAppearance.initialize();
     final windowState = Database.instance.getWindowState();
 
     // Check if menubar mode is enabled (only for macOS)
-    final runAsMenubarApp =
-        Util.isMacos() && Database.instance.getRunAsMenubarApp();
+    final runAsMenubarApp = Util.isMacos();
 
     final windowOptions = WindowOptions(
-      size: Size(windowState?.width ?? 800, windowState?.height ?? 600),
+      size: Util.isMacos()
+          ? const Size(640, 260)
+          : Size(windowState?.width ?? 800, windowState?.height ?? 600),
       center: true,
       skipTaskbar: runAsMenubarApp,
     );
     await windowManager.waitUntilReadyToShow(windowOptions, () async {
       await windowManager.setPreventClose(true);
+      if (Util.isMacos()) {
+        await MacPanel.initialize();
+        Database.instance.saveRunAsMenubarApp(true);
+      }
     });
 
     // Register Cmd+W hotkey on macOS to close window
@@ -90,7 +103,7 @@ Future<void> init(StartupArgs args) async {
       await hotKeyManager.register(
         hotKey,
         keyDownHandler: (hotKey) {
-          windowManager.hide();
+          MacPanel.hide();
         },
       );
     }
@@ -121,6 +134,14 @@ Future<void> init(StartupArgs args) async {
     logger.e("load config fail", e);
   }
 
+  if (Util.isMacos()) {
+    final tasks = Get.put(MacTaskListController(), permanent: true);
+    tasks.stop();
+    MacPanel.visible.addListener(() {
+      MacPanel.visible.value ? tasks.start() : tasks.stop();
+    });
+  }
+
   // Auto-start incomplete tasks if enabled
   if (controller.downloaderConfig.value.extra.autoStartTasks) {
     try {
@@ -132,7 +153,7 @@ Future<void> init(StartupArgs args) async {
   }
 
   () async {
-    if (Util.isDesktop()) {
+    if (Util.isDesktop() && !Util.isIsolatedPreview) {
       try {
         registerUrlScheme("gopeed");
         if (controller.downloaderConfig.value.extra.defaultBtClient) {

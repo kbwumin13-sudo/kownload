@@ -1,304 +1,36 @@
-# [![](_docs/img/banner.svg)](https://gopeed.com)
+# kownload
 
-[![Test Status](https://github.com/GopeedLab/gopeed/workflows/test/badge.svg)](https://github.com/GopeedLab/gopeed/actions?query=workflow%3Atest)
-[![Codecov](https://codecov.io/gh/GopeedLab/gopeed/branch/main/graph/badge.svg)](https://codecov.io/gh/GopeedLab/gopeed)
-[![Release](https://img.shields.io/github/release/GopeedLab/gopeed.svg)](https://github.com/GopeedLab/gopeed/releases)
-[![Download](https://img.shields.io/github/downloads/GopeedLab/gopeed/total.svg)](https://github.com/GopeedLab/gopeed/releases)
-[![Donate](https://img.shields.io/badge/%24-donate-ff69b4.svg)](https://gopeed.com/docs/donate)
-[![WeChat](https://img.shields.io/badge/WeChat%20Official%20Account-07C160?logo=wechat&logoColor=white)](https://raw.githubusercontent.com/GopeedLab/gopeed/main/_docs/img/weixin.png)
-[![Discord](https://img.shields.io/discord/1037992631881449472?label=Discord&logo=discord&style=social)](https://discord.gg/ZUJqJrwCGB)
+面向 macOS 的轻量下载器。通过 `⌃⌥D` 唤起原生玻璃面板，粘贴链接后按回车下载；任务、设置和扩展维护按需展开。基于 Gopeed 的下载内核与 Flutter 前端，窗口材质和生命周期由 AppKit 提供。
 
-<a href="https://trendshift.io/repositories/7953" target="_blank"><img src="https://trendshift.io/api/badge/repositories/7953" alt="GopeedLab%2Fgopeed | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+![kownload 原生轻面板](docs/images/kownload-panel.png)
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R6IJGN6)
+## 日常使用
 
-[English](/README.md) | [中文](/README_zh-CN.md) | [日本語](/README_ja-JP.md) | [正體中文](/README_zh-TW.md) | [Tiếng Việt](/README_vi-VN.md)
+- 菜单栏常驻，Esc 或点击外部收起，后台下载继续。
+- 普通链接、磁链、种子拖放和多行链接使用同一入口。
+- 面板最多显示三条未完成任务；完整任务管理与全部下载参数在设置中。
+- 浏览器助手支持页面媒体嗅探、格式选择、批量下载和网盘选中文件发送。
+- 包含百度、阿里、移动、天翼、迅雷、夸克、UC、123、光鸭九类网盘适配器；登录上下文通过浏览器同步。
 
-## 🚀 Introduction
+网盘实现与验证范围见 [NETDISK_PROVIDERS.md](NETDISK_PROVIDERS.md)。2026-10-14 已完成夸克真实账号下载及暂停、重启、重新同步后的续传验收；其他网盘以源码和模拟验证为当前证据范围。
 
-Gopeed (full name Go Speed), a high-speed downloader developed by `Golang` + `Flutter`, supports (HTTP, BitTorrent, Magnet, ED2K) protocol, and supports all platforms. In addition to basic download functions, Gopeed is also a highly customizable downloader that supports implementing more features through integration with [APIs](https://gopeed.com/docs/dev-api) or installation and development of [extensions](https://gopeed.com/docs/dev-extension).
+## 构建与测试
 
-Visit ✈ [Official Website](https://gopeed.com) | 📖 [Official Docs](https://gopeed.com/docs)
+前端使用 Flutter 3.41.2；Go、Xcode 与 CocoaPods 按项目依赖安装。构建入口和隔离数据运行方式见 [macOS 前端说明](MACOS_FRONTEND.md)。
 
-## ⬇️ Download
-
-<table>
-  <tbody>
-    <tr>
-      <td rowspan="4">🪟 Windows</td>
-      <td rowspan="2"><code>EXE</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-windows-amd64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-windows-arm64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="2"><code>Portable</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-windows-amd64-portable.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-windows-arm64-portable.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="3">🍎 MacOS</td>
-      <td rowspan="3"><code>DMG</code></td>
-      <td>universal</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-macos.dmg">📥</a></td>
-    </tr>
-    <tr>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-macos-amd64.dmg">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-macos-arm64.dmg">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="6">🐧 Linux</td>
-      <td><code>Flathub</code></td>
-      <td>amd64</td>
-      <td><a href="https://flathub.org/apps/com.gopeed.Gopeed">📥</a></td>
-    </tr>
-    <tr>
-      <td><code>SNAP</code></td>
-      <td>amd64</td>
-      <td><a href="https://snapcraft.io/gopeed">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="2"><code>DEB</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-linux-amd64.deb">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-linux-arm64.deb">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="2"><code>AppImage</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-linux-amd64.AppImage">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-linux-arm64.AppImage">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="4">🤖 Android</td>
-      <td rowspan="4"><code>APK</code></td>
-      <td>universal</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-android.apk">📥</a></td>
-    </tr>
-     <tr>
-      <td>armeabi-v7a</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-android-armeabi-v7a.apk">📥</a></td>
-    </tr>
-     <tr>
-      <td>arm64-v8a</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-android-arm64-v8a.apk">📥</a></td>
-    </tr>
-    <tr>
-      <td>x86_64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-android-x86_64.apk">📥</a></td>
-    </tr>
-    <tr>
-      <td>📱 iOS</td>
-      <td><code>IPA</code></td>
-      <td>universal</td>
-      <td><a href="https://gopeed.com/api/download?tpl=Gopeed-$version-ios.ipa">📥</a></td>
-    </tr>
-    <tr>
-      <td>🐳 Docker</td>
-      <td>-</td>
-      <td>universal</td>
-      <td><a href="https://hub.docker.com/r/liwei2633/gopeed">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="2">💾 Qnap</td>
-      <td rowspan="2"><code>QPKG</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-$version-qnap-amd64.qpkg">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-$version-qnap-arm64.qpkg">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="8">🌐 Web</td>
-      <td rowspan="3"><code>Windows</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-windows-amd64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-windows-arm64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>386</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-windows-386.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="2"><code>MacOS</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-macos-amd64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-macos-arm64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td rowspan="3"><code>Linux</code></td>
-      <td>amd64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-linux-amd64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>arm64</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-linux-arm64.zip">📥</a></td>
-    </tr>
-    <tr>
-      <td>386</td>
-      <td><a href="https://gopeed.com/api/download?tpl=gopeed-web-$version-linux-386.zip">📥</a></td>
-    </tr>
-  </tbody>
-</table>
-
-More about installation, please refer to [Installation](https://gopeed.com/docs/install)
-
-### 🛠️ Command tool
-
-use `go install`:
-
-```bash
-go install github.com/GopeedLab/gopeed/cmd/gopeed@latest
-```
-
-## 🔌 Browser Extension
-
-Gopeed also provides a browser extension to take over browser downloads, supporting browsers such as Chrome, Edge, Firefox, etc., please refer to: [https://github.com/GopeedLab/browser-extension](https://github.com/GopeedLab/browser-extension)
-
-## 📱 WeChat Official Account
-
-Follow our WeChat Official Account to get the latest updates and news.
-
-<img src="_docs/img/weixin.png" width="200" />
-
-## 💝 Donate
-
-If you like this project, please consider [donating](https://gopeed.com/docs/donate) to support the development of this project, thank you!
-
-## 🖼️ Showcase
-
-![](_docs/img/ui-demo.png)
-
-## 👨‍💻 Development
-
-This project is divided into two parts, the front end uses `flutter`, the back end uses `Golang`, and the two sides communicate through the `http` protocol. On the unix system, `unix socket` is used, and on the windows system, `tcp` protocol is used.
-
-> The front code is located in the `ui/flutter` directory.
-
-### 🌍 Environment
-
-1. Golang 1.24+
-2. Flutter 3.38+
-
-### 📋 Clone
-
-```bash
-git clone git@github.com:GopeedLab/gopeed.git
-```
-
-### 🤝 Contributing
-
-Please refer to [CONTRIBUTING.md](/CONTRIBUTING.md)
-
-### 🏗️ Build
-
-#### Desktop
-
-First, you need to configure the environment according to the official [Flutter desktop website documention](https://docs.flutter.dev/development/platform-integration/desktop), then you will need to ensure the cgo environment is set up accordingly. For detailed instructions on setting up the cgo environment, please refer to relevant resources available online.
-
-command:
-
-- windows
-
-```bash
-go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/windows/libgopeed.dll github.com/GopeedLab/gopeed/bind/desktop
+```sh
 cd ui/flutter
-flutter build windows
+flutter pub get
+flutter analyze
+flutter test
 ```
 
-- macos
+原生宿主回归：`python3 ui/flutter/macos/tests/run_panel_host_tests.py`（需要已构建的插件模块）；鼠标路由：`bash scripts/test-macos-pointer-routing.sh`。
 
-```bash
-go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/macos/Frameworks/libgopeed.dylib github.com/GopeedLab/gopeed/bind/desktop
-cd ui/flutter
-flutter build macos
-```
+## 兼容与来源
 
-- linux
+为延续既有任务、配置和浏览器助手，保留 `com.gopeed.gopeed` 数据标识、`gopeed:` URL 与 Native Messaging 标识。内部 Go module 与 Flutter package 名继续沿用上游，产品显示名称为 kownload。
 
-```bash
-go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/linux/bundle/lib/libgopeed.so github.com/GopeedLab/gopeed/bind/desktop
-cd ui/flutter
-flutter build linux
-```
+上游 [GopeedLab/gopeed](https://github.com/GopeedLab/gopeed) 基线为 v1.9.3；原项目介绍见 [保留的上游文档](docs/GOPEED_UPSTREAM.md)。媒体引擎和助手说明见 [MEDIA_SNIFFER.md](MEDIA_SNIFFER.md)，网盘接口见 [NETDISK.md](NETDISK.md)。
 
-#### Mobile
-
-Same as before, you also need to prepare the `cgo` environment, and then install `gomobile`:
-
-```bash
-go install golang.org/x/mobile/cmd/gomobile@latest
-go get golang.org/x/mobile/bind
-gomobile init
-```
-
-command:
-
-- android
-
-```bash
-gomobile bind -tags nosqlite -ldflags="-w -s -checklinkname=0" -o ui/flutter/android/app/libs/libgopeed.aar -target=android -androidapi 21 -javapkg="com.gopeed" github.com/GopeedLab/gopeed/bind/mobile
-cd ui/flutter
-flutter build apk
-```
-
-- ios
-
-```bash
-gomobile bind -tags nosqlite -ldflags="-w -s" -o ui/flutter/ios/Frameworks/Libgopeed.xcframework -target=ios github.com/GopeedLab/gopeed/bind/mobile
-cd ui/flutter
-flutter build ios --no-codesign
-```
-
-#### Web
-
-command:
-
-```bash
-cd ui/flutter
-flutter build web
-cd ../../
-rm -rf cmd/web/dist
-cp -r ui/flutter/build/web cmd/web/dist
-go build -tags nosqlite,web -ldflags="-s -w" -o bin/ github.com/GopeedLab/gopeed/cmd/web
-```
-
-## ❤️ Credits
-
-### 👥 Contributors
-
-<a href="https://github.com/GopeedLab/gopeed/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=GopeedLab/gopeed" />
-</a>
-
-### 🏢 JetBrains
-
-[![goland](_docs/img/goland.svg)](https://www.jetbrains.com/?from=gopeed)
-
-## 📄 License
-
-[GPLv3](LICENSE)
+保留 Gopeed 的 GPL-3.0 许可证，以及网盘适配引用的 LinkSwift、OpenList 的 AGPL-3.0 许可证和归属说明，见 [LICENSE](LICENSE) 与 `third_party/`。

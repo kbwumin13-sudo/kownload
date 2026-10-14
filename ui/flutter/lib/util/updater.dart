@@ -11,7 +11,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/api.dart';
-import '../api/gopeed_site_api.dart';
 import '../app/views/outlined_button_loading.dart';
 import 'arch/arch.dart';
 import 'github_mirror.dart';
@@ -68,10 +67,11 @@ Future<VersionInfo?> checkUpdate() async {
   String? releaseDataStr;
   try {
     releaseDataStr = (await proxyRequest(
-            "https://api.github.com/repos/GopeedLab/gopeed/releases/latest"))
+            "https://api.github.com/repos/kbwumin13-sudo/kownload/releases/latest"))
         .data;
   } catch (e) {
-    releaseDataStr = jsonEncode(await GopeedSiteApi.instance.getRelease());
+    // This fork must never offer an upstream package that removes its features.
+    return null;
   }
   if (releaseDataStr == null) {
     return null;
@@ -111,7 +111,8 @@ Future<void> showUpdateDialog(
   final changeLogRegex = isZh
       ? RegExp(r"(#\s+更新日志.*)", multiLine: true, dotAll: true)
       : RegExp(r"(# Release notes.*)#\s+更新日志", multiLine: true, dotAll: true);
-  final changeLog = changeLogRegex.firstMatch(fullChangeLog)?.group(1) ?? "";
+  final changeLog =
+      changeLogRegex.firstMatch(fullChangeLog)?.group(1) ?? fullChangeLog;
   await showDialog(
     context: Get.context!,
     barrierDismissible: false,
@@ -327,7 +328,7 @@ Future<void> _update(String version, Function(int, int) onProgress) async {
   // Need to download the asset
   if (newVersionAssetName.isNotEmpty) {
     final downloadUrl =
-        'https://github.com/GopeedLab/gopeed/releases/download/v$version/$newVersionAssetName';
+        'https://github.com/kbwumin13-sudo/kownload/releases/download/v$version/$newVersionAssetName';
     newVersionAssetPath = await _getAssetPath(version);
 
     if (downloadUrl.isNotEmpty) {
@@ -351,7 +352,7 @@ Future<void> _update(String version, Function(int, int) onProgress) async {
       if (!await File(updaterPath).exists()) {
         await launchUrl(
             Uri.parse(
-                'https://github.com/GopeedLab/gopeed/releases/tag/v$version'),
+                'https://github.com/kbwumin13-sudo/kownload/releases/tag/v$version'),
             mode: LaunchMode.externalApplication);
         break;
       }
@@ -387,7 +388,7 @@ Future<void> _update(String version, Function(int, int) onProgress) async {
     default:
       await launchUrl(
           Uri.parse(
-              'https://github.com/GopeedLab/gopeed/releases/tag/v$version'),
+              'https://github.com/kbwumin13-sudo/kownload/releases/tag/v$version'),
           mode: LaunchMode.externalApplication);
       break;
   }
@@ -406,13 +407,13 @@ String _getAssetName(String version) {
 
   switch (_channel) {
     case Channel.windowsInstaller:
-      return 'Gopeed-v$version-windows-${commonArchName()}.zip';
+      return 'kownload-v$version-windows-${commonArchName()}.zip';
     case Channel.windowsPortable:
-      return 'Gopeed-v$version-windows-${commonArchName()}-portable.zip';
+      return 'kownload-v$version-windows-${commonArchName()}-portable.zip';
     case Channel.macosDmg:
-      return 'Gopeed-v$version-macos-${commonArchName()}.dmg';
+      return 'kownload-v$version-macos-${commonArchName()}.dmg';
     case Channel.linuxDeb:
-      return 'Gopeed-v$version-linux-${commonArchName()}.deb';
+      return 'kownload-v$version-linux-${commonArchName()}.deb';
     case Channel.androidApk:
       final apkArchName = switch (arch) {
         Architecture.arm => "armeabi-v7a",
@@ -420,7 +421,7 @@ String _getAssetName(String version) {
         Architecture.x64 => "x86_64",
         _ => null
       };
-      var apkNamePrefix = "Gopeed-v$version-android";
+      var apkNamePrefix = "kownload-v$version-android";
       if (apkArchName != null) {
         apkNamePrefix += "-$apkArchName";
       }

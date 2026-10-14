@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:get/get.dart';
 import 'package:lecle_downloads_path_provider/lecle_downloads_path_provider.dart';
 import 'package:path_provider/path_provider.dart';
@@ -83,6 +84,7 @@ class DirectorySelector extends StatefulWidget {
   final bool showPlaceholderButton;
   final VoidCallback? onEditComplete;
   final bool showRenderedPlaceholders;
+  final bool inlineActions;
 
   const DirectorySelector({
     Key? key,
@@ -93,6 +95,7 @@ class DirectorySelector extends StatefulWidget {
     this.showPlaceholderButton = false,
     this.onEditComplete,
     this.showRenderedPlaceholders = false,
+    this.inlineActions = false,
   }) : super(key: key);
 
   @override
@@ -105,11 +108,19 @@ class _DirectorySelectorState extends State<DirectorySelector> {
     Widget? buildSelectWidget() {
       if (Util.isDesktop()) {
         return IconButton(
-            icon: const Icon(Icons.folder_open),
+            constraints: Util.isMacos()
+                ? const BoxConstraints.tightFor(width: 32, height: 32)
+                : null,
+            padding: Util.isMacos() ? EdgeInsets.zero : null,
+            icon: Icon(
+                Util.isMacos() ? CupertinoIcons.folder : Icons.folder_open),
             onPressed: () async {
               var dir = await FilePicker.platform.getDirectoryPath();
               if (dir != null) {
                 widget.controller.text = dir;
+                if (Util.isMacos() && widget.inlineActions) {
+                  widget.onEditComplete?.call();
+                }
               }
             });
       }
@@ -266,16 +277,60 @@ class _DirectorySelectorState extends State<DirectorySelector> {
             }
 
             return TextFormField(
+              textAlignVertical:
+                  Util.isMacos() ? TextAlignVertical.center : null,
               readOnly:
                   widget.allowEdit ? false : (Util.isWeb() ? false : true),
               controller: widget.controller,
               decoration: widget.showLabel
                   ? InputDecoration(
-                      labelText: 'downloadDir'.tr,
+                      isDense: Util.isMacos() ? true : null,
+                      labelText: Util.isMacos() && widget.inlineActions
+                          ? null
+                          : 'downloadDir'.tr,
+                      constraints: Util.isMacos()
+                          ? const BoxConstraints(minHeight: 36)
+                          : null,
+                      contentPadding: Util.isMacos()
+                          ? const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8)
+                          : null,
+                      suffixIconConstraints:
+                          Util.isMacos() && widget.inlineActions
+                              ? const BoxConstraints.tightFor(height: 32)
+                              : null,
                       suffix: suffix,
+                      suffixIcon: widget.inlineActions
+                          ? Row(mainAxisSize: MainAxisSize.min, children: [
+                              if (buildSelectWidget() != null)
+                                buildSelectWidget()!,
+                              if (buildPlaceholderButton() != null)
+                                buildPlaceholderButton()!,
+                            ])
+                          : null,
                     )
                   : InputDecoration(
+                      isDense: Util.isMacos() ? true : null,
+                      constraints: Util.isMacos()
+                          ? const BoxConstraints(minHeight: 36)
+                          : null,
+                      contentPadding: Util.isMacos()
+                          ? const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8)
+                          : null,
+                      suffixIconConstraints:
+                          Util.isMacos() && widget.inlineActions
+                              ? const BoxConstraints.tightFor(height: 32)
+                              : null,
                       suffix: suffix,
+                      suffixIcon: widget.inlineActions
+                          ? Row(mainAxisSize: MainAxisSize.min, children: [
+                              if (buildSelectWidget() != null)
+                                buildSelectWidget()!,
+                              if (buildPlaceholderButton() != null)
+                                buildPlaceholderButton()!,
+                            ])
+                          : null,
                     ),
               validator: (v) {
                 return v!.trim().isNotEmpty ? null : 'downloadDirValid'.tr;
@@ -288,8 +343,8 @@ class _DirectorySelectorState extends State<DirectorySelector> {
             );
           },
         )),
-        buildSelectWidget(),
-        buildPlaceholderButton(),
+        if (!widget.inlineActions) buildSelectWidget(),
+        if (!widget.inlineActions) buildPlaceholderButton(),
       ].where((e) => e != null).map((e) => e!).toList(),
     );
   }

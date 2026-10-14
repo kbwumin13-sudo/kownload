@@ -18,6 +18,7 @@ import '../modules/task/bindings/task_binding.dart';
 import '../modules/task/bindings/task_files_binding.dart';
 import '../modules/task/views/task_files_view.dart';
 import '../modules/task/views/task_view.dart';
+import '../../util/util.dart';
 
 part 'app_routes.dart';
 
@@ -35,6 +36,7 @@ class AppPages {
         children: [
           GetPage(
               name: _Paths.HOME,
+              transition: Util.isMacos() ? Transition.noTransition : null,
               // participatesInRootNavigator: true,
               // transition: Transition.topLevel,
               // preventDuplicates: true,
@@ -73,7 +75,11 @@ class AppPages {
           ),
           GetPage(
             name: _Paths.CREATE,
-            transition: Transition.downToUp,
+            transition:
+                Util.isMacos() ? Transition.fadeIn : Transition.downToUp,
+            transitionDuration:
+                Util.isMacos() ? const Duration(milliseconds: 150) : null,
+            opaque: !Util.isMacos(),
             // preventDuplicates: true,
             page: () => CreateView(),
             binding: CreateBinding(),

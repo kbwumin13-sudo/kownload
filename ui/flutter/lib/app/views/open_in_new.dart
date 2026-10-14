@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import '../../macos/mac_widgets.dart';
+import '../../util/util.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -10,6 +13,14 @@ class OpenInNew extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (Util.isMacos()) {
+      return MacButton(
+        onPressed: () =>
+            launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+        icon: CupertinoIcons.arrow_up_right,
+        child: Text(text),
+      );
+    }
     return Stack(
       children: [
         ElevatedButton(

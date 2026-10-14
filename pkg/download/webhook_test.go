@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,14 +191,14 @@ func TestWebhook_NoWebhookConfigured(t *testing.T) {
 }
 
 func TestWebhook_MultipleUrls(t *testing.T) {
-	count := 0
+	var count atomic.Int32
 	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count++
+		count.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server1.Close()
 	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		count++
+		count.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server2.Close()
@@ -223,8 +223,8 @@ func TestWebhook_MultipleUrls(t *testing.T) {
 		// Wait for webhooks
 		time.Sleep(500 * time.Millisecond)
 
-		if count != 2 {
-			t.Errorf("Expected 2 webhook calls, got %d", count)
+		if got := count.Load(); got != 2 {
+			t.Errorf("Expected 2 webhook calls, got %d", got)
 		}
 	})
 }
@@ -630,9 +630,9 @@ func TestWebhook_SendWebhookToUrl_VariousStatusCodes(t *testing.T) {
 }
 
 func TestWebhook_TriggerWebhooks_EmptyUrlSkipped(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -653,8 +653,8 @@ func TestWebhook_TriggerWebhooks_EmptyUrlSkipped(t *testing.T) {
 
 		time.Sleep(500 * time.Millisecond)
 
-		if requestCount != 2 {
-			t.Errorf("Expected 2 requests (empty URL should be skipped), got %d", requestCount)
+		if got := requestCount.Load(); got != 2 {
+			t.Errorf("Expected 2 requests (empty URL should be skipped), got %d", got)
 		}
 	})
 }
@@ -815,13 +815,12 @@ func TestWebhook_TestWebhookUrl_VerifyTestPayload(t *testing.T) {
 }
 
 func setupWebhookTest(t *testing.T, fn func(downloader *Downloader)) {
-	defaultDownloader.Setup()
-	defaultDownloader.cfg.StorageDir = ".test_storage"
-	defaultDownloader.cfg.DownloadDir = ".test_download"
-	defer func() {
-		defaultDownloader.Clear()
-		os.RemoveAll(defaultDownloader.cfg.StorageDir)
-		os.RemoveAll(defaultDownloader.cfg.DownloadDir)
-	}()
-	fn(defaultDownloader)
+	t.Helper()
+	downloader := NewDownloader(&DownloaderConfig{StorageDir: t.TempDir()})
+	if err := downloader.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	downloader.cfg.DownloadDir = t.TempDir()
+	defer downloader.Clear()
+	fn(downloader)
 }

@@ -6,6 +6,8 @@ import 'package:window_manager/window_manager.dart'; // Import the required pack
 
 import '../../../../i18n/message.dart';
 import '../../../../theme/theme.dart';
+import '../../../../macos/mac_theme.dart';
+import '../../../../macos/mac_appearance.dart';
 import '../../../../util/locale_manager.dart';
 import '../../../../util/util.dart'; // Import the required packages
 import '../../../routes/app_pages.dart';
@@ -21,8 +23,9 @@ class AppView extends GetView<AppController> {
       child: GetMaterialApp.router(
         useInheritedMediaQuery: true,
         debugShowCheckedModeBanner: false,
-        theme: GopeedTheme.light,
-        darkTheme: GopeedTheme.dark,
+        theme: Util.isMacos() ? macTheme(Brightness.light) : GopeedTheme.light,
+        darkTheme:
+            Util.isMacos() ? macTheme(Brightness.dark) : GopeedTheme.dark,
         themeMode: ThemeMode.values.byName(config.extra.themeMode),
         translations: messages,
         locale: toLocale(config.extra.locale),
@@ -46,8 +49,17 @@ class AppView extends GetView<AppController> {
           }
           // Fix for GetX Overlay issue with Flutter 3.38.1+
           // Reference: https://github.com/jonataslaw/getx/issues/3425
-          return Overlay(
+          final overlay = Overlay(
             initialEntries: [OverlayEntry(builder: (_) => child!)],
+          );
+          if (!Util.isMacos()) return overlay;
+          return ValueListenableBuilder<MacAppearanceState>(
+            valueListenable: MacAppearance.state,
+            builder: (context, appearance, _) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(disableAnimations: appearance.reduceMotion),
+              child: overlay,
+            ),
           );
         },
       ),

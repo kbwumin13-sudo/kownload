@@ -43,15 +43,40 @@ ProtocolConfig _$ProtocolConfigFromJson(Map<String, dynamic> json) =>
     ProtocolConfig()
       ..http = HttpConfig.fromJson(json['http'] as Map<String, dynamic>)
       ..bt = BtConfig.fromJson(json['bt'] as Map<String, dynamic>)
-      ..ed2k = Ed2kConfig.fromJson(
-          json['ed2k'] as Map<String, dynamic>? ?? <String, dynamic>{});
+      ..ed2k = Ed2kConfig.fromJson(json['ed2k'] as Map<String, dynamic>?)
+      ..media = MediaConfig.fromJson(json['media'] as Map<String, dynamic>?);
 
 Map<String, dynamic> _$ProtocolConfigToJson(ProtocolConfig instance) =>
     <String, dynamic>{
       'http': instance.http.toJson(),
       'bt': instance.bt.toJson(),
       'ed2k': instance.ed2k.toJson(),
+      'media': instance.media.toJson(),
     };
+
+MediaConfig _$MediaConfigFromJson(Map<String, dynamic> json) => MediaConfig(
+      ytDlpPath: json['ytDlpPath'] as String? ?? '',
+      ffmpegPath: json['ffmpegPath'] as String? ?? '',
+      jsRuntimePath: json['jsRuntimePath'] as String?,
+      connections: (json['connections'] as num?)?.toInt() ?? 4,
+    );
+
+Map<String, dynamic> _$MediaConfigToJson(MediaConfig instance) {
+  final val = <String, dynamic>{
+    'ytDlpPath': instance.ytDlpPath,
+    'ffmpegPath': instance.ffmpegPath,
+  };
+
+  void writeNotNull(String key, dynamic value) {
+    if (value != null) {
+      val[key] = value;
+    }
+  }
+
+  writeNotNull('jsRuntimePath', instance.jsRuntimePath);
+  val['connections'] = instance.connections;
+  return val;
+}
 
 HttpConfig _$HttpConfigFromJson(Map<String, dynamic> json) => HttpConfig(
       userAgent: json['userAgent'] as String? ?? '',

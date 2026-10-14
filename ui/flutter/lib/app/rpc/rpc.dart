@@ -15,13 +15,7 @@ class RpcContext {
 
   /// Read and parse JSON request body
   Future<Map<String, dynamic>> readJSON() async {
-    if (_bodyCache == null) {
-      final content = <int>[];
-      await for (var data in request) {
-        content.addAll(data);
-      }
-      _bodyCache = String.fromCharCodes(content);
-    }
+    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
 
     if (_bodyCache!.isEmpty) {
       return {};
@@ -31,13 +25,7 @@ class RpcContext {
   }
 
   Future<String> readText() async {
-    if (_bodyCache == null) {
-      final content = <int>[];
-      await for (var data in request) {
-        content.addAll(data);
-      }
-      _bodyCache = String.fromCharCodes(content);
-    }
+    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
 
     return _bodyCache ?? '';
   }
