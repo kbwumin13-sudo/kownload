@@ -2,6 +2,10 @@
 
 <div align="center">
 
+<p>
+  <a href="docs/BRAND.md"><img src="docs/brand/app-icon.png" width="112" height="112" alt="kownload 图标：白色圆角底板上的翡翠绿色折带小写 k"></a>
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/hero-dark.webp">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/readme/hero-light.webp">
@@ -261,6 +265,7 @@ GOPEED_PREVIEW_STORAGE=/tmp/kownload-preview \
 | :-- | :-- |
 | [MACOS_FRONTEND.md](MACOS_FRONTEND.md) | 构建、窗口与视觉、隔离实测、安装与回退 |
 | [DESIGN.md](DESIGN.md) | 产品与视觉设计约定 |
+| [docs/BRAND.md](docs/BRAND.md) | 应用图标与菜单栏模板图标 |
 | [MEDIA_SNIFFER.md](MEDIA_SNIFFER.md) | 媒体引擎、浏览器助手与接口 |
 | [NETDISK.md](NETDISK.md) | 网盘 REST 接口与任务流程 |
 | [NETDISK_PROVIDERS.md](NETDISK_PROVIDERS.md) | 九类网盘的实现范围与验证 |
