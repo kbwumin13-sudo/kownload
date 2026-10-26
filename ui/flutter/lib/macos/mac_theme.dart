@@ -26,16 +26,19 @@ ThemeData macTheme(Brightness brightness) {
     canvasColor: c.surface,
     dividerColor: c.border,
     textTheme: base.textTheme
-        .apply(bodyColor: c.text, displayColor: c.text)
         .copyWith(
-            bodyMedium: TextStyle(fontSize: 13, height: 1.4, color: c.text),
+            bodyMedium: TextStyle(fontSize: 13, height: 1.25, color: c.text),
             bodyLarge: TextStyle(fontSize: 13, color: c.text),
             titleMedium: TextStyle(
                 fontSize: 14, fontWeight: FontWeight.w600, color: c.text),
             titleLarge: TextStyle(
                 fontSize: 17, fontWeight: FontWeight.w600, color: c.text),
             labelLarge:
-                const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))
+        .apply(
+            fontFamily: '.AppleSystemUIFont',
+            bodyColor: c.text,
+            displayColor: c.text),
     cupertinoOverrideTheme:
         CupertinoThemeData(brightness: brightness, primaryColor: c.accent),
     appBarTheme: AppBarTheme(
@@ -44,9 +47,9 @@ ThemeData macTheme(Brightness brightness) {
         foregroundColor: c.text,
         centerTitle: false,
         titleTextStyle:
-            TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: c.text),
-        toolbarHeight: 56),
-    iconTheme: IconThemeData(color: c.secondary, size: 18),
+            TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: c.text),
+        toolbarHeight: 44),
+    iconTheme: IconThemeData(color: c.secondary, size: 16),
     iconButtonTheme: IconButtonThemeData(
         style: IconButton.styleFrom(
             minimumSize: const Size(28, 28), padding: const EdgeInsets.all(5))),
@@ -54,7 +57,7 @@ ThemeData macTheme(Brightness brightness) {
         isDense: true,
         filled: true,
         fillColor: c.surface,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
         border: border,
         enabledBorder: border,
         focusedBorder: border.copyWith(
@@ -62,10 +65,10 @@ ThemeData macTheme(Brightness brightness) {
         labelStyle: TextStyle(fontSize: 12, color: c.secondary),
         hintStyle: TextStyle(fontSize: 12, color: c.secondary)),
     dialogTheme: DialogThemeData(
-        backgroundColor: c.surface,
-        elevation: 18,
+        backgroundColor: c.background,
+        elevation: 16,
         shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
             side: BorderSide(color: c.border)),
         titleTextStyle:
             TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: c.text),
@@ -93,16 +96,16 @@ ThemeData macTheme(Brightness brightness) {
     outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
             foregroundColor: c.text,
-            minimumSize: const Size(30, 30),
+            minimumSize: const Size(28, 28),
             side: BorderSide(color: c.border),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(7)))),
     elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
             backgroundColor: c.accent,
-            foregroundColor: c.dark ? const Color(0xff102b1c) : Colors.white,
+            foregroundColor: c.primaryText,
             elevation: 0,
-            minimumSize: const Size(30, 30),
+            minimumSize: const Size(28, 28),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(7)))),
     tabBarTheme: TabBarThemeData(

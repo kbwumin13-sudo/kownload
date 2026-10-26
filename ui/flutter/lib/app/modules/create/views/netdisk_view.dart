@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
@@ -9,6 +8,8 @@ import '../../../../api/model/options.dart';
 import '../../../../api/model/request.dart';
 import '../../../../api/netdisk.dart';
 import '../../../../macos/mac_widgets.dart';
+import '../../../../macos/mac_panel.dart';
+import '../../../../util/browser_profile_access.dart';
 import '../../../../util/netdisk_browser.dart';
 import '../../../views/directory_selector.dart';
 
@@ -58,6 +59,9 @@ class _NetdiskViewState extends State<NetdiskView> {
   String _title = '';
   String? _error;
   String? _notice;
+  String? _browserDiscoveryError;
+  bool _serviceLoading = false;
+  bool _discovering = false;
   String? _requestId;
   Timer? _pollTimer;
   int _generation = 0;
@@ -79,38 +83,62 @@ class _NetdiskViewState extends State<NetdiskView> {
       _selected[file.key] = file;
     }
     _providerName = netdiskProviders[_source.provider] ?? '网盘';
-    _initialize();
+    _loadServiceInfo();
+    _loadBrowsers();
     if (!_resumeOnly && _files.isEmpty && _sessionId.isNotEmpty) _load();
   }
 
-  Future<void> _initialize() async {
+  Future<void> _loadServiceInfo() async {
     // Independent metadata failures must not hide a captured selection.
-    final results = await Future.wait([
-      _api.providers().then<Object>((v) => v).catchError((Object e) => e),
-      _browserTool
-          .browsers()
-          .then<Object>((v) => v)
-          .catchError((Object e) => e),
-    ]);
-    if (!_active) return;
-    setState(() {
-      if (results[0] is List<NetdiskProviderInfo>) {
-        for (final info in results[0] as List<NetdiskProviderInfo>) {
-          if (info.id == _source.provider) _providerName = info.name;
-        }
-      } else {
-        _notice = '无法读取网盘服务信息，请确认下载服务已更新。';
-      }
-      if (results[1] is List<NetdiskBrowser>) {
-        _browsers = results[1] as List<NetdiskBrowser>;
-        if (_browsers.isNotEmpty) {
-          _browser = _browsers.first;
-          if (_browser!.profiles.isNotEmpty) {
-            _profile = _browser!.profiles.first;
+    if (!_active || _serviceLoading) return;
+    setState(() => _serviceLoading = true);
+    try {
+      final providers = await _api.providers();
+      if (!_active) return;
+      setState(() {
+        _notice = '当前下载服务不支持$_providerName，请检查服务版本。';
+        for (final info in providers) {
+          if (info.id == _source.provider) {
+            _providerName = info.name;
+            _notice = null;
           }
         }
-      }
-    });
+      });
+    } catch (e) {
+      if (_active) setState(() => _notice = _message(e));
+    } finally {
+      if (_active) setState(() => _serviceLoading = false);
+    }
+  }
+
+  Future<void> _loadBrowsers() async {
+    if (!_active || _discovering) return;
+    setState(() => _discovering = true);
+    try {
+      final browsers = await _browserTool.browsers();
+      if (!_active) return;
+      setState(() {
+        final previousApplication = _browser?.application;
+        final previousDirectory = _profile?.directory;
+        _browsers = browsers;
+        _browser = null;
+        _profile = null;
+        _browserDiscoveryError = null;
+        for (final browser in browsers) {
+          if (browser.application == previousApplication) _browser = browser;
+        }
+        _browser ??= browsers.where((b) => b.profiles.isNotEmpty).firstOrNull;
+        _browser ??= browsers.firstOrNull;
+        for (final profile in _browser?.profiles ?? <NetdiskBrowserProfile>[]) {
+          if (profile.directory == previousDirectory) _profile = profile;
+        }
+        _profile ??= _browser?.profiles.firstOrNull;
+      });
+    } catch (e) {
+      if (_active) setState(() => _browserDiscoveryError = _message(e));
+    } finally {
+      if (_active) setState(() => _discovering = false);
+    }
   }
 
   String _message(Object error) {
@@ -268,11 +296,10 @@ class _NetdiskViewState extends State<NetdiskView> {
       _error = null;
     });
     try {
-      final chosen = await FilePicker.platform
-          .pickFiles(dialogTitle: '选择 ${browser.name} 的 Local State 文件（仅本次使用）');
-      if (!_active || chosen == null) return;
-      final path = chosen.files.single.path;
-      if (path == null) return;
+      final path = await MacPanel.transient(() => BrowserProfileAccess.choose(
+          title: '允许 kownload 读取 ${browser.name} 的个人资料名称',
+          path: browser.localStatePath));
+      if (!_active || path == null) return;
       final profiles = await _browserTool.readProfiles(path);
       if (!_active) return;
       if (profiles.isEmpty) {
@@ -311,7 +338,6 @@ class _NetdiskViewState extends State<NetdiskView> {
     setState(() {
       _waiting = true;
       _error = null;
-      _notice = null;
     });
     try {
       // Do not invent an instance ID from the profile name: the helper claims
@@ -538,7 +564,7 @@ class _NetdiskViewState extends State<NetdiskView> {
                                       .map((b) => DropdownMenuItem(
                                           value: b, child: Text(b.name)))
                                       .toList(),
-                                  onChanged: _locked
+                                  onChanged: _locked || _discovering
                                       ? null
                                       : (b) => setState(() {
                                             _browser = b;
@@ -560,23 +586,25 @@ class _NetdiskViewState extends State<NetdiskView> {
                                           child: Text(p.name,
                                               overflow: TextOverflow.ellipsis)))
                                       .toList(),
-                                  onChanged: _locked
+                                  onChanged: _locked || _discovering
                                       ? null
                                       : (p) => setState(() {
                                             _profile = p;
                                           }),
                                 )),
                             MacButton(
-                                onPressed: _locked || _profile == null
-                                    ? null
-                                    : _syncBrowser,
+                                onPressed:
+                                    _locked || _discovering || _profile == null
+                                        ? null
+                                        : _syncBrowser,
                                 child: Text(_resumeOnly || _sessionId.isNotEmpty
                                     ? '重新同步登录'
                                     : '打开页面并同步')),
                             TextButton(
-                                onPressed: _locked || _browser == null
-                                    ? null
-                                    : _chooseLocalState,
+                                onPressed:
+                                    _locked || _discovering || _browser == null
+                                        ? null
+                                        : _chooseLocalState,
                                 child: const Text('选择资料文件')),
                           ]),
                       if (_waiting) ...[
@@ -604,11 +632,36 @@ class _NetdiskViewState extends State<NetdiskView> {
                                 '请在所选个人资料中启用 kownload 网页助手，登录原网盘页面。同步超时可取消后重试。',
                                 style: TextStyle(fontSize: 12))),
                       if (_browsers.isEmpty &&
+                          !_discovering &&
+                          _browserDiscoveryError == null &&
                           (_resumeOnly || _sessionId.isEmpty))
                         const Text('未找到 Chrome 或 Edge。请安装浏览器并启用网页助手后再打开此窗口。',
                             style: TextStyle(fontSize: 12)),
+                      if (_browserDiscoveryError != null ||
+                          (_browser != null && _browser!.profiles.isEmpty)) ...[
+                        Text(
+                            _browserDiscoveryError ??
+                                _browser!.profileError?.message ??
+                                '该浏览器没有可用的个人资料：${_browser!.localStatePath}。请选择实际使用的 Local State 文件。',
+                            key: const ValueKey('netdisk-profile-error'),
+                            style: const TextStyle(fontSize: 12)),
+                      ],
+                      if (!_discovering)
+                        TextButton(
+                            onPressed: _locked ? null : _loadBrowsers,
+                            child: const Text('重新读取资料')),
                       if (_notice != null)
-                        Text(_notice!, style: const TextStyle(fontSize: 12)),
+                        Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(_notice!,
+                                  style: const TextStyle(fontSize: 12)),
+                              TextButton(
+                                  onPressed: _serviceLoading || _locked
+                                      ? null
+                                      : _loadServiceInfo,
+                                  child: const Text('重试服务信息')),
+                            ]),
                       if (_error != null)
                         Padding(
                             padding: const EdgeInsets.only(top: 6),

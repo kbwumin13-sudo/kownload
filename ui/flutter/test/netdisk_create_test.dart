@@ -29,7 +29,7 @@ class _HistoryBox extends Fake implements Box {
   final stored = <dynamic, dynamic>{};
   @override
   dynamic get(dynamic key, {dynamic defaultValue}) =>
-      stored[key] ?? defaultValue;
+      key == 'macDownloadOnboarding.v1' ? true : stored[key] ?? defaultValue;
   @override
   Future<void> put(dynamic key, dynamic value) async {
     stored[key] = value;
@@ -241,6 +241,7 @@ void main() {
             of: find.byType(CreateView), matching: find.byType(TextFormField))
         .first;
     await tester.enterText(url, prose);
+    await tester.pump();
     await tester.tap(find.byTooltip('开始下载'));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump();

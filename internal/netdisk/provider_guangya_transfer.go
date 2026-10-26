@@ -10,7 +10,7 @@ func (p *guangyaProvider) task(ctx context.Context, c *APIClient, s *Session, sr
 		return Fail("invalid_transfer", "光鸭没有返回转存任务 ID")
 	}
 	for i := 0; i < 120; i++ {
-		r, e := p.call(ctx, c, s, src, "/userres/v1/get_task_status", object{"taskId": id})
+		r, e := p.call(ctx, c, s, src, "/nd.bizuserres.s/v1/get_task_status", object{"taskId": id})
 		if e != nil {
 			return e
 		}
@@ -44,7 +44,7 @@ func (p *guangyaProvider) Transfer(ctx context.Context, c *APIClient, s *Session
 	if e != nil {
 		return nil, e
 	}
-	r, e := p.call(ctx, c, s, src, "/userres/v1/file/create_dir", object{"parentId": "", "dirName": folderName(batch), "failIfNameExist": true})
+	r, e := p.call(ctx, c, s, src, "/nd.bizuserres.s/v1/file/create_dir", object{"parentId": "", "dirName": folderName(batch), "failIfNameExist": true})
 	if e != nil {
 		return nil, e
 	}
@@ -110,7 +110,7 @@ func (p *guangyaProvider) Cleanup(ctx context.Context, c *APIClient, s *Session,
 		if len(ids) == 0 {
 			continue
 		}
-		v, e := p.call(ctx, c, s, r.Source, "/userres/v1/file/delete_file", object{"fileIds": ids})
+		v, e := p.call(ctx, c, s, r.Source, "/nd.bizuserres.s/v1/file/delete_file", object{"fileIds": ids})
 		if e != nil {
 			return e
 		}

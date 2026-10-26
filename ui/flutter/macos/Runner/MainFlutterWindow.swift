@@ -83,6 +83,7 @@ class MainFlutterWindow: NSWindow {
   private var containerController: NSViewController?
   private var appearanceChannel: FlutterMethodChannel?
   private var panelChannel: FlutterMethodChannel?
+  private var browserProfileChannel: FlutterMethodChannel?
   private var observers: [(NotificationCenter, NSObjectProtocol)] = []
   private let hotKey = PanelHotKey()
   // Also used by the native harness without starting a Flutter engine.
@@ -160,6 +161,12 @@ class MainFlutterWindow: NSWindow {
       self.handlePanelCall(call, result: result)
     }
     hotKey.onPressed = { [weak self] in self?.sendPanelEvent?("command", "togglePanel") }
+
+    let profiles = FlutterMethodChannel(name: "gopeed/browser_profiles", binaryMessenger: messenger)
+    browserProfileChannel = profiles
+    profiles.setMethodCallHandler { [weak self] call, result in
+      self?.handleBrowserProfileCall(call, result: result)
+    }
 
     let appearance = FlutterMethodChannel(name: "gopeed/macos_appearance", binaryMessenger: messenger)
     appearanceChannel = appearance
@@ -333,6 +340,95 @@ class MainFlutterWindow: NSWindow {
   }
 
   func hidePanel() { orderOut(nil) }
+
+  /// Return only display metadata. Local State also contains encryption and
+  /// account fields, which must never cross this channel or be persisted here.
+  static func browserProfileMetadata(_ data: Data) throws -> String {
+    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let profile = root["profile"] as? [String: Any],
+          let cache = profile["info_cache"] as? [String: Any] else {
+      throw NSError(domain: "kownload.profile", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "浏览器资料文件格式无效"])
+    }
+    var names: [String: [String: String]] = [:]
+    for (directory, raw) in cache {
+      guard directory == "Default" || directory.range(of: "^Profile [0-9]+$", options: .regularExpression) != nil else { continue }
+      let info = raw as? [String: Any]
+      let name = (info?["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? directory
+      names[directory] = ["name": name]
+    }
+    let result = try JSONSerialization.data(withJSONObject: ["profile": ["info_cache": names]])
+    return String(decoding: result, as: UTF8.self)
+  }
+
+  func handleBrowserProfileCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any], let path = args["path"] as? String,
+          path.hasPrefix("/"), URL(fileURLWithPath: path).lastPathComponent == "Local State" else {
+      result(FlutterError(code: "invalid_profile", message: "请选择浏览器的 Local State 文件", details: nil)); return
+    }
+    let defaults = UserDefaults.standard
+    let key = "netdiskProfileFileBookmarks"
+    if call.method == "choose" {
+      let picker = NSOpenPanel()
+      picker.title = args["title"] as? String ?? "允许读取浏览器个人资料名称"
+      picker.message = "请选择 Local State。仅读取个人资料名称，不读取 Cookie 或密码。"
+      picker.prompt = "允许读取"
+      picker.canChooseDirectories = false
+      picker.allowsMultipleSelection = false
+      picker.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
+      picker.beginSheetModal(for: self) { response in
+        guard response == .OK, let url = picker.url else { result(nil); return }
+        guard url.lastPathComponent == "Local State" else {
+          result(FlutterError(code: "invalid_profile", message: "请选择名为 Local State 的文件", details: nil)); return
+        }
+        if let bookmark = try? url.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                               includingResourceValuesForKeys: nil, relativeTo: nil) {
+          var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
+          bookmarks[url.path] = bookmark
+          defaults.set(bookmarks, forKey: key)
+        }
+        // A bookmark is a convenience for later runs, not a prerequisite for
+        // reading the file the user just selected through this app's panel.
+        result(url.path)
+      }
+      return
+    }
+    guard call.method == "read" else { result(FlutterMethodNotImplemented); return }
+    do {
+      let currentURL = URL(fileURLWithPath: path)
+      var scopeURL = currentURL
+      var stale = false
+      if let bookmark = (defaults.dictionary(forKey: key) as? [String: Data])?[path] {
+        if let resolved = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
+                                   relativeTo: nil, bookmarkDataIsStale: &stale),
+           resolved.standardizedFileURL == currentURL.standardizedFileURL {
+          scopeURL = resolved
+        } else {
+          // A browser can atomically replace Local State. An obsolete bookmark
+          // must not prevent a read the OS already permits at the current path.
+          stale = true
+        }
+      }
+      let scoped = scopeURL.startAccessingSecurityScopedResource()
+      defer { if scoped { scopeURL.stopAccessingSecurityScopedResource() } }
+      let metadata = try Self.browserProfileMetadata(Data(contentsOf: currentURL))
+      if stale, let renewed = try? currentURL.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                                          includingResourceValuesForKeys: nil, relativeTo: nil) {
+        var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
+        bookmarks[path] = renewed
+        defaults.set(bookmarks, forKey: key)
+      }
+      result(metadata)
+    } catch {
+      let ns = error as NSError
+      let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+      let denied = (ns.domain == NSCocoaErrorDomain && ns.code == NSFileReadNoPermissionError)
+        || (underlying?.domain == NSPOSIXErrorDomain && [1, 13].contains(underlying?.code ?? 0))
+      result(FlutterError(code: denied ? "profile_permission_denied" : "profile_read_failed",
+        message: denied ? "没有权限读取浏览器个人资料：\(path)。请点“选择资料文件”允许读取。"
+          : "无法读取浏览器个人资料：\(path)。\(error.localizedDescription)", details: nil))
+    }
+  }
   func openPanel() { sendPanelEvent?("command", "openPanel") }
   func unregisterHotKey() { hotKey.unregister() }
 

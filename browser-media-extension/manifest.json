@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "kownload 下载助手",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "将选中的网盘文件与网页媒体交给 kownload 下载",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlCCU/HyM4Lv/d0TaB5Mh39aQoaqgXghQfxgEr1CwXR8KDqLFKTZxvmLywyTe8/uqHJwpBaRW9GeFWk17ZlDlzKdQSb1M9N1GNEbFypQRmt0jTHaP9OZr7G+SRfSyAay5YGD19Pk7yXR2h5SEAfb3vUwMO0mwcKT/xWWeGwyXelPvke/EhYOxcwRTSI8ge8IxkspdWQCyeY9FmAP9gVAOr/Lj0TLEomThfYmNxiQoITZGKqol4po5HMgA9nSmmOB07z41+0jlIBd7YHY/2O+uG+if8/n9gC6NzSpd84hcWDSFjmHOaBg+o9dWBmNdF1cEl5/g7tNibFlYOMpEOIe2lQIDAQAB",
   "permissions": [
@@ -24,7 +24,7 @@
     {
       "matches": [
         "*://pan.baidu.com/*", "*://yun.baidu.com/*",
-        "*://www.aliyundrive.com/*", "*://www.alipan.com/*",
+        "*://www.aliyundrive.com/*", "*://www.alipan.com/*", "*://alipan.com/*",
         "*://yun.139.com/*", "*://caiyun.139.com/*",
         "*://cloud.189.cn/*", "*://pan.xunlei.com/*",
         "*://pan.quark.cn/*", "*://drive.uc.cn/*",

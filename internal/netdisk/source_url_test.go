@@ -148,3 +148,135 @@ func TestSourceURLValidatePreservesTransferredPersonalIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceURLPersonalHomeRedirectClaimAndCapture(t *testing.T) {
+	for _, tc := range []struct{ entry, home string }{
+		{"https://pan.quark.cn/", "https://pan.quark.cn/list?gopeed_request=marker#/list/all"},
+		{"https://pan.quark.cn", "https://pan.quark.cn/list#/list/all"},
+		{"https://drive.uc.cn/", "https://drive.uc.cn/list?gopeed_request=marker#/list/all"},
+		{"https://www.alipan.com/drive/file/all", "https://alipan.com/drive/file/all?gopeed_request=marker"},
+		{"https://yun.139.com/", "https://yun.139.com/w/#/index?gopeed_request=marker"},
+		{"https://yun.139.com", "https://yun.139.com/w/#/index"},
+		{"https://yun.139.com/", "https://yun.139.com/w/#/?gopeed_request=marker"},
+		{"https://cloud.189.cn/web/main/", "https://cloud.189.cn/web/main/file/folder/-11?gopeed_request=marker"},
+	} {
+		t.Run(tc.entry, func(t *testing.T) {
+			for _, reverse := range []bool{false, true} {
+				entry, home := tc.entry, tc.home
+				if reverse {
+					entry, home = home, entry
+				}
+				s := NewService()
+				src, err := s.Detect(entry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request, err := s.RequestBrowser(src, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, id := range []string{"", "wrong-request"} {
+					claim, err := s.Claim(home, "browser", "chrome", "7:0:doc:0:store", id)
+					if err != nil || claim != nil {
+						t.Fatalf("unbound request claimed without its ID: %+v, %v", claim, err)
+					}
+				}
+				claim, err := s.Claim(home, "browser", "chrome", "7:0:doc:0:store", request.ID)
+				if err != nil || claim == nil || claim.Request.ID != request.ID {
+					t.Fatalf("home redirect failed claim: %+v, %v", claim, err)
+				}
+				unknownPath, _ := url.Parse(entry)
+				unknownPath.Path, unknownPath.RawQuery, unknownPath.Fragment = "/unknown", "", ""
+				unknownRoute, _ := url.Parse(home)
+				unknownRoute.Fragment = "/unknown"
+				for _, page := range []string{unknownPath.String(), unknownRoute.String()} {
+					badRequest, err := s.RequestBrowser(src, "browser")
+					if err != nil {
+						t.Fatal(err)
+					}
+					badClaim, err := s.Claim(home, "browser", "chrome", "9:0:bad-doc:0:store", badRequest.ID)
+					if err != nil || badClaim == nil {
+						t.Fatalf("failed to claim boundary fixture: %v", err)
+					}
+					if _, err := s.Capture(badRequest.ID, badClaim.Nonce, model.Capture{Provider: src.Provider, SourcePage: page, InstanceID: "browser", ContextID: "9:0:bad-doc:0:store"}); err == nil {
+						t.Fatalf("unknown page captured home request: %s", page)
+					}
+					s.CancelBrowser(badRequest.ID)
+				}
+				for _, context := range []struct{ instance, tab string }{
+					{"browser", "8:0:doc:0:store"},
+					{"other-browser", "7:0:doc:0:store"},
+					{"browser", "7:0:doc:0:other-store"},
+				} {
+					other, err := s.Claim(entry, context.instance, "chrome", context.tab, request.ID)
+					if err != nil || other != nil {
+						t.Fatalf("another context took home request: %+v, %v", other, err)
+					}
+					if _, err := s.Capture(request.ID, claim.Nonce, model.Capture{Provider: src.Provider, SourcePage: home, InstanceID: context.instance, ContextID: context.tab}); err == nil {
+						t.Fatal("another context captured home request")
+					}
+				}
+				reloaded, err := s.Claim(home, "browser", "chrome", "7:0:new-doc:1:store", request.ID)
+				if err != nil || reloaded == nil || reloaded.Nonce == claim.Nonce {
+					t.Fatalf("same-tab reload failed to renew claim: %+v, %v", reloaded, err)
+				}
+				capture := model.Capture{Provider: src.Provider, SourcePage: home, InstanceID: "browser", ContextID: "7:0:new-doc:1:store"}
+				if _, err := s.Capture(request.ID, claim.Nonce, capture); err == nil {
+					t.Fatal("stale nonce captured home request")
+				}
+				result, err := s.Capture(request.ID, reloaded.Nonce, capture)
+				if err != nil || result.SessionID == "" {
+					t.Fatalf("home redirect failed capture: %+v, %v", result, err)
+				}
+				status, err := s.BrowserStatus(request.ID)
+				if err != nil || status.State != "ready" {
+					t.Fatalf("home request did not leave waiting: %+v, %v", status, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSourceURLPersonalHomeBoundaries(t *testing.T) {
+	for _, tc := range []struct{ expected, current string }{
+		{"https://pan.quark.cn/", "https://pan.quark.cn/unknown"},
+		{"https://pan.quark.cn/", "https://pan.quark.cn/list/unknown#/list/all"},
+		{"https://pan.quark.cn/", "https://pan.quark.cn/list#/list/share"},
+		{"https://pan.quark.cn/list#/list/all", "https://pan.quark.cn/list#/unknown"},
+		{"https://pan.quark.cn/", "https://pan.quark.cn/s/abc"},
+		{"https://pan.quark.cn/s/abc", "https://pan.quark.cn/s/other"},
+		{"https://yun.139.com/", "https://yun.139.com/unknown"},
+		{"https://yun.139.com/", "https://yun.139.com/w/#/unknown"},
+		{"https://yun.139.com/w/#/index", "https://yun.139.com/w/#/w/i/abc"},
+		{"https://yun.139.com/", "https://yun.139.com/shareweb/#/w/i/abc"},
+		{"https://yun.139.com/shareweb/#/w/i/abc", "https://yun.139.com/shareweb/#/w/i/other"},
+		{"https://pan.quark.cn/", "https://yun.139.com/w/#/index"},
+		{"https://pan.quark.cn/", "https://drive.uc.cn/list#/list/all"},
+		{"https://drive.uc.cn/", "https://drive.uc.cn/unknown"},
+		{"https://drive.uc.cn/list#/list/all", "https://drive.uc.cn/list#/unknown"},
+		{"https://drive.uc.cn/s/abc", "https://drive.uc.cn/s/other"},
+		{"https://www.alipan.com/drive/file/all", "https://alipan.com/unknown"},
+		{"https://www.alipan.com/unknown", "https://alipan.com/unknown"},
+		{"https://www.alipan.com/drive/file/all", "https://other.alipan.com/drive/file/all"},
+		{"https://www.alipan.com/drive/file/all", "https://api.alipan.com/drive/file/all"},
+		{"https://www.alipan.com/drive/file/all", "https://www.aliyundrive.com/drive/file/all"},
+		{"https://www.alipan.com/drive/file/all", "https://alipan.com/drive/file/all#/unknown"},
+		{"https://www.alipan.com/s/abc", "https://alipan.com/s/other"},
+	} {
+		t.Run(tc.expected+" to "+tc.current, func(t *testing.T) {
+			s := NewService()
+			src, err := s.Detect(tc.expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := s.RequestBrowser(src, "browser")
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := s.Claim(tc.current, "browser", "chrome", "tab", request.ID)
+			if err != nil || claim != nil {
+				t.Fatalf("unrelated page claimed home request: %+v, %v", claim, err)
+			}
+		})
+	}
+}

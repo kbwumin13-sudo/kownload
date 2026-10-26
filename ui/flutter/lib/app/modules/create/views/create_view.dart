@@ -29,7 +29,9 @@ import '../../../../util/util.dart';
 import '../../../../util/netdisk_browser.dart';
 import '../../../../macos/mac_widgets.dart';
 import '../../../../macos/mac_glass.dart';
+import '../../../../macos/mac_appearance.dart';
 import '../../../../macos/mac_panel.dart';
+import '../../../../macos/mac_onboarding.dart';
 import '../../task/controllers/task_controller.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/compact_checkbox.dart';
@@ -70,11 +72,14 @@ class _CreateViewState extends State<CreateView> {
   NetdiskBrowserTool? get netdiskBrowserTool => widget.netdiskBrowserTool;
   final _inputFocus = FocusNode();
   final _panelError = RxnString();
+  final _panelShowCompleted = false.obs;
   final _queuedInputs = <CreateTask>[];
   CreateTask? _panelRequest;
   Request? _originalRequest;
   Uri? _credentialOrigin;
   bool _clipboardChecked = false;
+  Future<bool>? _onboarding;
+  String? _lastDefaultDownloadPath;
   Worker? _pendingWorker;
   @override
   void initState() {
@@ -93,7 +98,8 @@ class _CreateViewState extends State<CreateView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted &&
           MacPanel.presentation.value == 'panel' &&
-          !_netdiskOpen.value) {
+          !_netdiskOpen.value &&
+          _onboarding == null) {
         _inputFocus.requestFocus();
       }
     });
@@ -102,7 +108,9 @@ class _CreateViewState extends State<CreateView> {
   void _receiveInput() {
     final task = MacPanel.incoming.value;
     if (task == null) return;
-    if (controller.isConfirming.value || _netdiskOpen.value) {
+    if (controller.isConfirming.value ||
+        _netdiskOpen.value ||
+        _onboarding != null) {
       _queuedInputs.add(task);
       return;
     }
@@ -228,7 +236,9 @@ class _CreateViewState extends State<CreateView> {
           .downloaderConfig.value.protocolConfig.http.connections
           .toString();
     }
-    if (_pathController.text.isEmpty) {
+    if (Util.isMacos()) {
+      _syncDefaultDownloadPath();
+    } else if (_pathController.text.isEmpty) {
       // Render placeholders when initializing the path
       final downloadDir = appController.downloaderConfig.value.downloadDir;
       _pathController.text = renderPathPlaceholders(downloadDir);
@@ -351,6 +361,7 @@ class _CreateViewState extends State<CreateView> {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!context.mounted) return;
         try {
+          if (!await _ensureMacOnboarding() || !mounted) return;
           if (await _showPendingNetdiskTask()) return;
           final request = _netdiskRequest.value;
           if (request != null &&
@@ -546,9 +557,8 @@ class _CreateViewState extends State<CreateView> {
                                       height: 14,
                                       child: CircularProgressIndicator(
                                           strokeWidth: 2,
-                                          color: MacColors.of(context).dark
-                                              ? const Color(0xff102b1c)
-                                              : Colors.white))
+                                          color: MacColors.of(context)
+                                              .primaryText))
                                   : Text('confirm'.tr)),
                         ])),
               ))
@@ -1165,7 +1175,7 @@ class _CreateViewState extends State<CreateView> {
       ),
     );
     if (!Util.isMacos()) return content;
-    return _buildMacPanel(context, content, torrentButton);
+    return _buildMacPanel(context, content);
   }
 
   Request _requestForUrl(String url) {
@@ -1250,7 +1260,8 @@ class _CreateViewState extends State<CreateView> {
     final config = Get.find<AppController>().downloaderConfig.value;
     _connectionsController.text =
         config.protocolConfig.http.connections.toString();
-    _pathController.text = renderPathPlaceholders(config.downloadDir);
+    _lastDefaultDownloadPath = renderPathPlaceholders(config.downloadDir);
+    _pathController.text = _lastDefaultDownloadPath!;
     controller.directDownload.value = config.extra.defaultDirectDownload;
   }
 
@@ -1258,6 +1269,7 @@ class _CreateViewState extends State<CreateView> {
     if (!mounted ||
         controller.isConfirming.value ||
         _netdiskOpen.value ||
+        _onboarding != null ||
         _queuedInputs.isEmpty) return;
     final next = _queuedInputs.removeAt(0);
     MacPanel.cancelAutoHide();
@@ -1283,259 +1295,436 @@ class _CreateViewState extends State<CreateView> {
     _originalRequest = null;
   }
 
-  Widget _buildMacPanel(
-      BuildContext context, Widget fullForm, Widget torrentButton) {
+  Widget _buildMacPanel(BuildContext context, Widget fullForm) {
     final c = MacColors.of(context);
-    return Obx(() {
-      final expanded = controller.showAdvanced.value;
-      final taskList = Get.isRegistered<MacTaskListController>()
-          ? Get.find<MacTaskListController>()
-          : null;
-      final tasks = taskList?.tasks
-              .where((t) => t.status != Status.done)
-              .take(3)
-              .toList() ??
-          <Task>[];
-      final error = _panelError.value;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_netdiskOpen.value && Get.isDialogOpen != true) {
-          MacPanel.resize(expanded
-              ? 700
-              : 242 + tasks.length * 58 + (error == null ? 0 : 46));
-        }
-      });
-      return CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.comma, meta: true): () =>
-              MacPanel.showSettings(),
-          const SingleActivator(LogicalKeyboardKey.escape): () {
-            if (!_urlController.value.composing.isValid ||
-                _urlController.value.composing.isCollapsed) {
-              _cancelCreate();
-            }
-          },
-        },
-        child: Material(
-            color: Colors.transparent,
-            child: Column(children: [
-              Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 20, 16, 12),
-                  child: Row(children: [
-                    MacSymbol('link',
-                        fallback: CupertinoIcons.link,
-                        size: 28,
-                        color: c.secondary),
-                    const SizedBox(width: 14),
-                    Expanded(
-                        child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                          Text('添加下载',
-                              style: TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w600,
-                                  color: c.text)),
-                          const SizedBox(height: 3),
-                          Text('kownload',
-                              style:
-                                  TextStyle(fontSize: 12, color: c.secondary)),
-                        ])),
-                    ValueListenableBuilder<String>(
-                        valueListenable: MacPanel.hotKeyLabel,
-                        builder: (_, label, __) => Text(label,
-                            style:
-                                TextStyle(fontSize: 12, color: c.secondary))),
-                    const SizedBox(width: 8),
-                    IconButton(
-                        tooltip: '设置',
-                        onPressed: () => MacPanel.showSettings(),
-                        icon: const Icon(CupertinoIcons.gear, size: 18)),
-                  ])),
-              if (expanded && error != null)
-                Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
-                    child: Text(error,
-                        maxLines: 2,
-                        style: const TextStyle(
-                            fontSize: 12, color: CupertinoColors.systemRed))),
-              if (expanded)
-                Expanded(child: fullForm)
-              else
-                Expanded(
-                    child: SingleChildScrollView(
-                        child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 18),
-                  child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        DropTarget(
-                            onDragDone: (details) {
-                              if (details.files.isNotEmpty) {
-                                _urlController.text = details.files.first.path;
-                                _originalRequest = null;
-                                MacPanel.cancelAutoHide();
-                              }
-                            },
-                            child: Form(
-                                key: _confirmFormKey,
-                                child: TextFormField(
-                                  key: const ValueKey('panel-download-input'),
-                                  controller: _urlController,
-                                  focusNode: _inputFocus,
-                                  autofocus: true,
-                                  minLines: 1,
-                                  maxLines: 3,
-                                  textInputAction: TextInputAction.done,
-                                  style: TextStyle(
-                                      fontSize: 18,
-                                      height: 1.35,
-                                      color: c.text),
-                                  decoration: InputDecoration(
-                                    hintText: '粘贴下载链接，按回车开始…',
-                                    hintStyle: TextStyle(
-                                        fontSize: 16, color: c.secondary),
-                                    fillColor: c.text.withValues(alpha: .035),
-                                    contentPadding: const EdgeInsets.symmetric(
-                                        horizontal: 16, vertical: 17),
-                                    enabledBorder: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                        borderSide:
-                                            BorderSide(color: c.border)),
-                                    focusedBorder: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                        borderSide: BorderSide(
-                                            color:
-                                                c.accent.withValues(alpha: .75),
-                                            width: 1.3)),
-                                  ),
-                                  validator: (v) => v?.trim().isNotEmpty == true
-                                      ? null
-                                      : '请填写下载链接或选择种子',
-                                  onFieldSubmitted: (_) => _doConfirm(),
-                                  onChanged: (value) {
-                                    MacPanel.cancelAutoHide();
-                                    _clearCapturedHeadersFor(value);
-                                    _originalRequest = null;
-                                    _netdiskRequest.value = null;
-                                    _panelError.value = null;
-                                    controller.clearFileDataUri();
-                                    recognizeMagnetUri(value);
-                                  },
-                                ))),
-                        const SizedBox(height: 10),
-                        Row(children: [
-                          _panelAction(c, CupertinoIcons.doc_on_clipboard, '粘贴',
-                              () async {
-                            final value = await Clipboard.getData('text/plain');
-                            if (!mounted) return;
-                            _urlController.text = value?.text ?? '';
-                            _originalRequest = null;
-                            MacPanel.cancelAutoHide();
-                            _inputFocus.requestFocus();
-                          }),
-                          const SizedBox(width: 10),
-                          _panelAction(c, CupertinoIcons.folder, '选择种子',
-                              () async {
-                            final result = await MacPanel.transient(() =>
-                                FilePicker.platform.pickFiles(
-                                    type: FileType.custom,
-                                    allowedExtensions: ['torrent']));
-                            if (mounted && result != null) {
-                              _urlController.text =
-                                  result.files.single.path ?? '';
-                              _originalRequest = null;
-                              MacPanel.cancelAutoHide();
-                              _inputFocus.requestFocus();
-                            }
-                          }),
-                          const SizedBox(width: 10),
-                          _panelAction(
-                              c,
-                              CupertinoIcons.slider_horizontal_3,
-                              '更多选项',
-                              () => controller.showAdvanced.value = true),
-                          const Spacer(),
-                          if (controller.isConfirming.value)
-                            const SizedBox(
-                                width: 15,
-                                height: 15,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 1.5))
+    return ValueListenableBuilder<MacAppearanceState>(
+        valueListenable: MacAppearance.state,
+        builder: (_, appearance, __) => ValueListenableBuilder<
+                TextEditingValue>(
+            valueListenable: _urlController,
+            builder: (context, input, _) => Obx(() {
+                  final expanded = controller.showAdvanced.value;
+                  final taskList = Get.isRegistered<MacTaskListController>()
+                      ? Get.find<MacTaskListController>()
+                      : null;
+                  final allTasks = taskList?.tasks.toList() ?? <Task>[];
+                  final completed =
+                      allTasks.where((t) => t.status == Status.done).length;
+                  final active = allTasks.length - completed;
+                  final showCompleted = _panelShowCompleted.value;
+                  final tasks = allTasks
+                      .where((t) => (t.status == Status.done) == showCompleted)
+                      .take(3)
+                      .toList();
+                  final error = _panelError.value;
+                  final hasInput = input.text.trim().isNotEmpty ||
+                      controller.fileDataUri.isNotEmpty ||
+                      _netdiskRequest.value != null ||
+                      Get.find<AppController>().pendingUpdateTask.value != null;
+                  final painter = TextPainter(
+                      text: TextSpan(
+                          text: input.text.isEmpty ? ' ' : input.text,
+                          style: const TextStyle(
+                              fontFamily: '.AppleSystemUIFont',
+                              fontSize: 20,
+                              height: 1.2)),
+                      textDirection: Directionality.of(context),
+                      maxLines: 3)
+                    ..layout(maxWidth: input.text.isEmpty ? 534 : 506);
+                  final inputHeight = 72.0 +
+                      (painter.computeLineMetrics().length.clamp(1, 3) - 1) *
+                          24;
+                  painter.dispose();
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted &&
+                        !_netdiskOpen.value &&
+                        _onboarding == null &&
+                        Get.isDialogOpen != true) {
+                      MacPanel.resize(expanded
+                          ? 700
+                          : inputHeight +
+                              84 +
+                              (tasks.isEmpty ? 70 : tasks.length * 58) +
+                              (error == null ? 0 : 44));
+                    }
+                  });
+                  return CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(LogicalKeyboardKey.comma,
+                          meta: true): () => MacPanel.showSettings(),
+                      const SingleActivator(LogicalKeyboardKey.escape): () {
+                        if (!_urlController.value.composing.isValid ||
+                            _urlController.value.composing.isCollapsed) {
+                          _cancelCreate();
+                        }
+                      },
+                    },
+                    child: Material(
+                        color: appearance.reduceTransparency
+                            ? c.background
+                            : c.background
+                                .withValues(alpha: c.dark ? .22 : .35),
+                        child: Column(children: [
+                          if (expanded)
+                            Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(20, 8, 12, 0),
+                                child: Row(children: [
+                                  Text('下载选项',
+                                      style: TextStyle(
+                                          fontSize: 13, color: c.secondary)),
+                                  const Spacer(),
+                                  _panelIcon(c, CupertinoIcons.gear, '设置',
+                                      () => MacPanel.showSettings()),
+                                ]))
                           else
-                            IconButton(
-                                tooltip: '开始下载',
-                                onPressed: _doConfirm,
-                                icon: Icon(CupertinoIcons.return_icon,
-                                    size: 18, color: c.secondary)),
-                        ]),
-                        if (error != null)
-                          Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(error,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      color: CupertinoColors.systemRed))),
-                        ValueListenableBuilder<String?>(
-                            valueListenable: MacPanel.notice,
-                            builder: (_, message, __) => message == null
-                                ? const SizedBox.shrink()
-                                : Padding(
-                                    padding: const EdgeInsets.only(top: 8),
-                                    child: Text(message,
-                                        style: TextStyle(
-                                            fontSize: 12, color: c.accent)))),
-                        if (tasks.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Divider(color: c.border, height: 1),
-                          const SizedBox(height: 4),
-                          for (final task in tasks)
-                            _compactTask(c, task, taskList!),
-                        ],
-                        const SizedBox(height: 4),
-                        Align(
-                            alignment: Alignment.centerRight,
-                            child: TextButton(
-                                onPressed: () =>
-                                    MacPanel.showSettings(section: 'tasks'),
-                                child: Text('全部任务',
-                                    style: TextStyle(
-                                        fontSize: 11, color: c.secondary)))),
-                      ]),
-                ))),
-            ])),
-      );
-    });
+                            SizedBox(
+                                height: inputHeight,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 20),
+                                    child: Row(children: [
+                                      MacSymbol('link',
+                                          fallback: CupertinoIcons.link,
+                                          size: 18,
+                                          color: c.secondary),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                          child: DropTarget(
+                                              onDragDone: (details) {
+                                                if (details.files.isNotEmpty) {
+                                                  _urlController.text =
+                                                      details.files.first.path;
+                                                  _originalRequest = null;
+                                                  MacPanel.cancelAutoHide();
+                                                }
+                                              },
+                                              child: Form(
+                                                  key: _confirmFormKey,
+                                                  child: TextFormField(
+                                                    key: const ValueKey(
+                                                        'panel-download-input'),
+                                                    controller: _urlController,
+                                                    focusNode: _inputFocus,
+                                                    autofocus: true,
+                                                    minLines: 1,
+                                                    maxLines: 3,
+                                                    textInputAction:
+                                                        TextInputAction.done,
+                                                    style: TextStyle(
+                                                        fontFamily:
+                                                            '.AppleSystemUIFont',
+                                                        fontSize: 20,
+                                                        height: 1.2,
+                                                        fontWeight:
+                                                            FontWeight.w400,
+                                                        color: c.text),
+                                                    cursorColor: c.accent,
+                                                    decoration: InputDecoration(
+                                                      hintText: '粘贴下载链接…',
+                                                      hintStyle: TextStyle(
+                                                          fontFamily:
+                                                              '.AppleSystemUIFont',
+                                                          fontSize: 20,
+                                                          color: c.secondary),
+                                                      filled: false,
+                                                      isDense: true,
+                                                      contentPadding:
+                                                          const EdgeInsets
+                                                              .symmetric(
+                                                              vertical: 8),
+                                                      border: InputBorder.none,
+                                                      enabledBorder:
+                                                          InputBorder.none,
+                                                      focusedBorder:
+                                                          InputBorder.none,
+                                                      errorBorder:
+                                                          InputBorder.none,
+                                                      focusedErrorBorder:
+                                                          InputBorder.none,
+                                                    ),
+                                                    validator: (v) =>
+                                                        v?.trim().isNotEmpty ==
+                                                                true
+                                                            ? null
+                                                            : '请填写下载链接或选择种子',
+                                                    onFieldSubmitted: (_) =>
+                                                        _doConfirm(),
+                                                    onChanged: (value) {
+                                                      MacPanel.cancelAutoHide();
+                                                      _clearCapturedHeadersFor(
+                                                          value);
+                                                      _originalRequest = null;
+                                                      _netdiskRequest.value =
+                                                          null;
+                                                      _panelError.value = null;
+                                                      controller
+                                                          .clearFileDataUri();
+                                                      recognizeMagnetUri(value);
+                                                    },
+                                                  )))),
+                                      const SizedBox(width: 8),
+                                      if (input.text.isNotEmpty)
+                                        _panelIcon(
+                                            c,
+                                            CupertinoIcons.xmark_circle_fill,
+                                            '清空', () {
+                                          _urlController.clear();
+                                          controller.clearFileDataUri();
+                                          _inputFocus.requestFocus();
+                                        }),
+                                      _panelIcon(c, CupertinoIcons.gear, '设置',
+                                          () => MacPanel.showSettings()),
+                                    ]))),
+                          if (!expanded) ...[
+                            Divider(color: c.border, height: 1, thickness: .5),
+                            SizedBox(
+                                height: 40,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14),
+                                    child: Row(children: [
+                                      _panelFilter(
+                                          c,
+                                          '进行中',
+                                          active,
+                                          !showCompleted,
+                                          () => _panelShowCompleted.value =
+                                              false),
+                                      const SizedBox(width: 6),
+                                      _panelFilter(
+                                          c,
+                                          '已完成',
+                                          completed,
+                                          showCompleted,
+                                          () =>
+                                              _panelShowCompleted.value = true),
+                                      const Spacer(),
+                                      _panelIcon(
+                                          c,
+                                          CupertinoIcons.doc_on_clipboard,
+                                          '粘贴', () async {
+                                        final value = await Clipboard.getData(
+                                            'text/plain');
+                                        if (!mounted) return;
+                                        _urlController.text = value?.text ?? '';
+                                        _originalRequest = null;
+                                        MacPanel.cancelAutoHide();
+                                        _inputFocus.requestFocus();
+                                      }),
+                                      _panelIcon(
+                                          c, CupertinoIcons.folder, '选择种子',
+                                          () async {
+                                        final result = await MacPanel.transient(
+                                            () => FilePicker.platform.pickFiles(
+                                                    type: FileType.custom,
+                                                    allowedExtensions: [
+                                                      'torrent'
+                                                    ]));
+                                        if (mounted && result != null) {
+                                          _urlController.text =
+                                              result.files.single.path ?? '';
+                                          _originalRequest = null;
+                                          MacPanel.cancelAutoHide();
+                                          _inputFocus.requestFocus();
+                                        }
+                                      }),
+                                      _panelAction(
+                                          c,
+                                          CupertinoIcons.slider_horizontal_3,
+                                          '更多选项',
+                                          () => controller.showAdvanced.value =
+                                              true),
+                                    ]))),
+                          ],
+                          if (error != null)
+                            SizedBox(
+                                height: 44,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 20, vertical: 6),
+                                    child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Text(error,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                                fontSize: 12,
+                                                color: CupertinoColors
+                                                    .systemRed))))),
+                          if (expanded)
+                            Expanded(child: fullForm)
+                          else ...[
+                            Expanded(
+                                child: tasks.isEmpty
+                                    ? Center(
+                                        child: Text(
+                                            showCompleted
+                                                ? '暂无已完成的下载'
+                                                : '暂无进行中的下载',
+                                            style: TextStyle(
+                                                fontSize: 12,
+                                                color: c.secondary)))
+                                    : ListView(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 20),
+                                        children: [
+                                            for (final task in tasks)
+                                              _compactTask(c, task, taskList!)
+                                          ])),
+                            Divider(color: c.border, height: 1, thickness: .5),
+                            SizedBox(
+                                height: 42,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 20),
+                                    child: Row(children: [
+                                      Expanded(
+                                          child: ValueListenableBuilder<
+                                                  String?>(
+                                              valueListenable: MacPanel.notice,
+                                              builder: (_, message, __) => Text(
+                                                  message ??
+                                                      (active > 0
+                                                          ? '$active 个下载进行中'
+                                                          : '准备下载'),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: TextStyle(
+                                                      fontSize: 10,
+                                                      color: message == null
+                                                          ? c.secondary
+                                                          : c.accent)))),
+                                      ValueListenableBuilder<String>(
+                                          valueListenable: MacPanel.hotKeyLabel,
+                                          builder: (_, label, __) => Text(
+                                              '$label 唤起 · esc 收起',
+                                              style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: c.secondary))),
+                                      const SizedBox(width: 10),
+                                      _panelAction(
+                                          c,
+                                          CupertinoIcons.list_bullet,
+                                          '全部下载',
+                                          () => MacPanel.showSettings(
+                                              section: 'tasks')),
+                                      const SizedBox(width: 6),
+                                      Tooltip(
+                                          message: '开始下载',
+                                          child: MacButton(
+                                              primary: hasInput,
+                                              onPressed: hasInput &&
+                                                      !controller
+                                                          .isConfirming.value
+                                                  ? _doConfirm
+                                                  : null,
+                                              child: controller
+                                                      .isConfirming.value
+                                                  ? const CupertinoActivityIndicator(
+                                                      radius: 7)
+                                                  : Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                          const Text('下载',
+                                                              style: TextStyle(
+                                                                  fontSize:
+                                                                      12)),
+                                                          const SizedBox(
+                                                              width: 8),
+                                                          ExcludeSemantics(
+                                                              child: Icon(
+                                                                  CupertinoIcons
+                                                                      .return_icon,
+                                                                  size: 11,
+                                                                  color: hasInput
+                                                                      ? c.primaryText.withValues(
+                                                                          alpha:
+                                                                              .75)
+                                                                      : c.secondary.withValues(
+                                                                          alpha:
+                                                                              .5))),
+                                                        ]))),
+                                    ]))),
+                          ],
+                        ])),
+                  );
+                })));
   }
+
+  Widget _panelIcon(
+          MacColors c, IconData icon, String label, VoidCallback action) =>
+      Tooltip(
+          message: label,
+          child: CupertinoButton(
+              padding: const EdgeInsets.all(6),
+              minimumSize: const Size(28, 28),
+              onPressed: action,
+              child: icon == CupertinoIcons.gear
+                  ? MacSymbol('gearshape',
+                      fallback: icon, size: 15, color: c.secondary)
+                  : Icon(icon, size: 15, color: c.secondary)));
+
+  Widget _panelFilter(MacColors c, String label, int count, bool selected,
+          VoidCallback action) =>
+      CupertinoButton(
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(0, 26),
+          onPressed: action,
+          child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                  color: selected
+                      ? c.text.withValues(alpha: .065)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(12)),
+              child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(
+                        text: label,
+                        style: TextStyle(
+                            fontWeight:
+                                selected ? FontWeight.w500 : FontWeight.w400,
+                            color: selected ? c.text : c.secondary)),
+                    TextSpan(
+                        text: ' $count', style: TextStyle(color: c.secondary)),
+                  ]),
+                  style: const TextStyle(fontSize: 11.5))));
 
   Widget _panelAction(
           MacColors c, IconData icon, String label, VoidCallback action) =>
-      TextButton.icon(
+      CupertinoButton(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+          minimumSize: const Size(0, 28),
           onPressed: action,
-          icon: Icon(icon, size: 15),
-          label: Text(label, style: const TextStyle(fontSize: 12)),
-          style: TextButton.styleFrom(
-              foregroundColor: c.secondary,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: const Size(0, 30),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap));
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 13, color: c.secondary),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 11, color: c.secondary)),
+          ]));
 
   Widget _compactTask(MacColors c, Task task, MacTaskListController list) {
     final running = task.status == Status.running;
     final failed = task.status == Status.error;
+    final done = task.status == Status.done;
     final total = task.meta.res?.size ?? 0;
+    final progress =
+        total > 0 ? (task.progress.downloaded / total).clamp(0.0, 1.0) : 0.0;
+    final extension = path.extension(task.name).toLowerCase();
+    final icon = ['.mp4', '.mkv', '.mov', '.webm'].contains(extension)
+        ? CupertinoIcons.film
+        : ['.zip', '.rar', '.7z', '.gz'].contains(extension)
+            ? CupertinoIcons.archivebox
+            : ['.jpg', '.png', '.heic', '.gif'].contains(extension)
+                ? CupertinoIcons.photo
+                : CupertinoIcons.doc;
     return SizedBox(
         height: 58,
         child: Row(children: [
-          Icon(
-              failed
-                  ? CupertinoIcons.exclamationmark_circle
-                  : CupertinoIcons.arrow_down_circle,
-              size: 22,
-              color: failed ? CupertinoColors.systemRed : c.secondary),
-          const SizedBox(width: 10),
+          SizedBox(width: 28, child: Icon(icon, size: 24, color: c.secondary)),
+          const SizedBox(width: 12),
           Expanded(
               child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -1545,45 +1734,54 @@ class _CreateViewState extends State<CreateView> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.w500,
                         color: c.text)),
-                const SizedBox(height: 4),
-                LinearProgressIndicator(
-                    minHeight: 2,
-                    value: total > 0
-                        ? (task.progress.downloaded / total).clamp(0, 1)
-                        : 0),
-                const SizedBox(height: 4),
+                const SizedBox(height: 3),
                 Text(
                     failed
                         ? '下载失败 · 查看详情'
-                        : running
-                            ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
-                            : task.status == Status.pause
-                                ? '已暂停'
-                                : '等待下载',
-                    style: TextStyle(fontSize: 10, color: c.secondary)),
+                        : done
+                            ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                            : running
+                                ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
+                                : task.status == Status.pause
+                                    ? '已暂停'
+                                    : '等待下载',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 11,
+                        color:
+                            failed ? CupertinoColors.systemRed : c.secondary)),
+                if (!done) ...[
+                  const SizedBox(height: 5),
+                  LinearProgressIndicator(
+                      minHeight: 2,
+                      borderRadius: BorderRadius.circular(1),
+                      value: progress,
+                      backgroundColor: c.text.withValues(alpha: .06),
+                      color: c.accent),
+                ],
               ])),
+          const SizedBox(width: 10),
           if (failed)
-            IconButton(
-                tooltip: '查看错误',
-                onPressed: () => _showTaskError(task),
-                icon: const Icon(CupertinoIcons.info_circle, size: 16)),
-          IconButton(
-              tooltip: running ? '暂停' : '继续',
-              onPressed: () async {
-                try {
-                  running
-                      ? await pauseTask(task.id)
-                      : await continueTask(task.id);
-                  await list.getTasksState();
-                } catch (e) {
-                  _panelError.value = e.toString();
-                }
-              },
-              icon: Icon(running ? CupertinoIcons.pause : CupertinoIcons.play,
-                  size: 16)),
+            _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
+                () => _showTaskError(task)),
+          if (done)
+            Icon(CupertinoIcons.checkmark_circle, size: 17, color: c.secondary)
+          else
+            _panelIcon(c, running ? CupertinoIcons.pause : CupertinoIcons.play,
+                running ? '暂停' : '继续', () async {
+              try {
+                running
+                    ? await pauseTask(task.id)
+                    : await continueTask(task.id);
+                await list.getTasksState();
+              } catch (e) {
+                _panelError.value = e.toString();
+              }
+            }),
         ]));
   }
 
@@ -1655,12 +1853,39 @@ class _CreateViewState extends State<CreateView> {
     if (text.length != 40) {
       return;
     }
-    final exp = RegExp(r"[0-9a-fA-F]+");
+    final exp = RegExp(r"^[0-9a-fA-F]{40}$");
     if (exp.hasMatch(text)) {
       final uri = "magnet:?xt=urn:btih:$text";
       _urlController.text = uri;
       _urlController.selection = TextSelection.fromPosition(
           TextPosition(offset: _urlController.text.length));
+    }
+  }
+
+  void _syncDefaultDownloadPath() {
+    final nextDefault = renderPathPlaceholders(
+        Get.find<AppController>().downloaderConfig.value.downloadDir);
+    // A persistent panel follows Settings only while its draft uses the default.
+    // Native/browser inputs and the directory picker may supply a custom path.
+    if (_pathController.text.isEmpty ||
+        _pathController.text == _lastDefaultDownloadPath) {
+      _pathController.text = nextDefault;
+    }
+    _lastDefaultDownloadPath = nextDefault;
+  }
+
+  Future<bool> _ensureMacOnboarding() async {
+    if (!Util.isMacos()) return true;
+    final pending = _onboarding;
+    if (pending != null) return pending;
+    _syncDefaultDownloadPath();
+    final operation = MacOnboarding.show(context);
+    _onboarding = operation;
+    try {
+      return await operation;
+    } finally {
+      if (mounted) _syncDefaultDownloadPath();
+      _onboarding = null;
     }
   }
 
@@ -1672,7 +1897,13 @@ class _CreateViewState extends State<CreateView> {
     _panelError.value = null;
     MacPanel.cancelAutoHide();
     try {
+      if (Util.isMacos()) _syncDefaultDownloadPath();
       _confirmController.start();
+      final hasInput = _urlController.text.trim().isNotEmpty ||
+          controller.fileDataUri.isNotEmpty ||
+          _netdiskRequest.value != null ||
+          Get.find<AppController>().pendingUpdateTask.value != null;
+      if (hasInput && (!await _ensureMacOnboarding() || !mounted)) return;
       // An existing netdisk task owns its file/source, including transferred
       // copies. Browser/native input must never turn recovery into a new batch.
       if (await _showPendingNetdiskTask()) return;

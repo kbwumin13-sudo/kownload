@@ -45,6 +45,11 @@ type Task struct {
 	pauseDone      chan struct{} // Guarded by statusLock; closes after pause persistence.
 	speedArr       []int64
 	uploadSpeedArr []int64
+	// In memory only, guarded by dataLock: a rate-limited task stays queued
+	// until notBefore; queuedAt/queueWait measure time spent waiting for a slot.
+	notBefore time.Time
+	queuedAt  time.Time
+	queueWait time.Duration
 }
 
 func NewTask() *Task {
@@ -130,8 +135,36 @@ func (t *Task) getStatus() base.Status {
 func (t *Task) updateStatus(status base.Status) {
 	t.dataLock.Lock()
 	defer t.dataLock.Unlock()
-	t.UpdatedAt = time.Now()
+	now := time.Now()
+	if t.Status == base.DownloadStatusWait && status != base.DownloadStatusWait && !t.queuedAt.IsZero() {
+		t.queueWait += now.Sub(t.queuedAt)
+		t.queuedAt = time.Time{}
+	}
+	if status == base.DownloadStatusWait && t.Status != base.DownloadStatusWait {
+		t.queuedAt = now
+	}
+	if status != base.DownloadStatusWait {
+		t.notBefore = time.Time{}
+	}
+	t.UpdatedAt = now
 	t.Status = status
+}
+
+// queueTime is the total time this task waited for a running slot in this process.
+func (t *Task) queueTime() time.Duration {
+	t.dataLock.RLock()
+	defer t.dataLock.RUnlock()
+	wait := t.queueWait
+	if t.Status == base.DownloadStatusWait && !t.queuedAt.IsZero() {
+		wait += time.Since(t.queuedAt)
+	}
+	return wait
+}
+
+func (t *Task) notBeforeTime() time.Time {
+	t.dataLock.RLock()
+	defer t.dataLock.RUnlock()
+	return t.notBefore
 }
 
 func (t *Task) clone() *Task {

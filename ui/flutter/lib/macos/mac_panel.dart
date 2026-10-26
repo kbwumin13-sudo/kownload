@@ -18,6 +18,7 @@ class MacPanel {
   static final hotKeyError = ValueNotifier<String?>(null);
   static final notice = ValueNotifier<String?>(null);
   static double _height = 260;
+  static double get height => _height;
   static Timer? _dismiss;
   static bool _initialized = false;
   static bool _settingsInitialized = false;

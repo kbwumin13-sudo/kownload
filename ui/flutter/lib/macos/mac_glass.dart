@@ -6,9 +6,9 @@ import 'mac_appearance.dart';
 
 class MacMetrics {
   static const titlebarHeight = 0.0;
-  static const toolbarHeight = 48.0;
-  static const controlHeight = 32.0;
-  static const controlRadius = 7.0;
+  static const toolbarHeight = 44.0;
+  static const controlHeight = 28.0;
+  static const controlRadius = 6.0;
   static const sidebarWidth = 208.0;
 }
 
@@ -127,7 +127,7 @@ class _MacGlassSurfaceState extends State<MacGlassSurface> {
       key: _key,
       decoration: BoxDecoration(
           color: opaque
-              ? (dark ? const Color(0xff34473e) : const Color(0xffedf2ee))
+              ? (dark ? const Color(0xff2a2a2d) : const Color(0xfff5f5f7))
               : null,
           borderRadius: BorderRadius.circular(widget.radius),
           gradient: native || opaque

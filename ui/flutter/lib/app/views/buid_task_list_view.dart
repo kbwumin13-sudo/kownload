@@ -9,13 +9,13 @@ import '../../api/api.dart';
 import '../../api/model/request.dart';
 import '../../api/model/resolve_task.dart';
 import '../../api/model/task.dart';
+import '../../api/model/task_stats.dart';
 import '../../util/message.dart';
 import '../../util/util.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
+import 'package:gopeed/macos/mac_glass.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:flutter/gestures.dart';
-import 'package:gopeed/macos/mac_glass.dart';
-import 'package:flutter/cupertino.dart';
 import '../modules/app/controllers/app_controller.dart';
 import '../modules/task/controllers/task_controller.dart';
 import '../modules/task/controllers/task_downloaded_controller.dart';
@@ -23,6 +23,17 @@ import '../modules/task/controllers/task_downloading_controller.dart';
 import '../modules/task/views/task_view.dart';
 import '../routes/app_pages.dart';
 import 'file_icon.dart';
+
+/// Compact diagnostics for a running row: streams in use against the limit,
+/// or the rate-limit wait that explains a stall.
+String streamsLabel(TaskStats? stats) {
+  if (stats == null) return '';
+  if (stats.coolingDown) return stats.phaseLabel ?? '';
+  final running = stats.runningStreams;
+  final limit = stats.streamLimit;
+  if (running == null) return '';
+  return limit == null ? '$running 连接' : '$running/$limit 连接';
+}
 
 class BuildTaskListView extends GetView {
   final List<Task> tasks;
@@ -61,6 +72,7 @@ class BuildTaskListView extends GetView {
 
   Widget buildTaskList(BuildContext context, tasks) {
     return ListView.builder(
+      padding: macos ? const EdgeInsets.fromLTRB(10, 8, 10, 12) : null,
       itemCount: tasks.length + (macos ? 0 : 1),
       itemBuilder: (context, index) {
         if (index == tasks.length) {
@@ -648,45 +660,41 @@ class BuildTaskListView extends GetView {
         child: Obx(
           () => Container(
             decoration: BoxDecoration(
-              color: isSelect()
-                  ? colors.selection
-                  : colors.surface.withValues(alpha: .045),
-              border: Border(bottom: BorderSide(color: colors.border)),
+              color: isSelect() ? colors.selection : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
             ),
             child: Listener(
               onPointerDown: (event) {
-                if (event.buttons & kPrimaryMouseButton != 0)
+                if (event.buttons & kPrimaryMouseButton != 0) {
                   selectRow(pointer: true);
+                }
               },
               child: InkWell(
+                borderRadius: BorderRadius.circular(8),
                 onTap: () {
-                  if (taskController.selectTask.value?.id != task.id)
+                  if (taskController.selectTask.value?.id != task.id) {
                     selectRow();
+                  }
                 },
                 onDoubleTap: task.open,
                 child: Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   child: Row(
                     children: [
-                      Container(
-                          width: 34,
-                          height: 36,
-                          decoration: BoxDecoration(
-                              color: colors.accent.withValues(alpha: .10),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                  color: colors.accent.withValues(alpha: .12),
-                                  width: .7)),
-                          child: Center(
-                              child: MacSymbol(
-                                  isFolderTask() ? 'folder' : 'doc',
-                                  fallback: isFolderTask()
-                                      ? CupertinoIcons.folder
-                                      : CupertinoIcons.doc,
-                                  size: 21,
-                                  color: colors.accent))),
-                      const SizedBox(width: 10),
+                      SizedBox(
+                        width: 30,
+                        height: 32,
+                        child: MacSymbol(
+                            isFolderTask() ? 'folder.fill' : 'doc.text',
+                            fallback:
+                                fileIcon(task.name, isFolder: isFolderTask()),
+                            size: 25,
+                            color: isFolderTask()
+                                ? colors.accent
+                                : colors.secondary),
+                      ),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -725,6 +733,10 @@ class BuildTaskListView extends GetView {
                                 getPercentText(),
                                 if (isRunning())
                                   '${Util.fmtByte(task.progress.speed)}/s',
+                                if (isRunning())
+                                  streamsLabel((taskListController
+                                          as MacTaskListController)
+                                      .stats[task.id]),
                                 if (getEtaText().isNotEmpty) getEtaText(),
                                 if (extraction.isNotEmpty) extraction,
                               ].where((part) => part.isNotEmpty).join(' · '),
@@ -732,14 +744,15 @@ class BuildTaskListView extends GetView {
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 color: colors.secondary,
-                                fontSize: 12,
+                                fontSize: 11,
                               ),
                             ),
                             if (!isDone()) ...[
                               const SizedBox(height: 6),
                               LinearProgressIndicator(
                                 value: getProgress().clamp(0.0, 1.0).toDouble(),
-                                minHeight: 3,
+                                minHeight: 2,
+                                borderRadius: BorderRadius.circular(1),
                                 backgroundColor: colors.border,
                                 color: colors.accent,
                               ),

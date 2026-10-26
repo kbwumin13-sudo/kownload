@@ -44,11 +44,32 @@ private final class TestWindow: MainFlutterWindow {
 struct PanelHostTest {
   static func drain() { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.04)) }
   static func main() {
+    let metadataFixture = Data(#"{"profile":{"info_cache":{"Default":{"name":"学习","user_name":"private@example.test"},"Profile 2":{"name":"工作"},"../unsafe":{"name":"bad"}}},"os_crypt":{"encrypted_key":"secret-fixture"},"tokens":{"value":"secret-fixture"}}"#.utf8)
+    let metadata = try! MainFlutterWindow.browserProfileMetadata(metadataFixture)
+    precondition(metadata.contains("学习") && metadata.contains("工作"))
+    precondition(!metadata.contains("secret-fixture") && !metadata.contains("private@example.test") && !metadata.contains("../unsafe"))
+    do {
+      _ = try MainFlutterWindow.browserProfileMetadata(Data("[]".utf8))
+      preconditionFailure("Invalid metadata must be rejected")
+    } catch {}
+    print("PASS: browser profile metadata excludes credentials and rejects invalid data")
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.accessory)
     let window = TestWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
       styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: true)
     window.isReleasedWhenClosed = false
+    let metadataDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: metadataDirectory, withIntermediateDirectories: true)
+    let metadataURL = metadataDirectory.appendingPathComponent("Local State")
+    try! metadataFixture.write(to: metadataURL)
+    let oldBookmarks = UserDefaults.standard.dictionary(forKey: "netdiskProfileFileBookmarks")
+    UserDefaults.standard.set([metadataURL.path: Data("obsolete-bookmark".utf8)], forKey: "netdiskProfileFileBookmarks")
+    var recoveredMetadata: Any?
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { recoveredMetadata = $0 }
+    precondition((recoveredMetadata as? String)?.contains("学习") == true, "Obsolete bookmarks must not block OS-permitted reads")
+    UserDefaults.standard.set(oldBookmarks, forKey: "netdiskProfileFileBookmarks")
+    try! FileManager.default.removeItem(at: metadataDirectory)
+    print("PASS: obsolete profile bookmarks preserve permitted metadata reads")
     let input = InputController()
     window.installContentController(input)
     var events: [(String, Any?)] = []

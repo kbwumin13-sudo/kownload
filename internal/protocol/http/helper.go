@@ -10,12 +10,12 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -24,10 +24,23 @@ import (
 
 type RequestError struct {
 	Code int
+	// RetryAfter is the wait a 429/503 response asked for, when it gave one.
+	RetryAfter    time.Duration
+	HasRetryAfter bool
 }
 
 func NewRequestError(code int) *RequestError {
 	return &RequestError{Code: code}
+}
+
+// newResponseError keeps the server's Retry-After so rate limits can be
+// honoured by the whole source instead of being retried blindly.
+func newResponseError(resp *http.Response) *RequestError {
+	re := &RequestError{Code: resp.StatusCode}
+	if transfer.IsRateLimitStatus(resp.StatusCode) {
+		re.RetryAfter, re.HasRetryAfter = transfer.ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return re
 }
 
 func (re *RequestError) Error() string {
@@ -114,6 +127,26 @@ func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, us
 	if _, ok := headers[base.HttpHeaderUserAgent]; !ok {
 		headers.Set(base.HttpHeaderUserAgent, strings.TrimSpace(f.config.UserAgent))
 	}
+	// Cached redirect URLs bypass Client's normal redirect header filtering.
+	// Apply the same credential scope before constructing a direct range request.
+	if useRedirect && reqUrl != req.URL {
+		original, originalErr := url.Parse(req.URL)
+		target, targetErr := url.Parse(reqUrl)
+		if originalErr == nil && targetErr == nil {
+			sourceHost := strings.ToLower(original.Hostname())
+			targetHost := strings.ToLower(target.Hostname())
+			trusted := targetHost == sourceHost || (net.ParseIP(sourceHost) == nil &&
+				sourceHost != "" && strings.HasSuffix(targetHost, "."+sourceHost))
+			if !trusted {
+				for _, name := range []string{"Authorization", "Www-Authenticate", "Cookie", "Cookie2"} {
+					headers.Del(name)
+				}
+			}
+			if !strings.EqualFold(original.Host, target.Host) {
+				headers.Del(base.HttpHeaderHost)
+			}
+		}
+	}
 
 	if ctx != nil {
 		httpReq, err = http.NewRequestWithContext(ctx, method, reqUrl, body)
@@ -174,6 +207,10 @@ func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Cli
 	if f.meta.Res.Range && rangeEnd > 0 {
 		httpReq.Header.Set(base.HttpHeaderRange,
 			fmt.Sprintf(base.HttpHeaderRangeFormat, rangeStart, rangeEnd))
+		if f.rangeResumeValidator != "" {
+			httpReq.Header.Set("If-Range", f.rangeResumeValidator)
+			httpReq.Header.Set("Accept-Encoding", "identity")
+		}
 	}
 
 	resp, err := client.Do(httpReq)
@@ -183,7 +220,7 @@ func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Cli
 
 	if resp.StatusCode != base.HttpCodeOK && resp.StatusCode != base.HttpCodePartialContent {
 		resp.Body.Close()
-		return nil, NewRequestError(resp.StatusCode)
+		return nil, newResponseError(resp)
 	}
 
 	return resp, nil
@@ -215,26 +252,59 @@ func (f *Fetcher) buildFastFailClient() *http.Client {
 }
 
 // buildClientWithTimeout creates an HTTP client with the specified connection timeout.
+// Clients share pooled transports when the downloader provides them; the
+// cookie jar and request/response policies always stay with this fetcher.
 func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: timeout,
-		}).DialContext,
-		Proxy: f.ctl.GetProxy(f.meta.Req.Proxy),
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: f.meta.Req.SkipVerifyCert,
-		},
-		TLSHandshakeTimeout: timeout,
+	roundTripper := f.pooledTransport(timeout)
+	if roundTripper == nil {
+		roundTripper = &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: timeout,
+			}).DialContext,
+			Proxy: f.ctl.GetProxy(f.meta.Req.Proxy),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: f.meta.Req.SkipVerifyCert,
+			},
+			TLSHandshakeTimeout: timeout,
+		}
 	}
-	jar, _ := cookiejar.New(nil)
-	var roundTripper http.RoundTripper = transport
 	if f.requestPolicy != nil || f.responsePolicy != nil {
-		roundTripper = &policyTransport{transport: transport, policy: f.requestPolicy, responsePolicy: f.responsePolicy}
+		roundTripper = &policyTransport{transport: roundTripper, policy: f.requestPolicy, responsePolicy: f.responsePolicy}
 	}
 	return &http.Client{
 		Transport: roundTripper,
-		Jar:       jar,
+		Jar:       f.cookieJar,
 	}
+}
+
+// pooledTransport returns a transport from the downloader's pool, or nil when
+// pooling is unavailable or switched off. The resolve request and the faster
+// failing range requests share connections: each request carries its own TCP
+// connect timeout, while TLS handshakes keep the standard 15 second bound.
+func (f *Fetcher) pooledTransport(timeout time.Duration) http.RoundTripper {
+	if !f.tuning().sharedTransport || f.ctl.Transports == nil || f.ctl.GetProxyPolicy == nil {
+		return nil
+	}
+	proxy, proxyID := f.ctl.GetProxyPolicy(f.meta.Req.Proxy)
+	streams := f.ctl.Transports.Streams(transfer.TransportOptions{
+		ProxyID:             proxyID,
+		Proxy:               proxy,
+		InsecureSkipVerify:  f.meta.Req.SkipVerifyCert,
+		DialTimeout:         connectTimeout,
+		TLSHandshakeTimeout: connectTimeout,
+		HTTP2:               f.tuning().http2,
+	})
+	return &dialTimeoutTransport{transport: streams, timeout: timeout}
+}
+
+// dialTimeoutTransport applies a client's connect timeout to each request.
+type dialTimeoutTransport struct {
+	transport http.RoundTripper
+	timeout   time.Duration
+}
+
+func (t *dialTimeoutTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.transport.RoundTrip(req.WithContext(transfer.WithDialTimeout(req.Context(), t.timeout)))
 }
 
 // ============================================================================

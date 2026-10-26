@@ -14,13 +14,16 @@ const xunleiAPI = "https://api-pan.xunlei.com/drive/v1"
 
 func (p *xunleiProvider) headers(s *Session, src model.Source) map[string]string {
 	h := requestHeaders(s, src)
-	h["X-Client-Id"] = "Xqp0kJBXWhwaTpB6"
+	h["X-Client-Id"] = sessionValue(s, "X-Client-Id", "client_id")
+	if h["X-Client-Id"] == "" {
+		h["X-Client-Id"] = "Xqp0kJBXWhwaTpB6"
+	}
 	h["X-Client-Version"] = "1.92.89"
 	if b := bearer(s); b != "" {
 		h["Authorization"] = b
 	}
 	h["X-Captcha-Token"] = sessionValue(s, "X-Captcha-Token", "captcha_token", "captchaToken")
-	h["X-Device-Id"] = sessionValue(s, "X-Device-Id", "device_id", "deviceId")
+	h["X-Device-Id"] = sessionValue(s, "X-Device-Id", "device_id", "deviceId", "deviceid")
 	return h
 }
 func xunleiCheck(r object) error {

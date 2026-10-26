@@ -14,8 +14,9 @@ import (
 // ============================================================================
 
 type fetcherData struct {
-	Connections []*connection
-	RedirectURL string // Saved redirect URL for resume
+	Connections          []*connection
+	RedirectURL          string // Saved redirect URL for resume
+	RangeResumeValidator string `json:",omitempty"`
 }
 
 // ============================================================================
@@ -78,6 +79,7 @@ func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	// Copy exported resume data while holding the same lock as download progress.
 	// Storage serializes this value after Store returns.
 	_f.connMu.Lock()
+	rangeResumeValidator := _f.rangeResumeValidator
 	var connections []*connection
 	if _f.connections != nil {
 		connections = make([]*connection, len(_f.connections))
@@ -93,8 +95,9 @@ func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	}
 	_f.connMu.Unlock()
 	return &fetcherData{
-		Connections: connections,
-		RedirectURL: redirectURL,
+		Connections:          connections,
+		RedirectURL:          redirectURL,
+		RangeResumeValidator: rangeResumeValidator,
 	}, nil
 }
 
@@ -113,6 +116,7 @@ func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v 
 		if fd.RedirectURL != "" {
 			fetcher.redirectURL = fd.RedirectURL
 		}
+		fetcher.rangeResumeValidator = fd.RangeResumeValidator
 		return fetcher
 	}
 }

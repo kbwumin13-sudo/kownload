@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"net/http"
 	"net/url"
@@ -11,6 +12,23 @@ import (
 type Controller struct {
 	GetConfig func(v any)
 	GetProxy  func(requestProxy *base.RequestProxy) func(*http.Request) (*url.URL, error)
+	// GetProxyPolicy returns the same proxy function as GetProxy together with
+	// an identity for connection pooling. Nil disables shared transports.
+	GetProxyPolicy func(requestProxy *base.RequestProxy) (func(*http.Request) (*url.URL, error), string)
+	// Transports and Budget are owned by the downloader and shared by every
+	// fetcher. Nil keeps per-request transports and unlimited streams.
+	Transports *transfer.TransportPool
+	Budget     *transfer.Budget
+	// SourceScope groups requests under a known shared limit (such as a
+	// netdisk account) instead of the request origin.
+	SourceScope string
+	// QueueWaiting reports whether other tasks wait for a running slot, so a
+	// rate-limited task can give its slot up instead of idling in it.
+	QueueWaiting func() bool
+	// QueueChanged returns a channel closed when tasks may have joined the
+	// queue; a task already idling in a cooldown then checks QueueWaiting
+	// again. Take it before calling QueueWaiting so no change is missed.
+	QueueChanged func() <-chan struct{}
 	FileController
 	//ContextDialer() (proxy.Dialer, error)
 }

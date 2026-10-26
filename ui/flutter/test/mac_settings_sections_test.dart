@@ -1,32 +1,45 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:gopeed/api/model/extension.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
-import 'package:gopeed/app/modules/extension/controllers/extension_controller.dart';
 import 'package:gopeed/app/modules/extension/views/extension_view.dart';
 import 'package:gopeed/app/modules/setting/controllers/setting_controller.dart';
 import 'package:gopeed/app/modules/setting/views/setting_view.dart';
 import 'package:gopeed/app/routes/app_pages.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/macos/mac_panel.dart';
+import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:gopeed/macos/mac_shell.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/util/package_info.dart';
-import 'package:gopeed/util/util.dart';
 
 class _App extends AppController {
   @override
   void onReady() {}
   @override
   void onClose() {}
+
+  bool failSave = false;
+  Completer<void>? holdSave;
+  final savedConfigs = <Map<String, dynamic>>[];
+
+  @override
+  Future<void> saveConfig() async {
+    savedConfigs.add(jsonDecode(jsonEncode(downloaderConfig.value.toJson()))
+        as Map<String, dynamic>);
+    if (failSave) throw StateError('service unavailable');
+    final hold = holdSave;
+    holdSave = null;
+    await hold?.future;
+  }
 }
 
 class _Settings extends SettingController {
@@ -35,31 +48,19 @@ class _Settings extends SettingController {
 }
 
 class _Box extends Fake implements Box {
-  @override
-  dynamic get(dynamic key, {dynamic defaultValue}) => defaultValue;
-}
-
-class _Extensions extends ExtensionController {
-  int stores = 0;
-  int loads = 0;
-  int updates = 0;
-  // Fixture skips network initialization; actions are exercised explicitly.
-  @override
-  // ignore: must_call_super
-  Future<void> onInit() async {}
-  @override
-  Future<void> loadInstalled({bool refreshUpdates = false}) async {
-    loads++;
-    if (refreshUpdates) updates++;
-  }
+  final _storedValues = <dynamic, dynamic>{};
 
   @override
-  Future<void> refreshStore() async {
-    stores++;
+  dynamic get(dynamic key, {dynamic defaultValue}) =>
+      _storedValues[key] ?? defaultValue;
+
+  @override
+  Future<void> put(dynamic key, dynamic value) async {
+    _storedValues[key] = value;
   }
 }
 
-Future<_Extensions> _mountSettings(WidgetTester tester, String section) async {
+Future<_App> _mountSettings(WidgetTester tester, String section) async {
   await tester.binding.setSurfaceSize(const Size(900, 700));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   Database.instance.box = _Box();
@@ -70,6 +71,12 @@ Future<_Extensions> _mountSettings(WidgetTester tester, String section) async {
       buildNumber: '1');
   final app = _App();
   app.downloaderConfig.value.downloadDir = '/downloads';
+  app.downloaderConfig.value.maxRunning = 3;
+  app.downloaderConfig.value.archive.autoExtract = false;
+  app.downloaderConfig.value.protocolConfig.media.ytDlpPath =
+      '/custom/resolver';
+  app.downloaderConfig.value.protocolConfig.http.userAgent = 'preserved-agent';
+  app.downloaderConfig.value.protocolConfig.netdisk = {'connections': 7};
   app.downloaderConfig.value.extra.themeMode = 'system';
   app.downloaderConfig.value.extra.locale = 'en_US';
   app.startConfig.value.network = 'tcp';
@@ -77,15 +84,15 @@ Future<_Extensions> _mountSettings(WidgetTester tester, String section) async {
   app.startConfig.value.apiToken = '';
   Get.put<AppController>(app);
   Get.put<SettingController>(_Settings());
-  final extensions = Get.put<ExtensionController>(_Extensions()) as _Extensions;
   MacPanel.settingsSection.value = section;
+  MacPanel.presentation.value = 'settings';
   await tester.pumpWidget(
       GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
     GetPage(name: '/', page: () => const SettingView()),
     GetPage(name: Routes.SETTING, page: () => const SettingView()),
   ]));
   await tester.pumpAndSettle();
-  return extensions;
+  return app;
 }
 
 Future<void> _reveal(WidgetTester tester, String text) async {
@@ -98,127 +105,169 @@ Future<void> _reveal(WidgetTester tester, String text) async {
 void main() {
   setUp(() {
     Get.testMode = true;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async => null);
   });
   tearDown(() {
     Get.reset();
     Get.routerDelegate = null;
     Get.routeInformationParser = null;
     MacPanel.settingsSection.value = 'general';
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, null);
   });
 
-  testWidgets(
-      'general keeps UI and about settings, fixed menu bar entry and shortcut editor',
+  testWidgets('general offers ordinary preferences and the shared guide',
       (tester) async {
     if (!Platform.isMacOS) return;
     await _mountSettings(tester, 'general');
     expect(find.byType(MacHotKeyEditor), findsOneWidget);
-    final menubar =
-        tester.widget<ListTile>(find.widgetWithText(ListTile, '菜单栏入口'));
-    expect((menubar.trailing! as Switch).value, isTrue);
-    expect((menubar.trailing! as Switch).onChanged, isNull);
-    expect(find.textContaining('kownload 常驻菜单栏'), findsOneWidget);
-    expect(find.text('downloadDir'), findsNothing);
-    await _reveal(tester, 'theme');
-    expect(find.text('locale'), findsOneWidget);
-    await _reveal(tester, 'version');
-    expect(find.text('test'), findsOneWidget);
+    expect(find.text('登录项…'), findsOneWidget);
+    expect(find.text('保存位置'), findsNothing);
+    await _reveal(tester, '外观');
+    expect(find.text('语言'), findsOneWidget);
+    await _reveal(tester, '重新打开…');
+    expect(find.text('版本 test'), findsOneWidget);
+    expect(find.byType(ExtensionView), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
+  for (final legacy in ['connections', 'advanced']) {
+    testWidgets('$legacy links land on general preferences', (tester) async {
+      if (!Platform.isMacOS) return;
+      await _mountSettings(tester, legacy);
+      expect(find.text('使用习惯'), findsOneWidget);
+      expect(find.byType(MacHotKeyEditor), findsOneWidget);
+      expect(find.byType(ExtensionView), findsNothing);
+      expect(find.text('API'), findsNothing);
+      expect(find.textContaining('扩展'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets(
-      'download keeps directory, archive, HTTP, media, BT and ed2k settings',
+      'reopened guide synchronizes its saved directory back to settings',
       (tester) async {
     if (!Platform.isMacOS) return;
-    await _mountSettings(tester, 'download');
-    expect(find.text('downloadDir'), findsOneWidget);
+    final app = await _mountSettings(tester, 'general');
+    await Database.instance.box.put(MacOnboarding.completedKey, true);
+    await _reveal(tester, '重新打开…');
+    await tester.tap(find.text('重新打开…'));
+    await tester.pumpAndSettle();
+    expect(find.text('下载新手教程'), findsOneWidget);
+    await tester.enterText(
+        find.byKey(const ValueKey('onboarding-directory')), '/guide-downloads');
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(find.text('下载新手教程'), findsNothing);
+    MacPanel.settingsSection.value = 'download';
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextFormField>(find.byType(TextFormField))
+            .controller!
+            .text,
+        '/guide-downloads');
+    expect(app.savedConfigs.last['downloadDir'], '/guide-downloads');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('download saves everyday choices and preserves engine config',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    expect(find.text('保存位置'), findsOneWidget);
     expect(find.byType(MacHotKeyEditor), findsNothing);
-    for (final label in [
-      'autoExtract',
-      'User-Agent',
-      '媒体下载',
-      'BitTorrent',
-      'ed2k'
-    ]) {
-      // Locale is English in these tests, so media uses the existing English label.
-      await _reveal(tester, label == '媒体下载' ? 'Media downloads' : label);
-    }
+    expect(find.text('User-Agent'), findsNothing);
+    expect(find.text('HTTP'), findsNothing);
+    expect(find.text('BitTorrent'), findsNothing);
+    expect(find.text('ed2k'), findsNothing);
+    await tester.tap(find.byType(DropdownButton<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('4 个').last);
+    await tester.pumpAndSettle();
+    expect(app.downloaderConfig.value.maxRunning, 4);
+    await _reveal(tester, '自动解压压缩包');
+    await tester.tap(find.descendant(
+        of: find
+            .ancestor(of: find.text('自动解压压缩包'), matching: find.byType(Row))
+            .first,
+        matching: find.byType(Switch)));
+    await tester.pumpAndSettle();
+    expect(app.downloaderConfig.value.archive.autoExtract, isTrue);
+    expect(find.text('解压成功后删除压缩包'), findsOneWidget);
+    final saved = app.savedConfigs.last;
+    expect(saved['maxRunning'], 4);
+    expect(saved['archive']['autoExtract'], isTrue);
+    expect(saved['protocolConfig']['media']['ytDlpPath'], '/custom/resolver');
+    expect(saved['protocolConfig']['http']['userAgent'], 'preserved-agent');
+    expect(saved['protocolConfig']['netdisk'], {'connections': 7});
+    expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-      'connections shows installed status and config without maintenance or store',
+  testWidgets('directory edits save, empty paths keep the previous location',
       (tester) async {
     if (!Platform.isMacOS) return;
-    final controller = await _mountSettings(tester, 'connections');
-    final extension = Extension(
-        identity: 'sample',
-        name: 'sample',
-        author: 'Example',
-        title: 'Sample capability',
-        description: '',
-        icon: '',
-        version: '1.0.0',
-        homepage: '',
-        repository: null,
-        disabled: false,
-        devMode: false,
-        devPath: '');
-    extension.settings = [
-      Setting(
-          name: 'token',
-          title: 'Token',
-          description: '',
-          required: false,
-          type: SettingType.string)
-    ];
-    controller.installedExtensions.assignAll([extension]);
-    await _reveal(tester, 'Sample capability');
-    expect(find.text('v1.0.0 · 已启用'), findsOneWidget);
-    expect(find.byIcon(CupertinoIcons.gear), findsOneWidget);
-    expect(find.byIcon(CupertinoIcons.trash), findsNothing);
-    expect(find.text('打开扩展商店'), findsNothing);
-    expect(find.text('检查扩展更新'), findsNothing);
-    expect(controller.stores, 0);
-    expect(controller.updates, 0);
+    final app = await _mountSettings(tester, 'download');
+    final path = find.byType(TextFormField);
+    await tester.enterText(path, '/new-downloads');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs.last['downloadDir'], '/new-downloads');
+    await tester.enterText(path, '  ');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(find.text('请选择保存位置。'), findsOneWidget);
+    expect(app.downloaderConfig.value.downloadDir, '/new-downloads');
+    expect(app.savedConfigs.length, 1);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-      'advanced loads maintenance only after expansion and store only after a click',
+  testWidgets('failed saves provide a retry that writes the changed value',
       (tester) async {
     if (!Platform.isMacOS) return;
-    final directory =
-        Directory.systemTemp.createTempSync('kownload-settings-test-');
-    addTearDown(() => directory.deleteSync(recursive: true));
-    await tester
-        .runAsync(() => Util.initStorageDir(previewStorage: directory.path));
-    final controller = await _mountSettings(tester, 'advanced');
-    expect(find.byType(ExtensionView), findsNothing);
-    expect(controller.stores, 0);
-    await tester.tap(find.text('扩展安装与维护'));
+    final app = await _mountSettings(tester, 'download');
+    app.failSave = true;
+    // The compact visual still accepts clicks across the full control target.
+    await tester.tapAt(
+        tester.getCenter(find.byType(Switch).first) + const Offset(20, 0));
     await tester.pumpAndSettle();
-    expect(find.byType(ExtensionView), findsOneWidget);
-    expect(find.text('打开扩展商店'), findsOneWidget);
-    expect(controller.stores, 0);
-    await tester.tap(find.text('检查扩展更新'));
+    expect(find.text('更改尚未保存，请检查下载服务后重试。'), findsOneWidget);
+    expect(find.text('已保存'), findsNothing);
+    app.failSave = false;
+    await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
-    expect(controller.updates, 1);
-    await tester.tap(find.text('打开扩展商店'));
+    expect(app.savedConfigs.length, 2);
+    expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
+    expect(find.text('已保存'), findsOneWidget);
+    expect(find.text('重试'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('rapid changes serialize saves and retain the latest choices',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    final hold = Completer<void>();
+    app.holdSave = hold;
+    await tester.tap(find.byType(Switch).first);
+    await tester.pump();
+    await tester.tap(find.byType(Switch).at(1));
+    await tester.pump();
+    expect(app.savedConfigs.length, 1);
+    expect(find.text('正在保存…'), findsOneWidget);
+    hold.complete();
     await tester.pumpAndSettle();
-    expect(controller.stores, 1);
-    expect(find.text('返回已安装'), findsOneWidget);
-    await tester.tap(find.text('返回已安装'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('扩展安装与维护'));
-    await tester.pumpAndSettle();
-    expect(find.byType(ExtensionView), findsNothing);
-    await _reveal(tester, 'API');
-    await _reveal(tester, 'logDirectory');
+    expect(app.savedConfigs.length, 2);
+    expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
+    expect(app.savedConfigs.last['extra']['autoStartTasks'], isTrue);
+    expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets(
-      'shell has five top categories, preserves task child and returns through MacPanel',
+      'shell has three ordinary destinations and returns through MacPanel',
       (tester) async {
     final calls = <MethodCall>[];
     tester.binding.defaultBinaryMessenger
@@ -248,7 +297,7 @@ void main() {
       ],
     ));
     await tester.pumpAndSettle();
-    for (final label in ['任务', '通用', '下载', '连接与能力', '高级']) {
+    for (final label in ['下载列表', '通用', '下载']) {
       expect(find.text(label), findsOneWidget);
     }
     expect(find.text('task child'), findsOneWidget);
@@ -258,10 +307,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(MacPanel.settingsSection.value, 'general');
     expect(find.text('settings child'), findsOneWidget);
-    await tester.tap(find.text('高级'));
+    expect(find.text('功能'), findsNothing);
+    expect(find.text('高级'), findsNothing);
+    await tester.tap(find.text('下载'));
     await tester.pumpAndSettle();
-    expect(MacPanel.settingsSection.value, 'advanced');
-    await tester.tap(find.text('任务'));
+    expect(MacPanel.settingsSection.value, 'download');
+    await tester.tap(find.text('下载列表'));
     await tester.pumpAndSettle();
     expect(Get.rootDelegate.currentConfiguration?.uri.path, Routes.TASK);
     expect(find.text('task child'), findsOneWidget);

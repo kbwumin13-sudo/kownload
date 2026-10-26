@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
@@ -5,11 +7,12 @@ import 'package:get/get.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as path;
 
+import '../../../../api/api.dart';
 import '../../../../api/model/task.dart';
+import '../../../../api/model/task_stats.dart';
 import '../../../../util/file_explorer.dart';
 import '../../../../util/util.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
-import 'package:gopeed/macos/mac_glass.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import '../../../routes/app_pages.dart';
@@ -259,24 +262,28 @@ class _MacTaskViewState extends State<_MacTaskView> {
         final compact = pageConstraints.maxWidth < 750;
         return MacPage(
           title: '',
-          leading: _segments(context, compact),
-          actions: [
-            SizedBox(
-              width: compact ? 144 : 220,
-              child: MacSearchField(
-                controller: search,
-                focusNode: searchFocus,
-                hint: '搜索任务',
-                onChanged: (_) => setState(() {}),
-              ),
+          headerHeight: 60,
+          leading: SizedBox(
+            width: pageConstraints.maxWidth - 148,
+            child: MacSearchField(
+              controller: search,
+              focusNode: searchFocus,
+              prominent: true,
+              hint: '搜索下载',
+              onChanged: (_) => setState(() {}),
             ),
+          ),
+          bottom: Align(
+            alignment: Alignment.centerLeft,
+            child: _segments(context, compact),
+          ),
+          actions: [
             Tooltip(
               message: 'create'.tr,
               child: MacButton(
                 icon: CupertinoIcons.add,
-                primary: true,
                 onPressed: () => MacPanel.showPanel(),
-                child: compact ? const SizedBox.shrink() : Text('create'.tr),
+                child: const Text('新建'),
               ),
             ),
           ],
@@ -321,103 +328,122 @@ class _MacTaskViewState extends State<_MacTaskView> {
                 inspectorWidth.clamp(240.0, maxInspectorWidth);
             _syncInspectorState(
                 inspectorOpen && canShowInspector, selected != null);
-            return Row(
-              children: [
-                Expanded(
-                  child: Container(
-                    color: Colors.transparent,
-                    child: taskList.isLoading.value
-                        ? const Center(child: CupertinoActivityIndicator())
-                        : taskList.error.value != null && visible.isEmpty
-                            ? MacEmptyState(
-                                icon: CupertinoIcons.exclamationmark_circle,
-                                title: '加载失败',
-                                message: taskList.error.value,
-                                action: MacButton(
-                                  onPressed: taskList.getTasksState,
-                                  child: const Text('重试'),
-                                ),
-                              )
-                            : visible.isEmpty
-                                ? MacEmptyState(
-                                    icon: query.isEmpty
-                                        ? CupertinoIcons.arrow_down_to_line
-                                        : CupertinoIcons.search,
-                                    title: query.isEmpty ? '暂无任务' : '没有匹配的任务',
-                                    message: query.isEmpty
-                                        ? '点击新建任务开始下载'
-                                        : '试试其他关键词',
-                                    action: query.isEmpty
-                                        ? MacButton(
-                                            primary: true,
-                                            icon: CupertinoIcons.add,
-                                            onPressed: () => Get.rootDelegate
-                                                .toNamed(Routes.CREATE),
-                                            child: Text('create'.tr))
-                                        : null,
-                                  )
-                                : Column(
-                                    children: [
-                                      if (taskList.error.value != null)
-                                        MaterialBanner(
-                                          content: const Text('刷新失败，正在重试'),
-                                          actions: [
-                                            TextButton(
-                                              onPressed: taskList.getTasksState,
-                                              child: const Text('重试'),
-                                            ),
-                                          ],
-                                        ),
-                                      Expanded(
-                                        child: Focus(
-                                          focusNode: listFocus,
-                                          onKeyEvent: _handleListKey,
-                                          child: Listener(
-                                            behavior: HitTestBehavior.opaque,
-                                            onPointerDown: (_) =>
-                                                listFocus.requestFocus(),
-                                            child: BuildTaskListView(
-                                              tasks: visible,
-                                              selectedTaskIds:
-                                                  taskList.selectedTaskIds,
-                                              macos: true,
+            return Column(children: [
+              Expanded(
+                  child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      color: Colors.transparent,
+                      child: taskList.isLoading.value
+                          ? const Center(child: CupertinoActivityIndicator())
+                          : taskList.error.value != null && visible.isEmpty
+                              ? MacEmptyState(
+                                  icon: CupertinoIcons.exclamationmark_circle,
+                                  title: '加载失败',
+                                  message: taskList.error.value,
+                                  action: MacButton(
+                                    onPressed: taskList.getTasksState,
+                                    child: const Text('重试'),
+                                  ),
+                                )
+                              : visible.isEmpty
+                                  ? MacEmptyState(
+                                      icon: query.isEmpty
+                                          ? CupertinoIcons.arrow_down_to_line
+                                          : CupertinoIcons.search,
+                                      title: query.isEmpty ? '暂无任务' : '没有匹配的任务',
+                                      message: query.isEmpty
+                                          ? '点击新建任务开始下载'
+                                          : '试试其他关键词',
+                                      action: query.isEmpty
+                                          ? MacButton(
+                                              primary: true,
+                                              icon: CupertinoIcons.add,
+                                              onPressed: () => Get.rootDelegate
+                                                  .toNamed(Routes.CREATE),
+                                              child: Text('create'.tr))
+                                          : null,
+                                    )
+                                  : Column(
+                                      children: [
+                                        if (taskList.error.value != null)
+                                          MaterialBanner(
+                                            content: const Text('刷新失败，正在重试'),
+                                            actions: [
+                                              TextButton(
+                                                onPressed:
+                                                    taskList.getTasksState,
+                                                child: const Text('重试'),
+                                              ),
+                                            ],
+                                          ),
+                                        Expanded(
+                                          child: Focus(
+                                            focusNode: listFocus,
+                                            onKeyEvent: _handleListKey,
+                                            child: Listener(
+                                              behavior: HitTestBehavior.opaque,
+                                              onPointerDown: (_) =>
+                                                  listFocus.requestFocus(),
+                                              child: BuildTaskListView(
+                                                tasks: visible,
+                                                selectedTaskIds:
+                                                    taskList.selectedTaskIds,
+                                                macos: true,
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                    ],
-                                  ),
+                                      ],
+                                    ),
+                    ),
                   ),
-                ),
-                if (inspectorOpen && canShowInspector) ...[
-                  Container(width: 1, color: colors.border),
-                  SizedBox(
-                    width: shownInspectorWidth,
-                    child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          MouseRegion(
-                            cursor: SystemMouseCursors.resizeLeftRight,
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onHorizontalDragUpdate: (details) => setState(() {
-                                inspectorWidth =
-                                    (inspectorWidth - details.delta.dx)
-                                        .clamp(240.0, maxInspectorWidth);
-                              }),
-                              child: const SizedBox(width: 6),
+                  if (inspectorOpen && canShowInspector) ...[
+                    Container(width: 1, color: colors.border),
+                    SizedBox(
+                      width: shownInspectorWidth,
+                      child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            MouseRegion(
+                              cursor: SystemMouseCursors.resizeLeftRight,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onHorizontalDragUpdate: (details) =>
+                                    setState(() {
+                                  inspectorWidth =
+                                      (inspectorWidth - details.delta.dx)
+                                          .clamp(240.0, maxInspectorWidth);
+                                }),
+                                child: const SizedBox(width: 6),
+                              ),
                             ),
-                          ),
-                          Expanded(
-                              child: _MacTaskInspector(
-                            task: selected,
-                            onClose: _toggleInspector,
-                          )),
-                        ]),
-                  ),
+                            Expanded(
+                                child: _MacTaskInspector(
+                              task: selected,
+                              onClose: _toggleInspector,
+                            )),
+                          ]),
+                    ),
+                  ],
                 ],
-              ],
-            );
+              )),
+              Container(
+                height: 28,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                decoration: BoxDecoration(
+                    border: Border(
+                        top: BorderSide(color: colors.border, width: .5))),
+                child: Row(children: [
+                  Text('${visible.length} 项',
+                      style: TextStyle(fontSize: 11, color: colors.secondary)),
+                  const Spacer(),
+                  Text('双击打开  ·  右键查看更多操作',
+                      style: TextStyle(fontSize: 11, color: colors.secondary)),
+                ]),
+              ),
+            ]);
           }),
         );
       }),
@@ -426,47 +452,35 @@ class _MacTaskViewState extends State<_MacTaskView> {
 
   Widget _segments(BuildContext context, bool compact) {
     final c = MacColors.of(context);
-    Widget item(String name, IconData icon, String title) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          MacSymbol(name, fallback: icon, size: 15, color: c.text),
-          const SizedBox(width: 5),
-          Flexible(
-              child: Text(title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: c.text,
-                      fontWeight: FontWeight.w500)))
-        ]));
-    return SizedBox(
-        width: compact ? 252 : 352,
-        height: 32,
-        child: Container(
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: c.surface,
-            border: Border.all(color: c.border),
-            borderRadius: BorderRadius.circular(7),
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      for (final entry in <int, String>{2: '全部', 0: '进行中', 1: '已完成'}.entries)
+        Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: Semantics(
+            selected: filter == entry.key,
+            button: true,
+            child: TextButton(
+              onPressed: () => setState(() => filter = entry.key),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 26),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: const EdgeInsets.symmetric(horizontal: 11),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(7)),
+                backgroundColor:
+                    filter == entry.key ? c.selection : Colors.transparent,
+                foregroundColor: filter == entry.key ? c.accent : c.secondary,
+                textStyle: TextStyle(
+                    fontSize: 12,
+                    fontWeight: filter == entry.key
+                        ? FontWeight.w500
+                        : FontWeight.w400),
+              ),
+              child: Text(entry.value),
+            ),
           ),
-          child: CupertinoSlidingSegmentedControl<int>(
-            groupValue: filter,
-            backgroundColor: Colors.transparent,
-            thumbColor: c.primaryFill.withValues(alpha: .20),
-            padding: EdgeInsets.zero,
-            children: {
-              0: item('arrow.down.to.line', CupertinoIcons.arrow_down_to_line,
-                  'downloading'.tr),
-              1: item('checkmark', CupertinoIcons.check_mark, 'downloaded'.tr),
-              2: item('list.bullet', CupertinoIcons.list_bullet,
-                  Get.locale?.languageCode == 'zh' ? '全部' : 'All')
-            },
-            onValueChanged: (value) {
-              if (value != null) setState(() => filter = value);
-            },
-          ),
-        ));
+        ),
+    ]);
   }
 }
 
@@ -538,6 +552,150 @@ class _MacTaskInspector extends StatelessWidget {
               onPressed: task.explorer,
             ),
           ),
+          if (task.protocol == null ||
+              task.protocol == Protocol.http ||
+              task.protocol == Protocol.netdisk)
+            _MacTaskDiagnostics(key: ValueKey(task.id), task: task),
+        ],
+      ),
+    );
+  }
+}
+
+/// Explains how a download is running: phase, streams in use against the
+/// limit, whether the server allows segments and why, and the latest failure.
+/// Network details stay folded until asked for.
+class _MacTaskDiagnostics extends StatefulWidget {
+  final Task task;
+  const _MacTaskDiagnostics({super.key, required this.task});
+
+  @override
+  State<_MacTaskDiagnostics> createState() => _MacTaskDiagnosticsState();
+}
+
+class _MacTaskDiagnosticsState extends State<_MacTaskDiagnostics> {
+  TaskStats? stats;
+  bool details = false;
+  Timer? timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (widget.task.status == Status.running) _load();
+    });
+  }
+
+  Future<void> _load() async {
+    try {
+      final next = await getTaskStats(widget.task.id);
+      if (mounted) setState(() => stats = next);
+    } catch (_) {
+      // Older cores or removed tasks have no diagnostics to show.
+    }
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = stats;
+    if (s == null) return const SizedBox.shrink();
+    final colors = MacColors.of(context);
+    Widget row(String label, String? value) => value == null || value.isEmpty
+        ? const SizedBox.shrink()
+        : Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 72,
+                  child: Text(label,
+                      style: TextStyle(color: colors.secondary, fontSize: 12)),
+                ),
+                Expanded(
+                  child: SelectableText(value,
+                      style: TextStyle(color: colors.text, fontSize: 12)),
+                ),
+              ],
+            ),
+          );
+    String? ms(String key) {
+      final v = s.timings[key];
+      if (v == null || v <= 0) return null;
+      return v >= 1000 ? '${(v / 1000).toStringAsFixed(1)} 秒' : '$v 毫秒';
+    }
+
+    final running = s.runningStreams;
+    final limit = s.streamLimit;
+    final streams = running == null
+        ? null
+        : limit == null
+            ? '$running'
+            : '$running / $limit';
+    final reused = s.reusedConnections;
+    final created = s.newConnections;
+    final timing = [
+      if (ms('queueMs') != null) '排队 ${ms('queueMs')}',
+      if (s.linkMs != null && s.linkMs! > 0)
+        '取链 ${s.linkMs! >= 1000 ? '${(s.linkMs! / 1000).toStringAsFixed(1)} 秒' : '${s.linkMs} 毫秒'}',
+      if (ms('resolveMs') != null) '首个响应 ${ms('resolveMs')}',
+      if (ms('connectMs') != null) '建连 ${ms('connectMs')}',
+      if (ms('tlsMs') != null) 'TLS ${ms('tlsMs')}',
+      if (ms('firstByteMs') != null) '首字节 ${ms('firstByteMs')}',
+      if (ms('transferMs') != null) '传输 ${ms('transferMs')}',
+      if (ms('cooldownMs') != null) '限流等待 ${ms('cooldownMs')}',
+    ].join('，');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('下载诊断', style: TextStyle(color: colors.secondary, fontSize: 12)),
+          const SizedBox(height: 8),
+          row('阶段', s.netdiskPhase ?? s.phaseLabel),
+          row('下载流', streams),
+          row('分段', s.rangeLabel),
+          row('最近错误', s.lastError),
+          GestureDetector(
+            onTap: () => setState(() => details = !details),
+            child: Row(
+              children: [
+                Icon(
+                    details
+                        ? CupertinoIcons.chevron_down
+                        : CupertinoIcons.chevron_right,
+                    size: 12,
+                    color: colors.secondary),
+                const SizedBox(width: 4),
+                Text('网络细节',
+                    style: TextStyle(color: colors.secondary, fontSize: 12)),
+              ],
+            ),
+          ),
+          if (details) ...[
+            const SizedBox(height: 8),
+            row('协议', s.protocol),
+            row(
+                '连接',
+                created == null && reused == null
+                    ? null
+                    : '新建 ${created ?? 0}，复用 ${reused ?? 0}'),
+            row('请求', s.requests?.toString()),
+            row('限流', s.rateLimits == null ? null : '${s.rateLimits} 次'),
+            row('耗时', timing),
+            row(
+                '自适应',
+                s.adaptivePhase == null
+                    ? null
+                    : '${s.adaptivePhase}${s.adaptiveTarget != null && s.adaptiveTarget! > 0 ? '，目标 ${s.adaptiveTarget}' : ''}'),
+          ],
         ],
       ),
     );

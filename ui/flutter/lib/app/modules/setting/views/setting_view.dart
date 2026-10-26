@@ -33,8 +33,8 @@ import '../../../views/open_in_new.dart';
 import '../../../views/outlined_button_loading.dart';
 import '../../../views/text_button_loading.dart';
 import '../../app/controllers/app_controller.dart';
-import '../../extension/views/extension_view.dart';
 import '../controllers/setting_controller.dart';
+import 'mac_settings_view.dart';
 
 const _padding = SizedBox(height: 10);
 final _divider = const Divider().paddingOnly(left: 10, right: 10);
@@ -52,6 +52,9 @@ class SettingView extends GetView<SettingController> {
 
   @override
   Widget build(BuildContext context) {
+    if (Util.isMacos()) {
+      return const MacSettingsView(hotKeyEditor: MacHotKeyEditor());
+    }
     final appController = Get.find<AppController>();
     final downloaderCfg = appController.downloaderConfig;
     final startCfg = appController.startConfig;
@@ -1766,159 +1769,6 @@ class SettingView extends GetView<SettingController> {
           ));
     }
 
-    if (Util.isMacos()) {
-      return ValueListenableBuilder<String>(
-        valueListenable: MacPanel.settingsSection,
-        builder: (context, section, _) => Obx(() => Scaffold(
-              body: MacPage(
-                title: const {
-                      'general': '通用',
-                      'download': '下载',
-                      'connections': '连接与能力',
-                      'advanced': '高级',
-                    }[section] ??
-                    '通用',
-                child: ListTileTheme(
-                  dense: true,
-                  minVerticalPadding: 5,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 1),
-                  child: Center(
-                      child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 900),
-                    child: ListView(
-                      key: ValueKey('mac-settings-$section'),
-                      padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
-                      children: [
-                        if (section == 'general' ||
-                            !const {
-                              'download',
-                              'connections',
-                              'advanced',
-                            }.contains(section)) ...[
-                          _macGroup(context, '通用', CupertinoIcons.gear, [
-                            buildAutoStartup(),
-                            buildMenubarMode(),
-                            const MacHotKeyEditor(),
-                            buildDesktopNotification(),
-                          ]),
-                          _macGroup(
-                              context, 'ui'.tr, CupertinoIcons.paintbrush, [
-                            buildTheme(),
-                            buildLocale(),
-                          ]),
-                          _macGroup(
-                              context, 'about'.tr, CupertinoIcons.info_circle, [
-                            buildHomepage(),
-                            buildVersion(),
-                            buildAutoCheckUpdate(),
-                            if (Config.isConfigured) buildAnalyticsEnabled(),
-                            buildThanks(),
-                          ]),
-                        ],
-                        if (section == 'download') ...[
-                          _macGroup(
-                              context, '下载', CupertinoIcons.arrow_down_circle, [
-                            buildDownloadDir(),
-                            buildDownloadCategories(),
-                            buildMaxRunning(),
-                            buildDefaultDirectDownload(),
-                            buildAutoStartTasks(),
-                            buildAutoTorrentEnable(),
-                            if (downloaderCfg.value.autoTorrent.enable)
-                              buildAutoTorrentDeleteAfterDownload(),
-                            buildAutoDeleteMissingFileTasks(),
-                          ]),
-                          _macGroup(context, 'archives'.tr,
-                              CupertinoIcons.archivebox, [
-                            buildAutoExtract(),
-                            if (downloaderCfg.value.archive.autoExtract)
-                              buildDeleteAfterExtract(),
-                          ]),
-                          _macGroup(context, 'HTTP', CupertinoIcons.globe, [
-                            buildHttpUa(),
-                            buildHttpConnections(),
-                            buildHttpUseServerCtime(),
-                          ]),
-                          _macGroup(
-                              context,
-                              chinese ? '媒体下载' : 'Media downloads',
-                              CupertinoIcons.film, [
-                            buildYtDlpPath(),
-                            buildFfmpegPath(),
-                            buildJsRuntimePath(),
-                            buildMediaConnections(),
-                          ]),
-                          _macGroup(context, 'BitTorrent',
-                              CupertinoIcons.arrow_down_circle, [
-                            buildBtListenPort(),
-                            buildBtTrackerSubscribeUrls(),
-                            buildBtTrackers(),
-                            buildBtSeedConfig(),
-                            buildBtDefaultClientConfig(),
-                          ]),
-                          _macGroup(context, 'ed2k'.tr, CupertinoIcons.link, [
-                            buildEd2kListenPort(),
-                            buildEd2kUdpPort(),
-                            buildEd2kServerAddr(),
-                            buildEd2kServerMet(),
-                            buildEd2kNodesDat(),
-                          ]),
-                        ],
-                        if (section == 'connections') ...[
-                          _macGroup(context, '浏览器与网盘', CupertinoIcons.globe, [
-                            buildBrowserExtension(),
-                            const ListTile(
-                              title: Text('网盘下载'),
-                              subtitle:
-                                  Text('使用已安装的浏览器助手发送网页勾选文件，或在轻面板粘贴网盘分享链接。'),
-                              trailing: MacButton(
-                                  onPressed: MacPanel.showPanel,
-                                  child: Text('打开轻面板')),
-                            ),
-                          ]),
-                          _macGroup(
-                              context, 'network'.tr, CupertinoIcons.globe, [
-                            buildProxy(),
-                            buildGithubMirror(),
-                          ]),
-                          const ExtensionView(embedded: true),
-                          Padding(
-                            padding: const EdgeInsets.only(top: 12),
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: MacButton(
-                                onPressed: () =>
-                                    MacPanel.showSettings(section: 'advanced'),
-                                child: const Text('扩展安装与维护…'),
-                              ),
-                            ),
-                          ),
-                        ],
-                        if (section == 'advanced') ...[
-                          const _MacExtensionMaintenance(),
-                          _macGroup(
-                              context, 'API', CupertinoIcons.chevron_left, [
-                            buildApiProtocol(),
-                            if (startCfg.value.network == 'tcp')
-                              buildApiToken(),
-                          ]),
-                          _macGroup(
-                              context, 'developer'.tr, CupertinoIcons.gear, [
-                            buildWebhook(),
-                            buildScript(),
-                            buildLogsDir(),
-                          ]),
-                        ],
-                      ],
-                    ),
-                  )),
-                ),
-              ),
-            )),
-      );
-    }
-
     return Obx(() {
       return GestureDetector(
         onTap: () {
@@ -2096,38 +1946,6 @@ class SettingView extends GetView<SettingController> {
         ),
       );
     });
-  }
-
-  Widget _macGroup(
-      BuildContext context, String title, IconData icon, List<Widget?> items) {
-    final colors = MacColors.of(context);
-    final visible = items.whereType<Widget>().toList();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: ExpansionTile(
-        key: PageStorageKey(title),
-        initiallyExpanded: true,
-        maintainState: true,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 3),
-        childrenPadding: EdgeInsets.zero,
-        shape: const Border(),
-        collapsedShape: const Border(),
-        leading: Icon(icon, size: 14, color: colors.secondary),
-        title: Text(title,
-            style: TextStyle(
-                color: colors.secondary,
-                fontSize: 12,
-                fontWeight: FontWeight.w600)),
-        children: [
-          for (var i = 0; i < visible.length; i++) ...[
-            visible[i],
-            if (i != visible.length - 1)
-              Divider(
-                  height: 1, indent: 14, endIndent: 14, color: colors.border),
-          ],
-        ],
-      ),
-    );
   }
 
   void _showWebhookDialog({int? index, String? initialUrl}) {
@@ -2739,30 +2557,6 @@ class SettingView extends GetView<SettingController> {
   }
 }
 
-class _MacExtensionMaintenance extends StatefulWidget {
-  const _MacExtensionMaintenance();
-  @override
-  State<_MacExtensionMaintenance> createState() =>
-      _MacExtensionMaintenanceState();
-}
-
-class _MacExtensionMaintenanceState extends State<_MacExtensionMaintenance> {
-  bool _expanded = false;
-  @override
-  Widget build(BuildContext context) => ExpansionTile(
-        title: const Text('扩展安装与维护'),
-        subtitle: const Text('按需安装、检查更新、删除扩展或进入开发工具。'),
-        initiallyExpanded: false,
-        onExpansionChanged: (value) => setState(() => _expanded = value),
-        childrenPadding: const EdgeInsets.only(bottom: 12),
-        children: [
-          if (_expanded)
-            const ExtensionView(
-                embedded: true, mode: ExtensionViewMode.maintenance),
-        ],
-      );
-}
-
 /// Carbon uses virtual key codes, so derive them from the physical key rather
 /// than the user's input layout or the character produced by Shift/Option.
 class MacHotKeyChord {
@@ -2909,13 +2703,16 @@ class MacHotKeyEditor extends StatelessWidget {
         builder: (context, label, _) => ValueListenableBuilder<String?>(
           valueListenable: MacPanel.hotKeyError,
           builder: (context, error, _) => ListTile(
-            title: const Text('全局快捷键'),
-            subtitle: Text(
-                error ??
-                    '唤起 kownload 轻面板；可组合 Control、Option、Command、Shift 与一个按键。',
-                style: error == null
-                    ? null
-                    : TextStyle(color: Theme.of(context).colorScheme.error)),
+            title: Text('全局快捷键',
+                style:
+                    TextStyle(fontSize: 13, color: MacColors.of(context).text)),
+            subtitle: Text(error ?? '从任何应用打开轻面板。',
+                style: TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    color: error == null
+                        ? MacColors.of(context).secondary
+                        : Theme.of(context).colorScheme.error)),
             trailing: MacButton(
               onPressed: () => MacPanel.transient(() => showDialog<void>(
                     context: context,

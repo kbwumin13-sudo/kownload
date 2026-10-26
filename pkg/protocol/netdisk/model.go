@@ -53,6 +53,8 @@ type ReqExtra struct {
 	SessionID string `json:"sessionId,omitempty"`
 	AccountID string `json:"accountId,omitempty"`
 	BatchID   string `json:"batchId,omitempty"`
+	// Deferred binds a shared-directory task to its durable batch manifest.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 type Listing struct {

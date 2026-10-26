@@ -175,8 +175,9 @@ async function start() {
     $('siteOff').checked = await call('SITE',{host});
     $('showAll').checked = (await chrome.storage.local.get('showAll')).showAll === true;
     await refresh();
-    try { const config = await call('CONFIG'); $('path').value = config?.downloadDir || ''; }
-    catch(e) { status(`读取 kownload 配置失败：${e.message}`); }
+    // An empty path follows the app's current default, including a directory
+    // changed by the first-download tutorial while this popup stays open.
+    // Only a location entered by the user is sent as an explicit override.
   } catch(e) { status(e.message); }
 }
 document.querySelectorAll('.chip').forEach(button => button.addEventListener('click',() => { kind = button.dataset.kind; document.querySelectorAll('.chip').forEach(x => x.classList.toggle('active',x === button)); render(); }));

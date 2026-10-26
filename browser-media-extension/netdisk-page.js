@@ -7,7 +7,7 @@ export function readNetdiskPage(provider, sourcePage) {
     baidu: ['.file-list', '.wp-s-core-pan'],
     aliyun: ['[class^="node-list-table-view--"]', '[class^="node-list-grid-view--"]', '[class^="node-list--"]'],
     mcloud: ['.main_file_list', '.home-page'],
-    tcloud: ['.c-file-list'],
+    tcloud: ['.c-file-list', '.p-web', '#app'],
     xunlei: ['[class*="SourceListItem__item--"]'],
     quark: ['.file-list'], uc: ['.file-list'],
     '123pan': ['.ant-table-wrapper', '.tiled-list', '.file-list', '.custom-table-wrapper', '[class^="mfy_h-table-module__shell__"]'],
@@ -16,7 +16,7 @@ export function readNetdiskPage(provider, sourcePage) {
   if (!Object.hasOwn(layouts, provider)) return null;
   const scalar = (v, max = 4096) => typeof v === 'string' || typeof v === 'number' ? String(v).slice(0, max) : '';
   const record = v => v && typeof v === 'object' ? v : {};
-  const first = (v, keys) => keys.map(k => v[k]).find(x => x !== undefined && x !== null && x !== '');
+  const first = (v, keys) => keys.map(k => record(v)[k]).find(x => x !== undefined && x !== null && x !== '');
   const list = v => Array.isArray(v) ? v.slice(0, 10000) : [];
   const tokens = {}, share = {}, files = [], seen = new Set();
   const put = (out, key, value) => { const s = scalar(value); if (s && !/[\r\n\x00]/.test(s)) out[key] = s; };
@@ -65,7 +65,10 @@ export function readNetdiskPage(provider, sourcePage) {
     const rows = list(props.dataSource || props.list || props.loadedFileList || props.files);
     const selection = props.selectedRowKeys ?? props.selectedKeys ?? props.selectedItems ?? props.rowSelection?.selectedRowKeys;
     const keys = new Set((typeof selection === 'string' ? selection.split(',') : list(selection)).map(x => scalar(typeof x === 'object' ? first(x,schemas[provider].id) : x,256)));
-    for (const row of rows) if (keys.has(scalar(first(row,schemas[provider].id),256)) || selection == null && (row.checked === true || row.selected === true)) add(row);
+    for (const value of rows) {
+      const row=record(value);
+      if (keys.has(scalar(first(row,schemas[provider].id),256)) || selection == null && (row.checked === true || row.selected === true)) add(row);
+    }
     for (const key of ['stoken','shareToken','share_token','shareId','share_id','parentId','parent_file_id']) {
       if (key === 'shareId' || key === 'share_id') put(share,'shareId',props[key]);
       else if (key === 'parentId' || key === 'parent_file_id') put(share,'parentId',props[key]);
@@ -88,7 +91,19 @@ export function readNetdiskPage(provider, sourcePage) {
       const watchers = record(vue._computedWatchers);
       list(watchers.fileList?.value || vue.fileList).forEach((x,i) => {if (list(vue.selectedFile).includes(i)) add(x);});
       list(watchers.dirList?.value || vue.dirList).forEach((x,i) => {if (list(vue.selectedDir).includes(i)) add(x);});
-    } else if (provider === 'tcloud') list(vue.selectedList).forEach(add);
+    } else if (provider === 'tcloud') {
+      list(vue.selectedList).forEach(add);
+      // Current main.29487b28.js mounts the a4f5 Vuex store on #app, then
+      // replaces that element with .p-web. The top app (#micro / #frame)
+      // has no browserId store; the file list may not have rendered yet.
+      // Read only the site's initialized ID, without invoking FingerprintJS.
+      const browserId = value => {if (!tokens.browserId) put(tokens,'browserId',value);};
+      browserId(vue.$store?.state?.browserId);
+      browserId(vue.$root?.$store?.state?.browserId);
+      browserId(node.__vueParentComponent?.appContext?.config?.globalProperties?.$store?.state?.browserId);
+      let parent=vue.$parent;
+      for(let depth=0;parent && depth<12 && !tokens.browserId;depth++,parent=parent.$parent) browserId(parent.$store?.state?.browserId);
+    }
     else if (provider === 'xunlei' && list(vue.selected).includes(vue.info?.id)) add(vue.info);
     for (const props of propsOf(node)) selected(props);
     for (const key of ['shareId','shareid','shareCode','parentId']) put(share,key === 'shareid' || key === 'shareCode' ? 'shareId' : key,vue[key]);
@@ -135,13 +150,39 @@ export function readNetdiskPage(provider, sourcePage) {
   else if (provider === '123pan') {put(tokens,'authorToken',stored('authorToken'));put(tokens,'LoginUuid',stored('LoginUuid') || stored('loginUuid'));}
   else if (provider === 'xunlei' || provider === 'guangya') {
     try {
+      // LinkSwift's Xunlei getToken stores captcha as {token, expires_at}.
+      // Guangya index.b1e7c5bb.js declares this web client; its 394.c71f4afa.js
+      // SDK stores {captcha_token, expires_at}, credentials_<client>[@sub],
+      // and (with multipleSub enabled) current_sub. Never combine clients.
+      const webClient = provider === 'guangya' ? 'aMe-8VSlkrbQXpUR' : '';
+      const currentSub = provider === 'guangya' ? scalar(stored('current_sub'),128) : '';
+      const expiresAt = value => value == null || value === '' ? null : new Date(value).getTime();
+      const now = Date.now(), candidates = [];
       for (let i=0;i<Math.min(localStorage.length,256);i++) {
         const key = localStorage.key(i);
-        if (/^credentials_[A-Za-z0-9_-]{1,128}$/.test(key)) {
-          const c = record(stored(key));
-          for (const field of ['access_token','token_type','user_id']) put(tokens,field,c[field]);
-          put(tokens,'client_id',key.slice(12));
-        } else if (/^captcha_[A-Za-z0-9_-]{1,128}$/.test(key)) put(tokens,'captcha_token',record(stored(key)).captcha_token);
+        const match = /^credentials_([A-Za-z0-9_-]{1,128})(?:@([A-Za-z0-9_-]{1,128}))?$/.exec(key);
+        if (!match || match[2] && provider !== 'guangya') continue;
+        const c = record(stored(key)), expiry = expiresAt(c.expires_at);
+        if (expiry !== null && (!Number.isFinite(expiry) || expiry <= now)) continue;
+        const sub = match[2] || scalar(c.sub,128);
+        if (currentSub && sub && sub !== currentSub) continue;
+        const auth = {};
+        for (const field of ['access_token','token_type','user_id']) put(auth,field,c[field]);
+        if (!auth.access_token) continue;
+        if (provider === 'guangya' && !auth.user_id) put(auth,'user_id',c.sub);
+        put(auth,'client_id',match[1]);
+        candidates.push({key,auth,expiry,current:match[1] === webClient ? 1 : 0});
+      }
+      // expires_at is the available freshness signal; unknown expiry stays a
+      // compatibility fallback, behind explicitly unexpired credentials.
+      candidates.sort((a,b)=>(b.expiry !== null)-(a.expiry !== null) || b.current-a.current || b.expiry-a.expiry || a.key.localeCompare(b.key));
+      const chosen = candidates[0];
+      if (chosen) {
+        Object.assign(tokens,chosen.auth);
+        const cap = record(stored(`captcha_${chosen.auth.client_id}`)), expiry = expiresAt(cap.expires_at);
+        if (expiry === null || Number.isFinite(expiry) && expiry > now) {
+          put(tokens,'captcha_token',provider === 'xunlei' ? cap.token || cap.captcha_token : cap.captcha_token);
+        }
       }
     } catch { /* Storage may be unavailable on a share page. */ }
     put(tokens,'deviceid',scalar(stored('deviceid')).match(/\w{32}/)?.[0]);

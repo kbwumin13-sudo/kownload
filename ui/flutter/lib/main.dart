@@ -9,6 +9,7 @@ import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'api/api.dart' as api;
+import 'api/model/task.dart' show Status;
 import 'app/modules/app/controllers/app_controller.dart';
 import 'app/modules/app/views/app_view.dart';
 import 'core/libgopeed_boot.dart';
@@ -21,6 +22,7 @@ import 'util/package_info.dart';
 import 'util/scheme_register/scheme_register.dart';
 import 'util/updater.dart';
 import 'util/util.dart';
+import 'util/startup_tasks.dart';
 import 'macos/mac_appearance.dart';
 import 'macos/mac_panel.dart';
 import 'app/modules/task/controllers/task_controller.dart';
@@ -145,7 +147,9 @@ Future<void> init(StartupArgs args) async {
   // Auto-start incomplete tasks if enabled
   if (controller.downloaderConfig.value.extra.autoStartTasks) {
     try {
-      await api.continueAllTasks(null);
+      await resumeStartupTasks(
+          load: () => api.getTasks(Status.values),
+          resume: (ids) => api.continueAllTasks(ids));
       logger.i("auto-start tasks completed");
     } catch (e) {
       logger.w("auto-start tasks fail", e);

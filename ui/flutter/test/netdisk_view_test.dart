@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
@@ -6,10 +7,193 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/api/netdisk.dart';
 import 'package:gopeed/app/modules/create/views/netdisk_view.dart';
+import 'package:gopeed/util/netdisk_browser.dart';
 
 import 'netdisk_test_support.dart';
 
+class ReloadableBrowserTool extends MockBrowserTool {
+  final Future<List<NetdiskBrowser>> Function() discover;
+  ReloadableBrowserTool(this.discover);
+  @override
+  Future<List<NetdiskBrowser>> browsers() => discover();
+}
+
 void main() {
+  testWidgets(
+      'Default profiles load while the provider request is still pending',
+      (tester) async {
+    final service = Completer<Response>();
+    final transport = MockNetdiskTransport();
+    transport.handler = (path, method, data) async =>
+        path.endsWith('/providers') ? service.future : null;
+    final tool = NetdiskBrowserTool(
+        home: '/Users/example',
+        isMacOS: true,
+        appExists: (path) async => path == '/Applications/Google Chrome.app',
+        readText: (_) async =>
+            '{"profile":{"info_cache":{"Default":{"name":"Chrome 默认资料"}}}}');
+    await mountNetdisk(tester, transport,
+        browser: ReloadableBrowserTool(tool.browsers),
+        input: const NetdiskInput(mockSource));
+    expect(service.isCompleted, isFalse);
+    expect(find.text('Chrome 默认资料'), findsOneWidget);
+    expect(find.textContaining('未找到 Chrome'), findsNothing);
+    service
+        .completeError(const NetdiskException('无法连接下载服务', 'connection_error'));
+    await tester.pumpAndSettle();
+    expect(find.text('Chrome 默认资料'), findsOneWidget);
+    expect(find.textContaining('无法连接下载服务'), findsOneWidget);
+  });
+
+  testWidgets('permission and connection errors remain usable together',
+      (tester) async {
+    final transport = MockNetdiskTransport();
+    transport.handler = (path, method, data) async {
+      if (path.endsWith('/providers')) {
+        throw const NetdiskException('无法连接下载服务，请稍后重试', 'connection_error');
+      }
+      return null;
+    };
+    final tool = NetdiskBrowserTool(
+        home: '/Users/example',
+        isMacOS: true,
+        appExists: (path) async => path == '/Applications/Google Chrome.app',
+        readText: (path) async => throw FileSystemException(
+            'read', path, const OSError('Operation not permitted', 1)));
+    await mountNetdisk(tester, transport,
+        browser: ReloadableBrowserTool(tool.browsers),
+        input: const NetdiskInput(mockSource));
+    expect(find.textContaining('errno 1'), findsOneWidget);
+    expect(find.textContaining('无法连接下载服务'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'permission error includes the real path, allows manual choice and retry',
+      (tester) async {
+    var failed = true;
+    final realTool = NetdiskBrowserTool(
+        home: '/Users/example',
+        isMacOS: true,
+        appExists: (path) async => path == '/Applications/Google Chrome.app',
+        readText: (path) async {
+          if (failed) {
+            throw FileSystemException(
+                'read', path, const OSError('Operation not permitted', 1));
+          }
+          return '{"profile":{"info_cache":{"Default":{"name":"实际资料"}}}}';
+        });
+    await mountNetdisk(tester, MockNetdiskTransport(),
+        browser: ReloadableBrowserTool(realTool.browsers),
+        input: const NetdiskInput(mockSource));
+    expect(
+        find.textContaining(
+            '/Users/example/Library/Application Support/Google/Chrome/Local State'),
+        findsOneWidget);
+    expect(find.textContaining('errno 1'), findsOneWidget);
+    expect(find.textContaining('未找到 Chrome'), findsNothing);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '选择资料文件'))
+            .onPressed,
+        isNotNull);
+    expect(find.text('Default'), findsNothing);
+    failed = false;
+    await tester.tap(find.text('重新读取资料'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('netdisk-profile-error')), findsNothing);
+    expect(find.text('实际资料'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('empty browser profiles have a visible diagnostic',
+      (tester) async {
+    await mountNetdisk(tester, MockNetdiskTransport(),
+        browser: ReloadableBrowserTool(() async => [
+              const NetdiskBrowser(
+                  name: 'Google Chrome',
+                  application: '/Applications/Google Chrome.app',
+                  localStatePath: '/empty/Local State',
+                  profiles: [])
+            ]));
+    expect(find.textContaining('没有可用的个人资料'), findsOneWidget);
+    expect(find.textContaining('/empty/Local State'), findsOneWidget);
+    expect(find.text('学习'), findsNothing);
+  });
+
+  testWidgets('unsupported service and unsupported provider are explicit',
+      (tester) async {
+    final transport = MockNetdiskTransport();
+    transport.handler = (path, method, data) async {
+      if (path.endsWith('/providers')) {
+        throw const NetdiskException(
+            '当前下载服务不支持网盘功能，请更新下载服务后重试。', 'unsupported_service');
+      }
+      return null;
+    };
+    await mountNetdisk(tester, transport);
+    expect(find.textContaining('不支持网盘功能'), findsOneWidget);
+    transport.handler = (path, method, data) async =>
+        path.endsWith('/providers') ? transport.envelope([]) : null;
+    await tester.tap(find.text('重试服务信息'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('不支持夸克网盘'), findsOneWidget);
+  });
+
+  testWidgets(
+      'connection failure is shown accurately and service retry recovers',
+      (tester) async {
+    final transport = MockNetdiskTransport();
+    var failed = true;
+    transport.handler = (path, method, data) async {
+      if (path.endsWith('/providers') && failed) {
+        throw const NetdiskException('无法连接下载服务，请稍后重试', 'connection_error');
+      }
+      return null;
+    };
+    await mountNetdisk(tester, transport);
+    expect(find.textContaining('无法连接下载服务'), findsOneWidget);
+    expect(find.textContaining('已更新'), findsNothing);
+    expect(find.text('报告.pdf'), findsOneWidget);
+    failed = false;
+    await tester.tap(find.text('重试服务信息'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('无法连接下载服务'), findsNothing);
+    expect(transport.at('/providers'), hasLength(2));
+  });
+
+  testWidgets(
+      'other service errors retain their message without upgrade advice',
+      (tester) async {
+    final transport = MockNetdiskTransport();
+    transport.handler = (path, method, data) async {
+      if (path.endsWith('/providers')) {
+        throw const NetdiskException('服务拒绝访问（HTTP 403）', 'http_error');
+      }
+      return null;
+    };
+    await mountNetdisk(tester, transport);
+    expect(find.textContaining('HTTP 403'), findsOneWidget);
+    expect(find.textContaining('已更新'), findsNothing);
+  });
+
+  testWidgets('browser discovery failure is visible and can be retried',
+      (tester) async {
+    var failed = true;
+    final tool = ReloadableBrowserTool(() async {
+      if (failed) throw const NetdiskException('HOME 路径不可用', 'invalid_home');
+      return MockBrowserTool().browsers();
+    });
+    await mountNetdisk(tester, MockNetdiskTransport(), browser: tool);
+    expect(find.textContaining('HOME 路径不可用'), findsOneWidget);
+    expect(find.textContaining('未找到 Chrome'), findsNothing);
+    failed = false;
+    await tester.tap(find.text('重新读取资料'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('HOME 路径不可用'), findsNothing);
+    expect(find.text('学习'), findsOneWidget);
+  });
+
   testWidgets('resume-only mode never lists an old session or selects files',
       (tester) async {
     final transport = MockNetdiskTransport();

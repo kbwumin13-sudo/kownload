@@ -113,7 +113,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 		}
 	}
 
-	listener, err := net.Listen(startCfg.Network, startCfg.Address)
+	listener, err := listenLocal(startCfg.Network, startCfg.Address)
 	if err != nil {
 		return nil, nil, err
 	}

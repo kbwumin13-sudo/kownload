@@ -4,8 +4,17 @@ import (
 	"context"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/netdisk"
 	"strconv"
+	"strings"
 )
 
+// The fixed LinkSwift dev script and OpenList 482464c2 guangyapan driver
+// use /nd.bizuserres.s for download/token and mutation/task APIs.
+// The official https://www.guangyapan.com/static/js/index.b1e7c5bb.js
+// (SHA256 f5eeb594b6c622c87d87e91dfc22110076d3351e137b46f577cb4630e06c2347)
+// uses /userres for share paging/restore; OpenList's normal personal listing
+// also uses /userres. Keep this distinct from its transfer-directory lookup.
+// Keep those independently verified paths explicit; do not infer aliases or
+// retry write operations against another service prefix.
 type guangyaProvider struct{ providerBase }
 
 func (p *guangyaProvider) headers(s *Session, src model.Source) map[string]string {
@@ -40,7 +49,7 @@ func (p *guangyaProvider) call(ctx context.Context, c *APIClient, s *Session, sr
 	if e != nil {
 		return nil, e
 	}
-	if e = checkResponse(r, "code", "0"); e != nil {
+	if e = guangyaResponse(r); e != nil {
 		return nil, e
 	}
 	return r, nil
@@ -89,7 +98,12 @@ func (p *guangyaProvider) List(ctx context.Context, c *APIClient, s *Session, sr
 	}
 	d := obj(r["data"])
 	if _, ok := d["list"].([]any); !ok {
-		return nil, Fail("invalid_response", "光鸭网盘缺少目录列表")
+		// Protobuf JSON omits an empty repeated list and its zero total.
+		// The observed empty personal response is {"msg":"success","data":{}}.
+		_, explicitCode := r["code"]
+		if d == nil || len(d) != 0 || explicitCode || !strings.EqualFold(strings.TrimSpace(str(r["msg"])), "success") {
+			return nil, Fail("invalid_response", "光鸭网盘缺少目录列表")
+		}
 	}
 	l := &model.Listing{Source: src, Files: []model.File{}}
 	for _, v := range items(d["list"]) {
@@ -109,7 +123,7 @@ func (p *guangyaProvider) shareToken(ctx context.Context, c *APIClient, s *Sessi
 	if t := sessionValue(s, "share_access_token", "shareAccessToken"); t != "" {
 		return t, nil
 	}
-	r, e := p.call(ctx, c, s, src, "/userres/v1/get_share_access_token", object{"shareId": src.ShareID, "code": src.Password})
+	r, e := p.call(ctx, c, s, src, "/nd.bizuserres.s/v1/get_share_access_token", object{"shareId": src.ShareID, "code": src.Password})
 	if e != nil {
 		return "", e
 	}
@@ -124,14 +138,14 @@ func (p *guangyaProvider) Resolve(ctx context.Context, c *APIClient, s *Session,
 	if e := checkFile(f); e != nil {
 		return nil, e
 	}
-	path := "/userres/v1/get_res_download_url"
+	path := "/nd.bizuserres.s/v1/get_res_download_url"
 	body := object{"fileId": f.ID}
 	if src.ShareID != "" {
 		tok, e := p.shareToken(ctx, c, s, src)
 		if e != nil {
 			return nil, e
 		}
-		path = "/userres/v1/get_share_download_url"
+		path = "/nd.bizuserres.s/v1/get_share_download_url"
 		body["accessToken"] = tok
 	} else if bearer(s) == "" {
 		return nil, LoginRequired(p.Info().Name)
@@ -144,4 +158,19 @@ func (p *guangyaProvider) Resolve(ctx context.Context, c *APIClient, s *Session,
 		return nil, Fail("file_mismatch", "光鸭返回了另一文件的下载信息")
 	}
 	return download(c, s, f, first(obj(r["data"]), "signedURL", "downloadUrl"), map[string]string{"User-Agent": browserUA, "Referer": "https://www.guangyapan.com/"}, at(r, "data", "expireAt"))
+}
+
+// Guangya omits the zero code in successful protobuf JSON responses. Its
+// public OpenList offline.go contract accepts an empty or "success" message.
+// Requiring that marker avoids treating an arbitrary missing status as success;
+// each caller still validates its endpoint-specific result fields.
+func guangyaResponse(r object) error {
+	if _, ok := r["code"]; ok {
+		return checkResponse(r, "code", "0")
+	}
+	msg, ok := r["msg"].(string)
+	if ok && (strings.TrimSpace(msg) == "" || strings.EqualFold(strings.TrimSpace(msg), "success")) {
+		return nil
+	}
+	return Fail("invalid_response", "光鸭网盘响应缺少有效状态")
 }

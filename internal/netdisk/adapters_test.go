@@ -171,7 +171,7 @@ func TestAdaptersOwnResolveKeepsOriginalShareURL(t *testing.T) {
 		{"quark", "/1/clouddrive/file/download", `{"code":0,"data":[{"fid":"123","download_url":"https://cdn.quark.cn/file"}]}`},
 		{"uc", "/1/clouddrive/file/download", `{"code":0,"data":[{"fid":"123","download_url":"https://cdn.uc.cn/file"}]}`},
 		{"123pan", "/api/v2/file/download_info", `{"code":0,"data":{"dispatchList":[{"prefix":"https://cdn.example"}],"downloadPath":"/123"}}`},
-		{"guangya", "/userres/v1/get_res_download_url", `{"code":0,"data":{"signedURL":"https://cdn.example/duck"}}`},
+		{"guangya", "/nd.bizuserres.s/v1/get_res_download_url", `{"code":0,"data":{"signedURL":"https://cdn.example/duck"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {

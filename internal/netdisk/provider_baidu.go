@@ -44,6 +44,10 @@ var baiduHomeSignFields = regexp.MustCompile(`"(sign1|sign3|timestamp)"\s*:\s*("
 func (p *baiduProvider) webSignature(ctx context.Context, c *APIClient, s *Session, src model.Source) (string, string, error) {
 	h := p.headers(s, src)
 	h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
+	h["Referer"] = "https://pan.baidu.com/disk/home"
+	h["Origin"] = "https://pan.baidu.com"
+	// Keep the home request (including its redirects/cookies) and the legacy
+	// inline fields. Current /disk/main pages obtain these variables via API.
 	raw, e := c.Text(ctx, "GET", "https://pan.baidu.com/disk/home", nil, h)
 	if e != nil {
 		return "", "", e
@@ -59,10 +63,34 @@ func (p *baiduProvider) webSignature(ctx context.Context, c *APIClient, s *Sessi
 		fields[m[1]] = v
 	}
 	if fields["sign1"] == "" || fields["sign3"] == "" || fields["timestamp"] == "" {
-		if strings.Contains(raw, "passport.baidu.com") {
-			return "", "", LoginRequired(p.Info().Name)
+		// Primary references (pinned revisions):
+		// Aqr-K/web-mount-packs@877e61ab529ba092e8c30501431e8e0ed38042b1
+		// python-dupan-client/dupan/client.py:get_sign_and_timestamp/get_templatevariable
+		// canoziia/baidunetdisk@e8504001900bae3ec072a5fcc7011c633ce4de70
+		// download/download.go:GetMyParams. Never execute the returned sign2 JS.
+		r, err := apiJSON(ctx, c, "GET", query("https://pan.baidu.com/api/gettemplatevariable", values(map[string]string{
+			"fields": `["sign1","sign3","timestamp"]`, "channel": "chunlei", "web": "1", "app_id": "250528", "clienttype": "0",
+		})), nil, h)
+		if err != nil {
+			return "", "", err
 		}
-		return "", "", Fail("invalid_response", "百度个人盘页面未提供有效下载签名，请重新同步登录")
+		if err = checkResponse(r, "errno", "0"); err != nil {
+			// Unknown upstream codes may contain arbitrary sensitive text.
+			if typed, ok := err.(*Error); ok && typed.Code == "api_error" {
+				return "", "", Fail("api_error", "百度个人盘签名接口拒绝请求")
+			}
+			return "", "", err
+		}
+		// Do not mix partial HTML fields (or cached share signatures) with API
+		// fields. A passport link in ordinary HTML is not evidence of logout.
+		result := obj(r["result"])
+		fields["sign1"], _ = result["sign1"].(string)
+		fields["sign3"], _ = result["sign3"].(string)
+		fields["timestamp"] = str(result["timestamp"])
+	}
+	timestamp, err := strconv.ParseInt(fields["timestamp"], 10, 64)
+	if fields["sign1"] == "" || fields["sign3"] == "" || err != nil || timestamp <= 0 || strings.Trim(fields["timestamp"], "0123456789") != "" {
+		return "", "", Fail("invalid_response", "百度个人盘未提供有效下载签名")
 	}
 	sign, e := baiduWebSign(fields["sign3"], fields["sign1"])
 	return sign, fields["timestamp"], e

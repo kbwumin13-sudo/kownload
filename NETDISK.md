@@ -14,7 +14,7 @@ Provider IDs: `baidu aliyun mcloud tcloud xunlei quark uc 123pan guangya`。
 - POST `/netdisk/browser/claim` `{requestId?,sourcePage,instanceId,browser,contextId}` -> null 或 `{request:BrowserRequest,nonce}`。
 - POST `/netdisk/browser/capture` `{requestId?,nonce?,capture:Capture}` -> `{sessionId,source,files}`。无requestId仅用于明确网页用户点击；等待App请求需要nonce及同一instance/context/share绑定。
 - POST `/netdisk/list` `{source,sessionId,cursor?,proxy?}` -> Listing。
-- POST `/netdisk/prepare` `{source,sessionId,files,opts,proxy?}` -> `{batchId,reqs:CreateTaskBatchItem[]}`。只能在用户确认所选文件后调用，会在必要时临时转存。
+- POST `/netdisk/prepare` `{source,sessionId,files,opts,proxy?}` -> `{batchId,reqs:CreateTaskBatchItem[]}`。只能在用户确认所选文件后调用；目录返回元数据任务，在实际下载时按需转存。
 - GET `/netdisk/transfers` -> TransferReceipt[]；POST `/netdisk/cleanup` `{batchId}` 重试完成批次清理。
 - POST `/tasks/batch` `{reqs}` 创建prepare返回的任务。
 
@@ -34,6 +34,14 @@ Flutter以此显示网盘确认及保存位置，调用prepare及tasks/batch。
 
 上游固定源码保存在项目根 `artifacts/linkswift-2026-10-14/upstream/`，保留AGPL归属。开发版阿里getFilesUrl批量覆盖错配不可照搬。核心下载复用HTTP Fetcher，以netdisk协议保存原文件身份和断点状态，恢复后需要浏览器重新同步同一账号。
 
+
+## 大目录准备与启动恢复
+
+目录准备仅递归列举元数据、分页去重及校验路径，不预取全批下载链接。任务按下载槽位取新链接，默认以各文件原名展示排队项。夸克/UC 在同一内存会话内复用目录遍历学到的分享文件令牌，禁止将其写进任务或批次清单。
+
+分享目录持久化原来源、账号和文件清单；某个成员确实需要转存时，写入转存意图并串行创建一次整批副本，校验 source_id、大小、hash、相对路径及专用目录后映射回原任务。整批成功才清理；转存失败、保存失败及不确定结果保留回执，禁止自动重复转存。批次转存保留原 Prepare 的五分钟操作预算，暂停仍可取消。
+
+浏览器登录仅存在内存，因此启动自动继续仅用于普通下载；网盘任务等待界面重新同步原来源后继续，避免启动时产生大批登录失败。个人文件和分享原文件可以重新验证权限；副本和转存操作仍绑定原账号。现有目录深度 64、文件数 10000 的限制保留。
 
 ## 原文件恢复与副本账号
 

@@ -20,6 +20,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/logger"
 	"github.com/GopeedLab/gopeed/internal/protocol/media"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -102,6 +103,8 @@ type Downloader struct {
 	fetcherCache map[string]fetcher.Fetcher
 	storage      Storage
 	tasks        []*Task
+	// Guarded by lock; changed only while also holding queueMu, under which
+	// fetchers read it.
 	waitTasks    []*Task
 	watchedTasks sync.Map
 	// Serializes failed-run persistence with deletion, without holding task
@@ -121,6 +124,17 @@ type Downloader struct {
 
 	extensionLock sync.RWMutex
 	extensions    []*Extension
+
+	// Shared by every fetcher: reusable connections and per-source budgets.
+	transports *transfer.TransportPool
+	budget     *transfer.Budget
+	// Fetchers read the wait queue while the downloader may hold lock and
+	// wait for them to stop (a synchronous pause), so they take only queueMu.
+	// It also guards queueSignal, which is closed and replaced when a task
+	// joins the queue or a deferred task may start again, so tasks idling in
+	// a source cooldown check again whether to give their running slot up.
+	queueMu     sync.Mutex
+	queueSignal chan struct{}
 }
 
 func NewDownloader(cfg *DownloaderConfig) *Downloader {
@@ -139,7 +153,10 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 		fetcherMapLock:     &sync.RWMutex{},
 		checkDuplicateLock: &sync.Mutex{},
 
-		extensions: make([]*Extension, 0),
+		extensions:  make([]*Extension, 0),
+		transports:  transfer.NewTransportPool(),
+		budget:      transfer.NewBudget(),
+		queueSignal: make(chan struct{}),
 	}
 
 	loggerSetupOnce.Do(func() { zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack })
@@ -425,7 +442,76 @@ func (d *Downloader) protocolController(protocol string) *controller.Controller 
 			return d.cfg.Proxy.ToHandler()
 		}
 	}
+	// The same policy as GetProxy, with an identity so pooled connections are
+	// only shared by requests that would take the same proxy path.
+	ctl.GetProxyPolicy = func(requestProxy *base.RequestProxy) (func(*gohttp.Request) (*url.URL, error), string) {
+		handler := ctl.GetProxy(requestProxy)
+		if handler == nil {
+			return nil, "direct"
+		}
+		if id := requestProxy.PolicyID(); id != "" {
+			return handler, id
+		}
+		return handler, d.cfg.Proxy.PolicyID()
+	}
+	ctl.Transports = d.transports
+	ctl.Budget = d.budget
+	ctl.QueueWaiting = d.queueWaiting
+	ctl.QueueChanged = d.queueChanged
 	return ctl
+}
+
+// queueChanged returns the channel closed on the next change of the wait
+// queue. Callers take it before checking queueWaiting.
+func (d *Downloader) queueChanged() <-chan struct{} {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	return d.queueSignal
+}
+
+// enqueueLocked puts a task in the wait queue and tells tasks idling in a
+// source cooldown. Caller holds d.lock.
+func (d *Downloader) enqueueLocked(task *Task) {
+	d.queueMu.Lock()
+	d.waitTasks = append(d.waitTasks, task)
+	d.queueMu.Unlock()
+	d.signalQueue()
+}
+
+// dequeueLocked removes waitTasks[i]. Caller holds d.lock.
+func (d *Downloader) dequeueLocked(i int) {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	d.waitTasks = append(d.waitTasks[:i], d.waitTasks[i+1:]...)
+}
+
+// clearQueueLocked empties the wait queue. Caller holds d.lock.
+func (d *Downloader) clearQueueLocked() {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	d.waitTasks = make([]*Task, 0)
+}
+
+// signalQueue wakes tasks idling in a cooldown: a task joined the queue or a
+// queued task may have become able to run.
+func (d *Downloader) signalQueue() {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	close(d.queueSignal)
+	d.queueSignal = make(chan struct{})
+}
+
+// queueWaiting reports whether a queued task could start now if a slot freed.
+func (d *Downloader) queueWaiting() bool {
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	now := time.Now()
+	for _, t := range d.waitTasks {
+		if t.getStatus() == base.DownloadStatusWait && !t.notBeforeTime().After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // Serialize late netdisk progress/start saves with deletion. A removed task
@@ -513,10 +599,24 @@ func (d *Downloader) notifyRunning() {
 		if remainRunningCount == 0 {
 			return
 		}
-		if len(d.waitTasks) > 0 {
-			wt := d.waitTasks[0]
-			d.waitTasks = d.waitTasks[1:]
-			d.doStart(wt)
+		now := time.Now()
+		for i := 0; i < len(d.waitTasks); i++ {
+			wt := d.waitTasks[i]
+			if wt.getStatus() != base.DownloadStatusWait {
+				d.dequeueLocked(i)
+				i--
+				continue
+			}
+			// A rate-limited task keeps its place but lets later tasks run
+			// until its source cooldown ends.
+			if wt.notBeforeTime().After(now) {
+				continue
+			}
+			d.dequeueLocked(i)
+			// A selective pause can leave stale entries in this queue. Recheck
+			// under the status lock so scheduling never resumes a paused task.
+			d.startTask(wt, true)
+			break
 		}
 	}()
 }
@@ -661,7 +761,7 @@ func (d *Downloader) pauseAll() (err error) {
 		defer d.lock.Unlock()
 
 		// Clear wait tasks
-		d.waitTasks = d.waitTasks[:0]
+		d.clearQueueLocked()
 	}()
 
 	for _, task := range d.taskList() {
@@ -702,7 +802,7 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 						return
 					}
 					task.updateStatus(base.DownloadStatusWait)
-					d.waitTasks = append(d.waitTasks, task)
+					d.enqueueLocked(task)
 					pausedCount++
 				}
 				if pausedCount == needPauseCount {
@@ -716,7 +816,7 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 				realContinueTasks = append(realContinueTasks, task)
 			} else {
 				task.updateStatus(base.DownloadStatusWait)
-				d.waitTasks = append(d.waitTasks, task)
+				d.enqueueLocked(task)
 			}
 		}
 	}()
@@ -745,7 +845,7 @@ func (d *Downloader) continueAll() (err error) {
 					continuedTasks = append(continuedTasks, task)
 				} else {
 					task.updateStatus(base.DownloadStatusWait)
-					d.waitTasks = append(d.waitTasks, task)
+					d.enqueueLocked(task)
 				}
 			}
 		}
@@ -803,7 +903,7 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 			}
 			for i, t := range d.waitTasks {
 				if t.ID == id {
-					d.waitTasks = append(d.waitTasks[:i], d.waitTasks[i+1:]...)
+					d.dequeueLocked(i)
 					break
 				}
 			}
@@ -831,7 +931,7 @@ func (d *Downloader) deleteAll(force bool) (err error) {
 			deleteTasksTemp = append(deleteTasksTemp, task)
 		}
 		d.tasks = make([]*Task, 0)
-		d.waitTasks = make([]*Task, 0)
+		d.clearQueueLocked()
 	}()
 
 	for _, task := range deleteTasksTemp {
@@ -855,6 +955,15 @@ func (d *Downloader) Stats(id string) (sr any, err error) {
 		}
 	}
 	sr = task.fetcher.Stats()
+	switch stats := sr.(type) {
+	case *http.Stats:
+		if stats.Timings == nil {
+			stats.Timings = &http.StatsTimings{}
+		}
+		stats.Timings.QueueMs = task.queueTime().Milliseconds()
+	case map[string]any:
+		stats["queueMs"] = task.queueTime().Milliseconds()
+	}
 	return
 }
 
@@ -929,6 +1038,13 @@ func (d *Downloader) Close() error {
 	}
 	for _, fm := range d.cfg.FetchManagers {
 		closeArr = append(closeArr, fm.Close)
+	}
+	// Fetchers are paused; wake budget waiters and drop idle connections.
+	if d.budget != nil {
+		closeArr = append(closeArr, d.budget.Close)
+	}
+	if d.transports != nil {
+		closeArr = append(closeArr, d.transports.Close)
 	}
 	closeArr = append(closeArr, d.storage.Close)
 	// Make sure all resources are released, if had error, return the last error
@@ -1274,6 +1390,10 @@ func (d *Downloader) doOnError(task *Task, err error, generation ...uint64) {
 	if d.closed.Load() || d.getTask(task.ID) != task {
 		return
 	}
+	if deferred, ok := transfer.AsDeferred(err); ok {
+		d.deferTask(task, deferred, generation...)
+		return
+	}
 	persistenceLock := d.errorPersistenceLock(task)
 	persistenceLock.Lock()
 	handled := func() bool {
@@ -1311,6 +1431,64 @@ func (d *Downloader) doOnError(task *Task, err error, generation ...uint64) {
 	}
 }
 
+// deferTask requeues a running task whose source asked clients to wait longer
+// than a task should hold its slot. The task is not failed: it keeps its
+// progress, frees the slot for other sources and starts again after the wait.
+func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, generation ...uint64) {
+	persistenceLock := d.errorPersistenceLock(task)
+	persistenceLock.Lock()
+	handled := func() bool {
+		if d.closed.Load() || d.getTask(task.ID) != task {
+			return false
+		}
+		task.statusLock.Lock()
+		defer task.statusLock.Unlock()
+		if task.getStatus() != base.DownloadStatusRunning ||
+			(len(generation) > 0 && task.runGeneration != generation[0]) {
+			return false
+		}
+		d.Logger.Info().Msgf("task deferred by source rate limit until %s, task id: %s",
+			deferred.Until.Format(time.RFC3339), task.ID)
+		task.runGeneration++
+		task.timer.Pause()
+		task.updateStatus(base.DownloadStatusWait)
+		task.dataLock.Lock()
+		task.notBefore = deferred.Until
+		task.dataLock.Unlock()
+		if saveErr := d.saveTask(task); saveErr != nil {
+			d.Logger.Error().Err(saveErr).Msgf("persist deferred task: %s", task.ID)
+		}
+		return true
+	}()
+	persistenceLock.Unlock()
+	if !handled {
+		return
+	}
+	// Delete may have removed the task after the check above; only a task
+	// still listed and still waiting is queued, so it cannot be revived.
+	d.lock.Lock()
+	queued := false
+	for _, t := range d.tasks {
+		if t == task && task.getStatus() == base.DownloadStatusWait {
+			d.enqueueLocked(task)
+			queued = true
+			break
+		}
+	}
+	d.lock.Unlock()
+	if !queued {
+		return
+	}
+	d.emit(EventKeyProgress, task)
+	d.notifyRunning()
+	// Once the cooldown is over the task can run again: start it if a slot is
+	// free, and otherwise let tasks idling in a cooldown reconsider their slot.
+	time.AfterFunc(time.Until(deferred.Until)+10*time.Millisecond, func() {
+		d.signalQueue()
+		d.notifyRunning()
+	})
+}
+
 func (d *Downloader) restoreTask(task *Task) error {
 	if task.fetcher == nil {
 		if err := d.restoreFetcher(task); err != nil {
@@ -1324,7 +1502,9 @@ func (d *Downloader) restoreTask(task *Task) error {
 func (d *Downloader) restoreFetcher(task *Task) error {
 	v, f := task.fetcherManager.Restore()
 	if v != nil {
-		err := d.storage.Pop(bucketSave, task.ID, v)
+		// Keep the durable checkpoint until the next successful save replaces
+		// it. A crash in OnStart/Start must not erase the last resumable state.
+		_, err := d.storage.Get(bucketSave, task.ID, v)
 		if err != nil {
 			return err
 		}
@@ -1378,7 +1558,7 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 		remainRunningCount := d.remainRunningCount()
 		if remainRunningCount == 0 {
 			task.updateStatus(base.DownloadStatusWait)
-			d.waitTasks = append(d.waitTasks, task)
+			d.enqueueLocked(task)
 			return
 		}
 
@@ -1433,10 +1613,15 @@ func (d *Downloader) statusMut(task *Task, fn func() (bool, error)) (bool, error
 }
 
 func (d *Downloader) doStart(task *Task) (err error) {
+	return d.startTask(task, false)
+}
+
+func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var needCreate bool
 	var generation uint64
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
-		if task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
+		if onlyWaiting && task.getStatus() != base.DownloadStatusWait ||
+			task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
 			isReturn = true
 			return
 		}
@@ -1470,7 +1655,7 @@ func (d *Downloader) doStart(task *Task) (err error) {
 		obsolete := task.getStatus() != base.DownloadStatusRunning ||
 			task.runGeneration != generation || d.closed.Load()
 		task.statusLock.Unlock()
-		if obsolete {
+		if obsolete || d.getTask(task.ID) != task {
 			return nil
 		}
 

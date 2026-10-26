@@ -45,6 +45,11 @@ test('unselected single-file sharing view never becomes an automatic selection',
   const {result}=extract('123pan',{nodes:{'.ant-table-wrapper':[fiber({files:[{FileId:1,FileName:'other.txt',Size:7}],file:{FileId:1,FileName:'other.txt',Size:7,S3KeyFlag:'key'}})]}});
   assert.deepEqual(result.files,[]);
 });
+test('React placeholder rows and null selection keys do not abort page capture',()=>{
+  const node=fiber({dataSource:[null,undefined,{fileId:'selected',name:'selected.txt',size:42,type:'file'}],selectedKeys:[null,'selected']});
+  const result=extract('aliyun',{nodes:{'[class^="node-list-table-view--"]':[node]}}).result;
+  assert.deepEqual(result.files.map(f=>f.id),['selected']);
+});
 test('DOM fallback requires selection; Vue3 proxy and mobile file/directory indices are supported',()=>{
   const selector='[data-file-id][aria-selected="true"], [data-fid][aria-selected="true"], [data-file-id].selected, [data-fid].selected, [data-file-id]:has(input[type="checkbox"]:checked)';
   assert.equal(extract('uc',{nodes:{[selector]:[{dataset:{fid:'selected',fileName:'selected.txt',size:'42'}}]}}).result.files[0].id,'selected');
@@ -250,7 +255,7 @@ test('isolated bootstrap rejects synthetic clicks, forwards only fixed messages 
 });
 test('manifest fixes identity/version, top document_start isolated bootstrap; media capture unchanged',()=>{
   const manifest=JSON.parse(fs.readFileSync(new URL('../manifest.json',import.meta.url),'utf8'));
-  assert.equal(manifest.version,'0.4.0');assert.equal(manifest.name,'kownload 下载助手');assert(manifest.key.startsWith('MIIBIjAN'));
+  assert.equal(manifest.version,'0.4.1');assert.equal(manifest.name,'kownload 下载助手');assert(manifest.key.startsWith('MIIBIjAN'));
   const script=manifest.content_scripts.find(s=>s.js.includes('netdisk-content.js'));
   assert.equal(script.all_frames,false);assert.equal(script.run_at,'document_start');assert.equal(script.world,'ISOLATED');
   assert.equal(manifest.content_scripts.find(s=>s.js.includes('content.js')).all_frames,true);
@@ -262,4 +267,23 @@ test('committed sender/frame URL may omit the current hash route without changin
  assert.deepEqual(await b.send(),{state:'synced',count:1});
  assert.equal(b.scripts[0].args[1],page+'#/list/share');
  assert.equal(b.messages.find(m=>m.params?.path==='/api/v1/netdisk/browser/capture').params.data.capture.sourcePage,page+'#/list/share');
+});
+
+test('same-document routing may move only the public handoff marker from query to hash',async()=>{
+ const b=browser({frameUrl:page+'?gopeed_request=public-id'});
+ b.sender.url=page+'?gopeed_request=public-id';
+ b.navigate(page+'#/list/share?gopeed_request=public-id','hash','doc-a');
+ assert.deepEqual(await b.send(),{state:'synced',count:1});
+ const other=browser({frameUrl:page+'?business=other&gopeed_request=public-id'});
+ other.navigate(page+'#/list/share?gopeed_request=public-id','hash','doc-a');
+ assert.match((await other.send()).error,/来源页面已变化/);
+ assert.equal(other.reads,0);
+});
+
+test('Tcloud captures initialized Vuex browser identity without reading unrelated state',()=>{
+ const {result}=extract('tcloud',{nodes:{'.c-file-list':[{__vue__:{$store:{state:{browserId:'initialized-browser',privateValue:'not-exported'}}}}]}});
+ assert.equal(result.tokens.browserId,'initialized-browser');
+ const clean=sanitizeNetdiskCapture(result,{provider:NETDISK_PROVIDERS.find(p=>p.id==='tcloud'),url:result.sourcePage,browser:'chrome',instanceId:'instance',contextId:'context'});
+ assert.equal(clean.headers['Browser-Id'],'initialized-browser');
+ assert(!JSON.stringify(clean).includes('not-exported'));
 });

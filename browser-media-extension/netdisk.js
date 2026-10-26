@@ -3,13 +3,13 @@ import {readNetdiskPage} from './netdisk-page.js';
 const entry = (id,name,hosts,apiHosts,roots) => ({id,name,hosts,apiHosts,roots});
 export const NETDISK_PROVIDERS = [
   entry('baidu','百度网盘',['pan.baidu.com','yun.baidu.com'],['pan.baidu.com','openapi.baidu.com'],['baidu.com']),
-  entry('aliyun','阿里云盘',['www.aliyundrive.com','www.alipan.com'],['api.aliyundrive.com','api.alipan.com'],['aliyundrive.com','alipan.com']),
+  entry('aliyun','阿里云盘',['www.aliyundrive.com','www.alipan.com','alipan.com'],['api.aliyundrive.com','api.alipan.com'],['aliyundrive.com','alipan.com']),
   entry('mcloud','中国移动云盘',['yun.139.com','caiyun.139.com'],['personal-kd-njs.yun.139.com','caiyun.139.com'],['139.com']),
   entry('tcloud','天翼云盘',['cloud.189.cn'],['api.cloud.189.cn'],['189.cn']),
   entry('xunlei','迅雷云盘',['pan.xunlei.com'],['api-pan.xunlei.com','xluser-ssl.xunlei.com'],['xunlei.com']),
   entry('quark','夸克网盘',['pan.quark.cn'],['drive-pc.quark.cn','drive-h.quark.cn'],['quark.cn']),
   entry('uc','UC网盘',['drive.uc.cn'],['pc-api.uc.cn'],['uc.cn']),
-  entry('123pan','123云盘',['123pan.com','123pan.cn','123684.com','123865.com','123952.com','123912.com'],['www.123pan.com','www.123pan.cn'],['123pan.com','123pan.cn','123684.com','123865.com','123952.com','123912.com']),
+  entry('123pan','123云盘',['123pan.com','123pan.cn','123684.com','123865.com','123952.com','123912.com'],['api.123pan.cn','yun.123pan.com'],['123pan.com','123pan.cn','123684.com','123865.com','123952.com','123912.com']),
   entry('guangya','光鸭云盘',['www.guangyapan.com'],['api.guangyapan.com'],['guangyapan.com'])
 ];
 const httpURL = raw => {try {const u=new URL(raw); return ['https:','http:'].includes(u.protocol) && !u.username && !u.password && !u.port ? u : null;} catch {return null;}};
@@ -36,8 +36,33 @@ export function netdiskSourceIdentity(raw) {
   const password=passwordKeys.map(k=>u.searchParams.get(k)).find(Boolean) || (fragment.startsWith('pwd=') ? new URLSearchParams(fragment).get('pwd') : '') || '';
   return {provider:provider.id,shareId,password};
 }
+// Keep personal redirects explicit: an arbitrary path or SPA route is not home.
+function personalHomeURL(provider,u) {
+  const route=u.hash.slice(1).split('?')[0];
+  if(provider==='quark' || provider==='uc') return u.host===(provider==='quark'?'pan.quark.cn':'drive.uc.cn') && (u.pathname==='/' && !route || u.pathname==='/list' && (!route || route==='/list/all'));
+  if(provider==='mcloud') return ['yun.139.com','caiyun.139.com'].includes(u.host) && (u.pathname==='/' && !route || u.pathname==='/w/' && ['/index','/'].includes(route));
+  if(provider==='tcloud') return u.host==='cloud.189.cn' && !route && ['/web/main','/web/main/','/web/main/file/folder/-11'].includes(u.pathname);
+  if(provider==='aliyun') return ['www.alipan.com','alipan.com'].includes(u.host) && u.pathname==='/drive/file/all' && !route;
+  return false;
+}
+function samePersonalSource(provider,expected,current) {
+  const expectedHome=personalHomeURL(provider,expected),currentHome=personalHomeURL(provider,current);
+  if(expected.host!==current.host && !(provider==='aliyun' && expectedHome && currentHome)) return false;
+  return expectedHome || currentHome ? expectedHome && currentHome : expected.pathname===current.pathname;
+}
+export function netdiskHandoffRequestId(raw) {
+  const u=httpURL(raw),provider=detectNetdisk(raw);
+  if(!u || !provider) return '';
+  const requestId=u.searchParams.get('gopeed_request');
+  if(requestId) return requestId;
+  // Mobile's / -> /w/#/index redirect moves the handoff into the SPA query.
+  if(provider.id==='mcloud' && u.pathname==='/w/' && u.hash.includes('?')) {
+    return new URLSearchParams(u.hash.slice(u.hash.indexOf('?')+1)).get('gopeed_request') || '';
+  }
+  return '';
+}
 const text = (v,max=4096) => (typeof v==='string' || typeof v==='number') && !/[\r\n\x00]/.test(String(v)) ? String(v).slice(0,max) : '';
-const tokensAllowed = new Set(['access_token','accessToken','authorToken','token_type','user_id','default_drive_id','resource_drive_id','driveId','share_token','shareToken','stoken','bdstoken','sign','timestamp','jsToken','sekey','shareid','captcha_token','deviceid','client_id','LoginUuid']);
+const tokensAllowed = new Set(['access_token','accessToken','authorToken','token_type','user_id','default_drive_id','resource_drive_id','driveId','share_token','shareToken','stoken','bdstoken','sign','timestamp','jsToken','sekey','shareid','captcha_token','deviceid','client_id','LoginUuid','browserId']);
 const shareAllowed = new Set(['shareId','password','parentId','uk','shareCode']);
 const metaAllowed = new Set(['driveId','parentId','category','S3KeyFlag','StorageNode','share_fid_token']);
 const pick = (raw,keys) => Object.fromEntries(Object.entries(raw || {}).filter(([k,v]) => keys.has(k) && text(v)).map(([k,v])=>[k,text(v)]));
@@ -71,6 +96,7 @@ export function sanitizeNetdiskCapture(raw,context) {
   if(tokens.deviceid) headers['X-Device-Id']=tokens.deviceid;
   if(tokens.client_id) headers['X-Client-Id']=tokens.client_id;
   if(tokens.accessToken) headers.AccessToken=tokens.accessToken;
+  if(tokens.browserId) headers['Browser-Id']=tokens.browserId;
   if(tokens.LoginUuid) headers.LoginUuid=tokens.LoginUuid;
   return {provider:context.provider.id,sourcePage:context.url,browser:context.browser,instanceId:context.instanceId,contextId:context.contextId,
     ...(text(raw.accountId || tokens.user_id,256)?{accountId:text(raw.accountId || tokens.user_id,256)}:{}),headers,tokens,share,files:cleanNetdiskFiles(raw.files,true)};
@@ -82,7 +108,7 @@ const errorMessages = {
   selected_empty:'请先勾选要下载的文件',
   invalid_capture:'未识别选中文件，请刷新网盘页面后重试',
   cookie_context:'无法确认当前窗口的登录状态，请刷新页面后重试',
-  timeout:'同步超时，请重试', native_error:'Gopeed 连接或同步失败，请打开应用后重试',
+  timeout:'同步超时，请重试', native_error:'kownload 连接或同步失败，请打开应用后重试',
   invalid_message:'无效的网盘请求'
 };
 function restData(response) {
@@ -136,7 +162,7 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
   }
   for (const event of [chrome.webNavigation.onCommitted,chrome.webNavigation.onHistoryStateUpdated,chrome.webNavigation.onReferenceFragmentUpdated]) event.addListener(d=>{if(d.frameId===0) invalidate(d.tabId);});
   chrome.tabs.onRemoved.addListener(invalidate);
-  const documentURL=raw=>{const u=httpURL(raw);if(!u)return '';u.hash='';return u.href;};
+  const documentURL=raw=>{const u=httpURL(raw);if(!u)return '';u.searchParams.delete('gopeed_request');if(detectNetdisk(u.href)?.id==='tcloud' && personalHomeURL('tcloud',u))u.pathname='/web/main/';u.hash='';return u.href;};
   async function live(context) {
     const [tab,frame]=await Promise.all([chrome.tabs.get(context.tabId),chrome.webNavigation.getFrame({tabId:context.tabId,frameId:0})]);
     if (!frame || tab.id!==context.tabId || frame.documentId!==context.documentId || documentURL(frame.url)!==documentURL(context.url) || tab.url!==context.url || frame.documentLifecycle && frame.documentLifecycle!=='active' || (epochs.get(context.tabId)||0)!==context.epoch) throw new Error('stale_page');
@@ -178,11 +204,11 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
         await check();
       }
     }
-    const hosts=[...context.provider.hosts,...context.provider.apiHosts];
+    const hosts=[new URL(context.url).hostname,...context.provider.apiHosts];
     const unique=new Map();
     for (const c of cookies) {
       const domain=c.domain?.replace(/^\./,'').toLowerCase();
-      if (!domain || !hosts.some(h=>h===domain || h.endsWith('.'+domain) || context.provider.id==='123pan' && domain.endsWith('.'+h))) continue;
+      if (!domain || !hosts.some(h=>h===domain || h.endsWith('.'+domain))) continue;
       if (c.storeId && c.storeId!==context.storeId || c.partitionKey && (c.partitionKey.topLevelSite!==partitionKey?.topLevelSite || !!c.partitionKey.hasCrossSiteAncestor!==!!partitionKey?.hasCrossSiteAncestor)) continue;
       const value={name:text(c.name,256),value:text(c.value,8192),domain:c.domain,path:text(c.path,2048)||'/',secure:!!c.secure,...(Number.isFinite(c.expirationDate)&&c.expirationDate>0?{expires:c.expirationDate}:{})};
       if (value.name) unique.set([value.name,value.domain,value.path].join('\u001f'),value);
@@ -207,7 +233,7 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
         await check();
         await port.guard(bindContext(context,sender));
         await check();
-        const requestId=new URL(context.url).searchParams.get('gopeed_request') || '';
+        const requestId=netdiskHandoffRequestId(context.url);
         claim=await forward('/netdisk/browser/claim',{sourcePage:context.url,instanceId:context.instanceId,browser,contextId:context.contextId,...(requestId?{requestId}:{})});
         if(!claim) return {state:'idle'};
         const request=claim.request;
@@ -215,7 +241,7 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
         const expected=httpURL(request.source.url),current=httpURL(context.url);
         const expectedIdentity=netdiskSourceIdentity(request.source.url),currentIdentity=netdiskSourceIdentity(context.url);
         const expectedShare=request.source.shareId || expectedIdentity.shareId,currentShare=currentIdentity.shareId;
-        if (request.source.shareId && expectedIdentity.shareId && request.source.shareId!==expectedIdentity.shareId || (expectedShare || currentShare ? expectedShare!==currentShare : expected.host!==current.host || expected.pathname!==current.pathname)) throw new Error('stale_page');
+        if (request.source.shareId && expectedIdentity.shareId && request.source.shareId!==expectedIdentity.shareId || (expectedShare || currentShare ? expectedShare!==currentShare : !samePersonalSource(context.provider.id,expected,current))) throw new Error('stale_page');
       } else {
         await port.send({method:'wakeup',meta:{silent:false}});
         await port.guard(bindContext(context,sender));
@@ -225,6 +251,12 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
       await check();
       const result=results.find(r=>r.frameId===0 && r.documentId===context.documentId);
       const capture=sanitizeNetdiskCapture(result?.result,context);
+      // The site's own SDK initializes these after document_start. Keep the
+      // existing bounded handoff polling alive until its current auth is ready.
+      if(type==='NETDISK_PROBE' && !netdiskSourceIdentity(context.url).shareId && (
+        context.provider.id==='xunlei' && (!capture.tokens.access_token || !capture.tokens.captcha_token || !capture.tokens.deviceid) ||
+        context.provider.id==='tcloud' && !capture.tokens.browserId
+      )) return {state:'waiting'};
       if(type==='NETDISK_CLICK' && !capture.files.length) throw new Error('selected_empty');
       capture.cookies=await port.guard(cookiesFor(context,check));
       if(context.provider.id==='mcloud') {

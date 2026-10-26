@@ -7,7 +7,7 @@ import 'package:app_links/app_links.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:get/get.dart';
+import 'package:get/get.dart' hide Response;
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -31,6 +31,7 @@ import '../../../../i18n/message.dart';
 import '../../../../main.dart';
 import '../../../../util/github_mirror.dart';
 import '../../../../util/locale_manager.dart';
+import '../../../../util/local_server_config.dart';
 import '../../../../util/log_util.dart';
 import '../../../../util/package_info.dart';
 import '../../../../util/updater.dart';
@@ -40,6 +41,7 @@ import '../../../rpc/rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
 import '../../../../macos/mac_panel.dart';
+import '../../../../macos/mac_onboarding.dart';
 
 const unixSocketPath = 'gopeed.sock';
 
@@ -367,7 +369,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
           final silent = jsonMeta['silent'] as bool? ?? false;
           final params = await ctx.readText();
           final createTaskParams = CreateTask.fromJson(_decodeParams(params));
-          if (!silent || pendingUpdateTask.value != null) {
+          if (!silent ||
+              pendingUpdateTask.value != null ||
+              (Util.isMacos() && !MacOnboarding.completed)) {
             await windowManager.show();
             _handleToCreate0(createTaskParams);
           } else {
@@ -382,18 +386,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
         "/forward": (ctx) async {
           try {
             final body = await ctx.readJSON();
-            final method = (body['method'] as String?)?.toUpperCase() ?? 'GET';
-            final path = (body['path'] as String?) ?? "/";
-            final data = body['data'];
-            final query = body['query'] as Map<String, dynamic>?;
-
-            // Forward request to gopeed REST API
-            final response = await forward(
-              path,
-              method: method,
-              data: data,
-              queryParameters: query,
-            );
+            final response = await forwardBrowserRequest(body);
 
             // Return raw response
             await ctx.writeJSON(response.data);
@@ -409,6 +402,39 @@ class AppController extends GetxController with WindowListener, TrayListener {
       });
     } catch (e) {
       logger.w("start rpc server fail", e, StackTrace.current);
+    }
+  }
+
+  /// The native host has a 60-second deadline. Do not leave a task submission
+  /// pending while the user reads the tutorial, then create it after a timeout.
+  Future<Response> forwardBrowserRequest(Map<String, dynamic> body) async {
+    final method = (body['method'] as String?)?.toUpperCase() ?? 'GET';
+    final target = (body['path'] as String?) ?? '/';
+    final endpoint = Uri.tryParse(target)?.path.replaceAll(RegExp(r'/+$'), '');
+    if (Util.isMacos() &&
+        method == 'POST' &&
+        const {'/tasks', '/tasks/batch', '/api/v1/tasks', '/api/v1/tasks/batch'}
+            .contains(endpoint) &&
+        !MacOnboarding.completed) {
+      unawaited(_showIncomingDownloadSetup());
+      throw StateError('请先在 kownload 完成首次设置，再回到网页点击下载。');
+    }
+    return forward(target,
+        method: method,
+        data: body['data'],
+        queryParameters: body['query'] as Map<String, dynamic>?);
+  }
+
+  Future<void> _showIncomingDownloadSetup() async {
+    try {
+      await MacPanel.showPanel();
+      await WidgetsBinding.instance.endOfFrame;
+      final context = Get.context;
+      if (context != null && context.mounted) {
+        await MacOnboarding.show(context);
+      }
+    } catch (_) {
+      MacPanel.notice.value = '暂时无法打开使用引导，请从设置重新打开。';
     }
   }
 
@@ -525,7 +551,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
       _defaultStartConfig!.address = "127.0.0.1:0";
     } else {
       _defaultStartConfig!.network = "unix";
-      _defaultStartConfig!.address = Util.isIsolatedPreview
+      _defaultStartConfig!.address = Util.isIsolatedPreview || Util.isMacos()
           ? path.join(Util.getStorageDir(), unixSocketPath)
           : "${(await getTemporaryDirectory()).path}/$unixSocketPath";
     }
@@ -535,10 +561,19 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
   Future<StartConfig> loadStartConfig() async {
     final defaultCfg = await _initDefaultStartConfig();
-    final saveCfg = Database.instance.getStartConfig();
-    startConfig.value.network = saveCfg?.network ?? defaultCfg.network;
-    startConfig.value.address = saveCfg?.address ?? defaultCfg.address;
-    startConfig.value.apiToken = saveCfg?.apiToken ?? defaultCfg.apiToken;
+    final saveCfg = resolveLocalServerConfig(
+      defaults: StartConfigEntity(
+          network: defaultCfg.network,
+          address: defaultCfg.address,
+          apiToken: defaultCfg.apiToken),
+      saved: Database.instance.getStartConfig(),
+      legacyUnixAddress: Util.isMacos()
+          ? path.join((await getTemporaryDirectory()).path, unixSocketPath)
+          : defaultCfg.address,
+    );
+    startConfig.value.network = saveCfg.network;
+    startConfig.value.address = saveCfg.address;
+    startConfig.value.apiToken = saveCfg.apiToken;
     return startConfig.value;
   }
 

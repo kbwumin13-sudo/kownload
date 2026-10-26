@@ -32,9 +32,12 @@ type Provider interface {
 type Error struct {
 	Code    string
 	Message string
+	// cause is a typed condition callers may act on, such as a deferral.
+	cause error
 }
 
 func (e *Error) Error() string        { return e.Message }
+func (e *Error) Unwrap() error        { return e.cause }
 func Fail(code, message string) error { return &Error{Code: code, Message: message} }
 func LoginRequired(name string) error {
 	return Fail("login_required", fmt.Sprintf("请在浏览器登录%s，再同步登录状态", name))

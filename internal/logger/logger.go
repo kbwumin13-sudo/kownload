@@ -43,10 +43,12 @@ func NewLogger(logFile bool, logPath string) *Logger {
 	if logFile {
 		logger.logFile = out.(*os.File)
 	}
-	logger.Logger = zerolog.New(zerolog.ConsoleWriter{
+	// Request URLs in errors can carry signatures and tokens, and fields can
+	// carry cookies: events are redacted before formatting quotes them.
+	logger.Logger = zerolog.New(fieldRedactor{zerolog.ConsoleWriter{
 		NoColor:    true,
 		Out:        out,
 		TimeFormat: "2006-01-02 15:04:05",
-	}).With().Timestamp().Logger()
+	}}).With().Timestamp().Logger()
 	return logger
 }

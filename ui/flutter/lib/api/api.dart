@@ -19,6 +19,7 @@ import 'model/resolve_task.dart';
 import 'model/result.dart';
 import 'model/switch_extension.dart';
 import 'model/task.dart';
+import 'model/task_stats.dart';
 import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
@@ -153,6 +154,12 @@ Future<List<Task>> getTasks(List<Status> statuses) async {
       (data) => (data as List).map((e) => Task.fromJson(e)).toList());
 }
 
+/// Download diagnostics; older cores return only a connection list.
+Future<TaskStats> getTaskStats(String id) async {
+  return _parse<TaskStats>(() => _client.dio.get("api/v1/tasks/$id/stats"),
+      (data) => TaskStats.fromJson(data));
+}
+
 Future<void> pauseTask(String id) async {
   return _parse(() => _client.dio.put("api/v1/tasks/$id/pause"), null);
 }
@@ -279,11 +286,12 @@ Future<Response> forward(
   String method = 'GET',
   dynamic data,
   Map<String, dynamic>? queryParameters,
+  Duration? receiveTimeout,
 }) async {
   return _client.dio.request(
     path,
     data: data,
     queryParameters: queryParameters,
-    options: Options(method: method),
+    options: Options(method: method, receiveTimeout: receiveTimeout),
   );
 }

@@ -166,11 +166,7 @@ void main() {
       await tester.pump();
       expect(list.selectedTaskIds, ['run']);
 
-      tester
-          .widget<CupertinoSlidingSegmentedControl<int>>(
-            find.byType(CupertinoSlidingSegmentedControl<int>),
-          )
-          .onValueChanged(1);
+      await tester.tap(find.widgetWithText(TextButton, '已完成'));
       await tester.pump();
       expect(find.text('Report'), findsNothing);
       expect(Get.find<TaskController>().selectTask.value, isNull);
@@ -180,11 +176,7 @@ void main() {
       await tester.pump();
       expect(find.text('Report'), findsOneWidget);
 
-      tester
-          .widget<CupertinoSlidingSegmentedControl<int>>(
-            find.byType(CupertinoSlidingSegmentedControl<int>),
-          )
-          .onValueChanged(2);
+      await tester.tap(find.widgetWithText(TextButton, '全部'));
       await tester.pump();
       await tester.tap(find.text('Video'));
       await tester.pump(const Duration(milliseconds: 350));

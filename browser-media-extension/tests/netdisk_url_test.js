@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {NETDISK_PROVIDERS,detectNetdisk,netdiskSourceIdentity,sanitizeNetdiskCapture,installNetdiskBridge} from '../netdisk.js';
+import fs from 'node:fs';
+import {NETDISK_PROVIDERS,detectNetdisk,netdiskSourceIdentity,netdiskHandoffRequestId,sanitizeNetdiskCapture,installNetdiskBridge} from '../netdisk.js';
 import {readNetdiskPage} from '../netdisk-page.js';
 
 const cases=[
@@ -18,6 +19,7 @@ const cases=[
   ['baidu existing alias','https://pan.baidu.com/share/init?shareid=1abc','baidu','1abc',''],
   ['tcloud','https://cloud.189.cn/web/share?code=abc&password=A1b2','tcloud','abc','A1b2'],
   ['aliyun','https://www.alipan.com/s/abc?pass_code=A1b2','aliyun','abc','A1b2'],
+  ['aliyun bare home','https://alipan.com/drive/file/all','aliyun','',''],
   ['xunlei','https://pan.xunlei.com/s/abc?receive_code=A1b2','xunlei','abc','A1b2'],
   ['quark','https://pan.quark.cn/s/abc?pwd=A1b2&gopeed_request=public-marker','quark','abc','A1b2'],
   ['uc','https://drive.uc.cn/s/abc?password=A1b2','uc','abc','A1b2'],
@@ -76,17 +78,48 @@ test('all existing page aliases keep detection and protected domains stay reject
   ]) assert.equal(netdiskSourceIdentity(url),null,url);
 });
 
-async function claimProbe(expectedURL,currentURL,{shareId=netdiskSourceIdentity(expectedURL)?.shareId}={}) {
+test('handoff marker survives intermediate mobile SPA routes without granting a claim',()=>{
+  for(const [url,id] of [
+    ['https://pan.quark.cn/list?gopeed_request=search-id#/list/all','search-id'],
+    ['https://yun.139.com/w/#/index?gopeed_request=hash-id','hash-id'],
+    ['https://caiyun.139.com/w/#/index?tab=all&gopeed_request=hash%2Did','hash-id'],
+    ['https://yun.139.com/w/?gopeed_request=search-id#/index?gopeed_request=other','search-id'],
+    ['https://yun.139.com/w/#/index',''],
+    ['https://yun.139.com/w/#/index?requestId=unrelated',''],
+    ['https://yun.139.com/w/#/index?gopeed_request=',''],
+    ['https://yun.139.com/w/#/unknown?gopeed_request=unrelated','unrelated'],
+    ['https://yun.139.com/unknown#/index?gopeed_request=unrelated',''],
+    ['https://yun.139.com/shareweb/#/w/i/abc?gopeed_request=unrelated',''],
+    ['https://pan.quark.cn/w/#/index?gopeed_request=unrelated',''],
+    ['https://yun.139.com.evil.test/w/#/index?gopeed_request=unrelated',''],
+    ['https://user@yun.139.com/w/#/index?gopeed_request=unrelated',''],
+    ['https://yun.139.com:8443/w/#/index?gopeed_request=unrelated',''],
+    ['file://yun.139.com/w/#/index?gopeed_request=unrelated',''],
+    ['https://evil.test/?gopeed_request=unrelated','']
+  ]) assert.equal(netdiskHandoffRequestId(url),id,url);
+});
+
+test('Alipan bare-domain redirect is explicitly bootstrapped without wildcard host expansion',()=>{
+  const manifest=JSON.parse(fs.readFileSync(new URL('../manifest.json',import.meta.url),'utf8'));
+  const bootstrap=manifest.content_scripts.find(s=>s.js.includes('netdisk-content.js'));
+  assert(bootstrap.matches.includes('*://www.alipan.com/*'));
+  assert(bootstrap.matches.includes('*://alipan.com/*'));
+  assert(!bootstrap.matches.includes('*://*.alipan.com/*'));
+  for(const host of ['alipan.com','www.alipan.com']) assert.equal(detectNetdisk(`https://${host}/drive/file/all`)?.id,'aliyun');
+  for(const host of ['api.alipan.com','other.alipan.com','alipan.com.evil.test','evilalipan.com']) assert.equal(detectNetdisk(`https://${host}/drive/file/all`),null);
+});
+
+async function claimProbe(expectedURL,currentURL,{shareId=netdiskSourceIdentity(expectedURL)?.shareId,captureTokens,committedURL}={}) {
   const provider=detectNetdisk(currentURL),messages=[],scripts=[],ports=[];
   let handler,cookieReads=0;
   const event={addListener(){}};
-  const frameURL=new URL(currentURL);frameURL.hash='';
+  const frameURL=new URL(committedURL || currentURL);frameURL.hash='';
   const chrome={
     webNavigation:{onCommitted:event,onHistoryStateUpdated:event,onReferenceFragmentUpdated:event,getFrame:async()=>({url:frameURL.href,documentId:'doc-a',documentLifecycle:'active'})},
     tabs:{onRemoved:event,get:async()=>({id:7,url:currentURL})},
     storage:{local:{get:async()=>({netdiskInstanceId:'url-instance'}),set:async()=>{throw new Error('unexpected persistence');}}},
     cookies:{getAllCookieStores:async()=>[{id:'store-a',tabIds:[7]}],getAll:async()=>{cookieReads++;return [];}},
-    scripting:{executeScript:async script=>{scripts.push(script);return [{frameId:0,documentId:'doc-a',result:readPage(provider.id,currentURL)}];}},
+    scripting:{executeScript:async script=>{scripts.push(script);return [{frameId:0,documentId:'doc-a',result:{...readPage(provider.id,currentURL),...(captureTokens!==undefined?{tokens:captureTokens}:provider.id==='tcloud'?{tokens:{browserId:'initialized-browser'}}:{})}}];}},
     runtime:{id:'url-extension',onMessage:{addListener:fn=>{handler=fn;}},connectNative:()=>{
       let respond;
       const port={closed:false,onMessage:{addListener:fn=>{respond=fn;}},onDisconnect:{addListener(){}},disconnect(){this.closed=true;},postMessage(message){
@@ -111,6 +144,16 @@ for(const [expected,current] of [
   ['https://pan.baidu.com/s/1abc','https://pan.baidu.com/share/init?surl=abc'],
   ['https://yun.139.com/shareweb/#/w/i/abc','https://caiyun.139.com/shareweb/#/w/i/abc'],
   ['https://cloud.189.cn/web/share?code=abc','https://cloud.189.cn/t/abc'],
+  ['https://pan.quark.cn/','https://pan.quark.cn/list?gopeed_request=url-request#/list/all'],
+  ['https://pan.quark.cn/list#/list/all','https://pan.quark.cn/'],
+  ['https://drive.uc.cn/','https://drive.uc.cn/list?gopeed_request=url-request#/list/all'],
+  ['https://drive.uc.cn/list#/list/all','https://drive.uc.cn/'],
+  ['https://www.alipan.com/drive/file/all','https://alipan.com/drive/file/all?gopeed_request=url-request'],
+  ['https://alipan.com/drive/file/all','https://www.alipan.com/drive/file/all'],
+  ['https://yun.139.com/','https://yun.139.com/w/#/index?gopeed_request=url-request'],
+  ['https://yun.139.com/w/#/index','https://yun.139.com/'],
+  ['https://yun.139.com/','https://yun.139.com/w/#/?gopeed_request=url-request'],
+  ['https://cloud.189.cn/web/main/','https://cloud.189.cn/web/main/file/folder/-11?gopeed_request=url-request'],
   ['https://pan.quark.cn/s/abc','https://pan.quark.cn/s/abc?gopeed_request=public-marker']
 ]) test(`actual bridge claim accepts equivalent URLs: ${expected}`,async()=>{
   const probe=await claimProbe(expected,current);
@@ -118,7 +161,38 @@ for(const [expected,current] of [
   assert.equal(probe.scripts.length,1);
   assert.deepEqual(probe.messages.filter(m=>m.method==='forward').map(m=>m.params.path),['/api/v1/netdisk/browser/claim','/api/v1/netdisk/browser/capture']);
   const capture=probe.messages.at(-1).params.data.capture;
-  assert.equal(capture.share.shareId,netdiskSourceIdentity(expected).shareId);
+  assert.equal(capture.share.shareId || '',netdiskSourceIdentity(expected).shareId);
+  if(current.includes('gopeed_request=url-request')) assert.equal(probe.messages.find(m=>m.params?.path.endsWith('/claim')).params.data.requestId,'url-request');
+});
+
+test('actual bridge keeps unknown paths, share routes and providers outside home equivalence',async()=>{
+  for(const [expected,current] of [
+    ['https://pan.quark.cn/','https://pan.quark.cn/unknown'],
+    ['https://pan.quark.cn/','https://pan.quark.cn/list/unknown#/list/all'],
+    ['https://pan.quark.cn/','https://pan.quark.cn/list#/list/share'],
+    ['https://pan.quark.cn/list#/list/all','https://pan.quark.cn/list#/unknown'],
+    ['https://pan.quark.cn/','https://pan.quark.cn/s/abc'],
+    ['https://pan.quark.cn/s/abc','https://pan.quark.cn/s/other'],
+    ['https://yun.139.com/','https://yun.139.com/unknown'],
+    ['https://yun.139.com/','https://yun.139.com/w/#/unknown'],
+    ['https://yun.139.com/w/#/index','https://yun.139.com/w/#/w/i/abc'],
+    ['https://yun.139.com/','https://yun.139.com/shareweb/#/w/i/abc'],
+    ['https://pan.quark.cn/','https://yun.139.com/w/#/index'],
+    ['https://pan.quark.cn/','https://drive.uc.cn/list#/list/all'],
+    ['https://drive.uc.cn/','https://drive.uc.cn/unknown'],
+    ['https://drive.uc.cn/list#/list/all','https://drive.uc.cn/list#/unknown'],
+    ['https://drive.uc.cn/s/abc','https://drive.uc.cn/s/other'],
+    ['https://www.alipan.com/drive/file/all','https://alipan.com/unknown'],
+    ['https://www.alipan.com/unknown','https://alipan.com/unknown'],
+    ['https://www.alipan.com/drive/file/all','https://www.aliyundrive.com/drive/file/all'],
+    ['https://www.alipan.com/drive/file/all','https://alipan.com/drive/file/all#/unknown'],
+    ['https://www.alipan.com/s/abc','https://alipan.com/s/other']
+  ]) {
+    const probe=await claimProbe(expected,current);
+    assert.match(probe.result.error,/来源页面/);
+    assert.equal(probe.scripts.length,0);assert.equal(probe.cookieReads,0);
+    assert(!probe.messages.some(m=>m.params?.path.endsWith('/capture')));
+  }
 });
 
 test('claim derives expected URL identity when native shareId is empty',async()=>{
@@ -138,4 +212,26 @@ test('actual bridge rejects different mobile hashes, Baidu surls and forged expe
     assert.equal(probe.scripts.length,0);assert.equal(probe.cookieReads,0);
     assert(!probe.messages.some(m=>m.params?.path.endsWith('/capture')));
   }
+});
+
+for(const [provider,url,ready] of [
+ ['tcloud','https://cloud.189.cn/web/main/',{browserId:'initialized-browser'}],
+ ['xunlei','https://pan.xunlei.com/',{access_token:'web-token',captcha_token:'web-captcha',deviceid:'web-device'}]
+]) test(`${provider}: pending website authentication does not finish App handoff early`,async()=>{
+ const waiting=await claimProbe(url,url,{captureTokens:{}});
+ assert.deepEqual(waiting.result,{state:'waiting'});
+ assert.equal(waiting.cookieReads,0);
+ assert(!waiting.messages.some(m=>m.params?.path.endsWith('/capture')));
+ const complete=await claimProbe(url,url,{captureTokens:ready});
+ assert.equal(complete.result.state,'synced');
+ assert(complete.messages.some(m=>m.params?.path.endsWith('/capture')));
+});
+
+test('Tcloud same-document home redirect keeps the committed root frame valid',async()=>{
+ const root='https://cloud.189.cn/web/main/?gopeed_request=url-request';
+ const home='https://cloud.189.cn/web/main/file/folder/-11?gopeed_request=url-request';
+ const probe=await claimProbe(root,home,{committedURL:root});
+ assert.equal(probe.result.state,'synced');
+ const changed=await claimProbe(root,home.replace('-11','other'),{committedURL:root});
+ assert.match(changed.result.error,/来源页面/);
 });

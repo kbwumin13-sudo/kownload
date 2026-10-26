@@ -12,7 +12,24 @@ import (
 type tcloudProvider struct{ providerBase }
 
 func (p *tcloudProvider) get(ctx context.Context, c *APIClient, s *Session, src model.Source, path string, q map[string]string) (object, error) {
-	r, e := apiJSON(ctx, c, "GET", query("https://cloud.189.cn/api/open"+path, values(q)), nil, requestHeaders(s, src))
+	return p.webGet(ctx, c, s, src, "/open"+path, q)
+}
+
+func (p *tcloudProvider) webGet(ctx context.Context, c *APIClient, s *Session, src model.Source, path string, q map[string]string) (object, error) {
+	h := requestHeaders(s, src)
+	// The current /web/subapp/main.html still loads chunk-common.c41232a0.js.
+	// Its interceptor sends the initialized Vuex browserId, Sign-Type and this
+	// exact Accept header for the cookie-authenticated /api/open/file list.
+	// AccessToken signing belongs to the separate api.cloud.189.cn download API.
+	if browserID := sessionValue(s, "Browser-Id", "browserId", "browser_id"); browserID != "" {
+		h["Browser-Id"] = browserID
+	}
+	h["Sign-Type"] = "1"
+	h["Accept"] = "application/json;charset=UTF-8"
+	params := values(q)
+	// The official interceptor also bypasses cached unsigned web responses.
+	params.Set("noCache", strconv.FormatInt(time.Now().UnixNano(), 10))
+	r, e := apiJSON(ctx, c, "GET", query("https://cloud.189.cn/api"+path, params), nil, h)
 	if e != nil {
 		return nil, e
 	}
@@ -24,6 +41,7 @@ func (p *tcloudProvider) get(ctx context.Context, c *APIClient, s *Session, src 
 	}
 	return r, nil
 }
+
 func (p *tcloudProvider) shareInfo(ctx context.Context, c *APIClient, s *Session, src model.Source) (object, error) {
 	code := src.ShareID
 	if u, e := url.Parse(src.URL); e == nil {
@@ -79,7 +97,9 @@ func (p *tcloudProvider) List(ctx context.Context, c *APIClient, s *Session, src
 	if d == nil {
 		return nil, Fail("invalid_response", "天翼网盘缺少文件列表")
 	}
-	if e=validCollections(d,"fileList","folderList");e!=nil{return nil,e}
+	if e = validCollections(d, "fileList", "folderList"); e != nil {
+		return nil, e
+	}
 	l := &model.Listing{Source: src, Files: []model.File{}}
 	for _, v := range items(d["folderList"]) {
 		l.Files = append(l.Files, model.File{ID: str(at(v, "id")), Name: str(at(v, "name")), IsDir: true, Meta: map[string]string{"parent_id": parent}})
@@ -97,6 +117,19 @@ func (p *tcloudProvider) Resolve(ctx context.Context, c *APIClient, s *Session, 
 		return nil, e
 	}
 	token := sessionValue(s, "accessToken", "access_token", "AccessToken")
+	if src.ShareID == "" && token == "" {
+		// OpenList drivers/189.Link and the public web application's getFileInfo
+		// use this cookie endpoint. Its URL field is downloadUrl, not the open
+		// token API's fileDownloadUrl.
+		r, err := p.webGet(ctx, c, s, src, "/portal/getFileInfo.action", map[string]string{"fileId": f.ID})
+		if err != nil {
+			return nil, err
+		}
+		if id := first(r, "id", "fileId"); id != "" && id != f.ID {
+			return nil, Fail("file_mismatch", "天翼返回的下载文件身份与所选文件不一致")
+		}
+		return download(c, s, f, str(r["downloadUrl"]), requestHeaders(s, src), nil)
+	}
 	q := map[string]string{"fileId": f.ID}
 	share := ""
 	if src.ShareID != "" {

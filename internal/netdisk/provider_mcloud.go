@@ -57,7 +57,36 @@ func (p *mcloudProvider) headers(s *Session, body []byte) map[string]string {
 	if auth != "" && !strings.HasPrefix(strings.ToLower(auth), "basic ") {
 		auth = "Basic " + auth
 	}
-	return map[string]string{"Authorization": auth, "Caller": "web", "CMS-DEVICE": "default", "Mcloud-Channel": "1000101", "Mcloud-Client": "10701", "Mcloud-Route": "001", "Mcloud-Sign": stamp + "," + nonce + "," + mcloudSign(body, stamp, nonce), "Mcloud-Version": "7.14.2", "X-DeviceInfo": "||9|7.17.0|edge||||windows 10||zh-CN|||", "X-Yun-Api-Version": "v1", "X-M4C-Caller": "PC", "X-M4C-Src": "10002", "X-SvcType": "1", "X-Yun-Module-Type": "100", "X-Yun-Svc-Type": "1", "X-Yun-App-Channel": "10000034", "X-Yun-Channel-Source": "10000034", "User-Agent": browserUA, "Referer": "https://yun.139.com/", "Origin": "https://yun.139.com"}
+	// The personal API also requires the common web client headers. In
+	// particular, omitting X-Yun-Client-Info produces 04000003 (invalid headers)
+	// even when the other client headers and the signed body are present.
+	// Keep these aligned with the fixed LinkSwift web request contract.
+	return map[string]string{
+		"Authorization":        auth,
+		"Caller":               "web",
+		"Content-Type":         "application/json;charset=UTF-8",
+		"CMS-DEVICE":           "default",
+		"Mcloud-Channel":       "1000101",
+		"Mcloud-Client":        "10701",
+		"Mcloud-Route":         "001",
+		"Mcloud-Sign":          stamp + "," + nonce + "," + mcloudSign(body, stamp, nonce),
+		"Mcloud-Version":       "7.14.2",
+		"X-DeviceInfo":         "||9|7.17.0|edge||||windows 10||zh-CN|||",
+		"X-Huawei-ChannelSrc":  "10000034",
+		"X-Inner-Ntwk":         "2",
+		"X-M4C-Caller":         "PC",
+		"X-M4C-Src":            "10002",
+		"X-SvcType":            "1",
+		"X-Yun-Api-Version":    "v1",
+		"X-Yun-App-Channel":    "10000034",
+		"X-Yun-Channel-Source": "10000034",
+		"X-Yun-Client-Info":    "||9|7.17.0|edge||||windows 10||zh-CN|||||",
+		"X-Yun-Module-Type":    "100",
+		"X-Yun-Svc-Type":       "1",
+		"User-Agent":           browserUA,
+		"Referer":              "https://yun.139.com/",
+		"Origin":               "https://yun.139.com",
+	}
 }
 func mcloudCheck(r object) error {
 	if v, ok := r["success"]; ok {

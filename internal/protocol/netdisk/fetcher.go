@@ -13,6 +13,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	cloud "github.com/GopeedLab/gopeed/internal/netdisk"
 	httpfetch "github.com/GopeedLab/gopeed/internal/protocol/http"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	httpmodel "github.com/GopeedLab/gopeed/pkg/protocol/http"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/netdisk"
@@ -104,6 +105,7 @@ type fetcherView struct {
 	downloaded int64
 	phase      string
 	saved      *saved
+	linkTime   time.Duration
 }
 
 type Fetcher struct {
@@ -124,6 +126,8 @@ type Fetcher struct {
 	done       chan error
 	runDone    chan struct{}
 	phase      string
+	// Time the latest link resolution took (取链), for Stats.
+	linkTime time.Duration
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -135,6 +139,18 @@ func (f *Fetcher) Setup(ctl *controller.Controller) {
 	}
 	f.done = make(chan error, 1)
 	f.publishViewLocked()
+}
+
+// deferrable marks a task run's resolve context: an API call that would first
+// have to wait out a long cooldown ends the run with a deferral instead, so
+// the downloader gives the running slot to other tasks meanwhile.
+func (f *Fetcher) deferrable(ctx context.Context) context.Context {
+	var queueWaiting func() bool
+	var queueChanged func() <-chan struct{}
+	if f.ctl != nil {
+		queueWaiting, queueChanged = f.ctl.QueueWaiting, f.ctl.QueueChanged
+	}
+	return transfer.WithDeferral(ctx, queueWaiting, queueChanged)
 }
 func parseExtra(req *base.Request) (*model.ReqExtra, error) {
 	if req == nil {
@@ -150,6 +166,15 @@ func parseExtra(req *base.Request) (*model.ReqExtra, error) {
 	e.File = cloud.PublicFile(e.File)
 	return e, nil
 }
+func resolveBudget(e *model.ReqExtra) time.Duration {
+	if e.Deferred {
+		// A shared directory may need one batch transfer. Preserve Prepare's
+		// five-minute operation budget while CancelResolve still cancels it.
+		return 5 * time.Minute
+	}
+	return time.Minute
+}
+
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) (result error) {
 	defer func() { result = safeError(result) }()
 	f.mu.Lock()
@@ -169,7 +194,7 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) (result error) 
 	}
 	f.meta.Req = req
 	f.meta.Opts = opts
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(f.deferrable(context.Background()), resolveBudget(e))
 	f.cancelMu.Lock()
 	f.cancel = cancel
 	f.cancelMu.Unlock()
@@ -180,7 +205,9 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) (result error) 
 }
 func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 	f.publishViewLocked()
+	started := time.Now()
 	d, err := f.service.Resolve(ctx, f.ctl, f.meta.Req, e)
+	f.linkTime = time.Since(started)
 	if err != nil {
 		return err
 	}
@@ -248,6 +275,11 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 	hreq := &base.Request{URL: d.URL, Extra: &httpmodel.ReqExtra{}, Proxy: f.meta.Req.Proxy, SkipVerifyCert: f.meta.Req.SkipVerifyCert}
 	hm := &httpfetch.FetcherManager{}
 	httpCtl := *f.ctl
+	// Streams of one provider account share its download limit, whatever CDN
+	// host a link points to; without an account ID the origin decides.
+	if e.AccountID != "" {
+		httpCtl.SourceScope = "netdisk|" + e.Provider + "|" + e.AccountID
+	}
 	httpCtl.GetConfig = func(v any) {
 		b, _ := json.Marshal(hm.DefaultConfig())
 		_ = json.Unmarshal(b, v)
@@ -342,7 +374,7 @@ func (f *Fetcher) Start() error {
 		f.mu.Lock()
 		var err error
 		if f.child == nil || f.refresh {
-			resolveCtx, c := context.WithTimeout(ctx, 60*time.Second)
+			resolveCtx, c := context.WithTimeout(f.deferrable(ctx), resolveBudget(e))
 			err = f.resolveLocked(resolveCtx, e)
 			c()
 		}
@@ -370,7 +402,7 @@ func (f *Fetcher) Start() error {
 				if attempt == 0 && refreshable(err) {
 					f.mu.Lock()
 					f.phase = "刷新网盘下载地址"
-					resolveCtx, c := context.WithTimeout(ctx, 60*time.Second)
+					resolveCtx, c := context.WithTimeout(f.deferrable(ctx), resolveBudget(e))
 					err = f.resolveLocked(resolveCtx, e)
 					c()
 					if err == nil {
@@ -409,6 +441,9 @@ func (f *Fetcher) Start() error {
 			f.phase = "已完成"
 		} else {
 			f.phase = "下载失败"
+			if _, deferred := transfer.AsDeferred(err); deferred {
+				f.phase = "等待网盘接口冷却"
+			}
 			f.refresh = true
 		}
 		f.publishViewLocked()
@@ -461,7 +496,14 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 	if e.File.Size > 0 && info.Size() != e.File.Size {
 		return errors.New("下载文件不完整，临时网盘副本已保留")
 	}
-	parts := strings.SplitN(e.File.Hash, ":", 2)
+	digest := e.File.Hash
+	if e.Provider == "baidu" && len(digest) == 32 {
+		digest, err = cloud.BaiduMD5(digest)
+		if err != nil {
+			return err
+		}
+	}
+	parts := strings.SplitN(digest, ":", 2)
 	if len(parts) != 2 {
 		algorithm := ""
 		if (e.Provider == "baidu" || e.Provider == "quark" || e.Provider == "uc" || e.Provider == "tcloud") && len(e.File.Hash) == 32 {
@@ -473,7 +515,7 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 		if algorithm == "" {
 			return nil
 		}
-		parts = []string{algorithm, e.File.Hash}
+		parts = []string{algorithm, digest}
 	}
 	var h hash.Hash
 	switch strings.ToLower(parts[0]) {
@@ -647,14 +689,21 @@ func (f *Fetcher) publishViewLocked() {
 		}
 	}
 	f.viewMu.Lock()
-	f.view = fetcherView{f.child, f.downloaded, f.phase, out}
+	f.view = fetcherView{f.child, f.downloaded, f.phase, out, f.linkTime}
 	f.viewMu.Unlock()
 }
+
+// Stats keeps phase and transfers for older readers and adds the HTTP
+// transfer's diagnostics plus the latest link resolution time.
 func (f *Fetcher) Stats() any {
 	f.viewMu.RLock()
-	phase := f.view.phase
+	phase, child, linkTime := f.view.phase, f.view.child, f.view.linkTime
 	f.viewMu.RUnlock()
-	return map[string]any{"phase": phase, "transfers": f.service.Transfers()}
+	stats := map[string]any{"phase": phase, "transfers": f.service.Transfers(), "linkMs": linkTime.Milliseconds()}
+	if child != nil {
+		stats["http"] = child.Stats()
+	}
+	return stats
 }
 func (f *Fetcher) Meta() *fetcher.FetcherMeta { return f.meta }
 func (f *Fetcher) Progress() fetcher.Progress {

@@ -2,7 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/task.dart';
+import 'package:gopeed/api/model/task_stats.dart';
 import 'task_list_controller.dart';
 
 class TaskController extends GetxController {
@@ -42,6 +44,39 @@ class MacTaskListController extends TaskListController {
 
   String? selectionAnchor;
   String? selectionCursor;
+
+  /// Diagnostics of running HTTP and netdisk downloads, refreshed with the list.
+  final stats = <String, TaskStats>{}.obs;
+
+  @override
+  Future<void> getTasksState() async {
+    await super.getTasksState();
+    await refreshStats();
+  }
+
+  Future<void> refreshStats() async {
+    final running = tasks
+        .where((t) =>
+            t.status == Status.running &&
+            (t.protocol == null ||
+                t.protocol == Protocol.http ||
+                t.protocol == Protocol.netdisk))
+        .take(8)
+        .toList();
+    if (running.isEmpty) {
+      if (stats.isNotEmpty) stats.clear();
+      return;
+    }
+    final next = <String, TaskStats>{};
+    await Future.wait(running.map((task) async {
+      try {
+        next[task.id] = await api.getTaskStats(task.id);
+      } catch (_) {
+        // Diagnostics are optional; the list keeps working without them.
+      }
+    }));
+    stats.assignAll(next);
+  }
 
   void reconcileSelection(List<String> visibleIds) {
     final visible = visibleIds.toSet();

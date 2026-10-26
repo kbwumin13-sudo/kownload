@@ -169,7 +169,7 @@ func TestAdaptersShareResolveOtherPlatforms(t *testing.T) {
 		{"aliyun", "/v2/file/get_share_link_download_url", `{"file_id":"123","download_url":"https://cdn.example/ali"}`},
 		{"xunlei", "/drive/v1/share/file_info", `{"file_info":{"id":"123","web_content_link":"https://cdn.example/thunder"}}`},
 		{"123pan", "/api/v2/share/download/info", `{"code":0,"data":{"dispatchList":[{"prefix":"https://cdn.example"}],"downloadPath":"/123"}}`},
-		{"guangya", "/userres/v1/get_share_download_url", `{"code":0,"data":{"signedURL":"https://cdn.example/duck"}}`},
+		{"guangya", "/nd.bizuserres.s/v1/get_share_download_url", `{"code":0,"data":{"signedURL":"https://cdn.example/duck"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {

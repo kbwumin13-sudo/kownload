@@ -13,6 +13,103 @@ Response response(dynamic data, {int code = 0, String msg = ''}) => Response(
     data: {'code': code, 'msg': msg, 'data': data});
 
 void main() {
+  for (final (type, reason, message) in [
+    (DioExceptionType.connectionTimeout, 'connection_error', '无法连接下载服务，请稍后重试'),
+    (DioExceptionType.connectionError, 'connection_error', '无法连接下载服务，请稍后重试'),
+    (
+      DioExceptionType.receiveTimeout,
+      'receive_timeout',
+      '等待下载服务响应超时，网盘解析尚未完成，请稍后重试'
+    ),
+    (
+      DioExceptionType.sendTimeout,
+      'send_timeout',
+      '向下载服务发送请求超时，网盘解析尚未完成，请稍后重试'
+    ),
+    (DioExceptionType.cancel, 'cancelled', '网盘请求已取消'),
+    (
+      DioExceptionType.badCertificate,
+      'certificate_error',
+      '下载服务连接验证失败，请检查服务配置后重试'
+    ),
+    (DioExceptionType.badResponse, 'invalid_response', '下载服务返回了无效响应'),
+    (DioExceptionType.unknown, 'request_error', '下载服务请求编码或响应解析失败，请重试'),
+  ]) {
+    test('prepare classifies $type without exposing transport details',
+        () async {
+      const sensitive = 'https://private.invalid/share?token=secret-token';
+      final api = NetdiskApi(
+          forward: (path, {required method, data, queryParameters}) async {
+        throw DioException(
+            requestOptions: RequestOptions(
+                path: '$path?token=secret-token',
+                headers: {'Authorization': 'secret-token'},
+                data: data),
+            type: type,
+            message: sensitive,
+            error: StateError(sensitive));
+      });
+      await expectLater(
+          api.prepare(mockSource, 'session', [mockFile], Options()),
+          throwsA(isA<NetdiskException>()
+              .having((e) => e.reasonCode, 'reason', reason)
+              .having((e) => e.message, 'safe message', message)
+              .having((e) => e.toString(), 'safe display', message)
+              .having((e) => e.data, 'no raw error data', isNull)));
+    });
+  }
+
+  for (final cause in [
+    UnsupportedError(
+        'cannot encode https://private.invalid/?token=secret-token'),
+    const FormatException(
+        'cannot parse', 'https://private.invalid/?token=secret-token'),
+  ]) {
+    test('unknown ${cause.runtimeType} is a safe request error', () async {
+      final api = NetdiskApi(
+          forward: (path, {required method, data, queryParameters}) async {
+        throw DioException(
+            requestOptions: RequestOptions(path: path), error: cause);
+      });
+      await expectLater(
+          api.providers(),
+          throwsA(isA<NetdiskException>()
+              .having((e) => e.reasonCode, 'reason', 'request_error')
+              .having((e) => e.message, 'safe message', '下载服务请求编码或响应解析失败，请重试')
+              .having((e) => e.data, 'no raw cause', isNull)));
+    });
+  }
+
+  test('provider endpoint absence differs from transport and HTTP failures',
+      () async {
+    for (final status in [null, 404, 405, 501, 403, 500]) {
+      final api = NetdiskApi(
+          forward: (path, {required method, data, queryParameters}) async {
+        throw DioException(
+            requestOptions: RequestOptions(path: path),
+            type: status == null
+                ? DioExceptionType.connectionError
+                : DioExceptionType.badResponse,
+            response: status == null
+                ? null
+                : Response(
+                    requestOptions: RequestOptions(path: path),
+                    statusCode: status,
+                    data: 'HTTP failure'));
+      });
+      await expectLater(
+          api.providers(),
+          throwsA(isA<NetdiskException>().having(
+              (e) => e.reasonCode,
+              'reason for $status',
+              status == null
+                  ? 'connection_error'
+                  : [404, 405, 501].contains(status)
+                      ? 'unsupported_service'
+                      : 'http_error')));
+    }
+  });
+
   test(
       'recovery reads and continues one existing task without replacing its request',
       () async {

@@ -16,10 +16,13 @@ func TestAdaptersGuangyaOfficialShareCursor(t *testing.T) {
 	src := model.Source{Provider: "guangya", URL: "https://www.guangyapan.com/s/share", ShareID: "share", ParentID: "parent", Password: "code"}
 	calls := []string{}
 	c := adapterClient(p, s, func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Scheme != "https" || r.URL.Host != "api.guangyapan.com" || r.URL.RawQuery != "" {
+			t.Fatal("unexpected Guangya request", r.Method, r.URL)
+		}
 		calls = append(calls, r.URL.Path)
 		b := adapterBody(t, r)
 		switch r.URL.Path {
-		case "/userres/v1/get_share_access_token":
+		case "/nd.bizuserres.s/v1/get_share_access_token":
 			if b["shareId"] != "share" || b["code"] != "code" {
 				t.Fatal(b)
 			}
@@ -41,7 +44,7 @@ func TestAdaptersGuangyaOfficialShareCursor(t *testing.T) {
 	if strings.Contains(string(b), "private-share") {
 		t.Fatal("token persisted")
 	}
-	if !reflect.DeepEqual(calls, []string{"/userres/v1/get_share_access_token", "/userres/v1/get_share_page_files_list"}) {
+	if !reflect.DeepEqual(calls, []string{"/nd.bizuserres.s/v1/get_share_access_token", "/userres/v1/get_share_page_files_list"}) {
 		t.Fatal(calls)
 	}
 }
@@ -137,6 +140,9 @@ func TestAdaptersTcloudGuangyaSingleTaskCopyMappingAndCleanup(t *testing.T) {
 			copied := false
 			deleted := []string{}
 			c := adapterClient(p, s, func(r *http.Request) (*http.Response, error) {
+				if id == "guangya" && (r.Method != http.MethodPost || r.URL.Scheme != "https" || r.URL.Host != "api.guangyapan.com" || r.URL.RawQuery != "") {
+					t.Fatal("unexpected Guangya request", r.Method, r.URL)
+				}
 				switch r.URL.Path {
 				case "/api/open/share/getShareInfoByCode.action":
 					return adapterJSON(`{"res_code":0,"shareId":10,"fileId":12,"isFolder":true}`), nil
@@ -177,7 +183,7 @@ func TestAdaptersTcloudGuangyaSingleTaskCopyMappingAndCleanup(t *testing.T) {
 					return adapterJSON(`{"res_code":0,"taskId":"task"}`), nil
 				case "/api/open/batch/checkBatchTask.action":
 					return adapterJSON(`{"res_code":0,"taskStatus":4,"failedCount":0}`), nil
-				case "/userres/v1/file/create_dir":
+				case "/nd.bizuserres.s/v1/file/create_dir":
 					b := adapterBody(t, r)
 					if b["dirName"] != "__gopeed_batch" || !yes(b["failIfNameExist"]) {
 						t.Fatal(b)
@@ -199,9 +205,9 @@ func TestAdaptersTcloudGuangyaSingleTaskCopyMappingAndCleanup(t *testing.T) {
 					}
 					copied = true
 					return adapterJSON(`{"code":0,"data":{"taskId":"task"}}`), nil
-				case "/userres/v1/get_task_status":
+				case "/nd.bizuserres.s/v1/get_task_status":
 					return adapterJSON(`{"code":0,"data":{"status":2,"detail":{"code":0}}}`), nil
-				case "/userres/v1/file/delete_file":
+				case "/nd.bizuserres.s/v1/file/delete_file":
 					b := adapterBody(t, r)
 					for _, x := range items(b["fileIds"]) {
 						deleted = append(deleted, str(x))
@@ -247,7 +253,7 @@ func TestAdaptersTcloudGuangyaPartialTaskFailure(t *testing.T) {
 					return adapterJSON(`{"res_code":0,"shareId":10,"fileId":12,"isFolder":true}`), nil
 				case "/api/open/file/createFolder.action":
 					return adapterJSON(`{"res_code":0,"id":1000}`), nil
-				case "/userres/v1/file/create_dir":
+				case "/nd.bizuserres.s/v1/file/create_dir":
 					return adapterJSON(`{"code":0,"data":{"fileId":"1000"}}`), nil
 				case "/api/open/file/listFiles.action":
 					if tasks > 0 {
@@ -270,7 +276,7 @@ func TestAdaptersTcloudGuangyaPartialTaskFailure(t *testing.T) {
 						return adapterJSON(`{"res_code":0,"taskStatus":4,"failedCount":1}`), nil
 					}
 					return adapterJSON(`{"res_code":0,"taskStatus":4}`), nil
-				case "/userres/v1/get_task_status":
+				case "/nd.bizuserres.s/v1/get_task_status":
 					if tasks == 2 {
 						return adapterJSON(`{"code":0,"data":{"status":3}}`), nil
 					}

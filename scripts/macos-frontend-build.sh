@@ -10,8 +10,8 @@ if [[ ! -x "$go_bin" ]]; then go_bin="$(command -v go)"; fi
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 source_app="$project_dir/artifacts/baseline/Gopeed.app"
 core_dir="$project_dir/artifacts/build/media-core"
-core_version="${GOPEED_CORE_VERSION:-1.9.3-kownload.1}"
-build_number="${GOPEED_BUILD_NUMBER:-7}"
+core_version="${GOPEED_CORE_VERSION:-1.9.3-kownload.8}"
+build_number="${GOPEED_BUILD_NUMBER:-19}"
 mkdir -p "$core_dir"
 export CGO_ENABLED=1
 export PATH="$(dirname "$go_bin"):$PATH"
@@ -43,6 +43,10 @@ cp "$core_dir/host" "$release_app/Contents/Frameworks/App.framework/Resources/fl
 cp "$repo_dir/ui/flutter/assets/exec/updater" "$release_app/Contents/Frameworks/App.framework/Resources/flutter_assets/assets/exec/updater"
 mkdir -p "$release_app/Contents/Resources/third_party"
 cp -R "$repo_dir/third_party/linkswift" "$repo_dir/third_party/openlist" "$release_app/Contents/Resources/third_party/"
+# The one-time tutorial can reveal this folder for Chrome/Edge's unpacked loader.
+mkdir -p "$release_app/Contents/Resources/browser-media-extension"
+rsync -a --exclude tests --exclude node_modules --exclude package-lock.json \
+  "$repo_dir/browser-media-extension/" "$release_app/Contents/Resources/browser-media-extension/"
 codesign --force --sign - --entitlements macos/Runner/Release.entitlements "$release_app"
 codesign --verify --deep --strict "$release_app"
 if [[ -f "$project_dir/artifacts/baseline/installed-app.json" ]]; then

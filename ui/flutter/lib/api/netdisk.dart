@@ -327,23 +327,51 @@ class NetdiskApi {
                 path,
                 method: method,
                 data: data,
-                queryParameters: queryParameters));
+                queryParameters: queryParameters,
+                // Allow the backend's 300-second preparation limit to finish.
+                receiveTimeout: path == '/api/v1/netdisk/prepare'
+                    ? const Duration(minutes: 5, seconds: 10)
+                    : null));
 
   Future<dynamic> _call(String path,
       {String method = 'GET', dynamic data}) async {
     dynamic envelope;
+    Response? response;
     try {
-      final response =
-          await _forward('/api/v1$path', method: method, data: data);
-      envelope = response.data;
+      response = await _forward('/api/v1$path', method: method, data: data);
     } on DioException catch (e) {
-      if (e.response?.data is Map) {
-        envelope = e.response!.data;
-      } else {
-        throw const NetdiskException('无法连接下载服务，请稍后重试', 'connection_error');
+      response = e.response;
+      if (response == null) {
+        throw switch (e.type) {
+          DioExceptionType.connectionTimeout ||
+          DioExceptionType.connectionError =>
+            const NetdiskException('无法连接下载服务，请稍后重试', 'connection_error'),
+          DioExceptionType.receiveTimeout => const NetdiskException(
+              '等待下载服务响应超时，网盘解析尚未完成，请稍后重试', 'receive_timeout'),
+          DioExceptionType.sendTimeout => const NetdiskException(
+              '向下载服务发送请求超时，网盘解析尚未完成，请稍后重试', 'send_timeout'),
+          DioExceptionType.cancel =>
+            const NetdiskException('网盘请求已取消', 'cancelled'),
+          DioExceptionType.badCertificate => const NetdiskException(
+              '下载服务连接验证失败，请检查服务配置后重试', 'certificate_error'),
+          DioExceptionType.badResponse =>
+            const NetdiskException('下载服务返回了无效响应', 'invalid_response'),
+          DioExceptionType.unknown =>
+            const NetdiskException('下载服务请求编码或响应解析失败，请重试', 'request_error'),
+        };
       }
     }
+    final status = response.statusCode;
+    if (path == '/netdisk/providers' && [404, 405, 501].contains(status)) {
+      throw const NetdiskException(
+          '当前下载服务不支持网盘功能，请更新下载服务后重试。', 'unsupported_service');
+    }
+    envelope = response.data;
     if (envelope is! Map || envelope['code'] is! num) {
+      if (status != null && status >= 400) {
+        throw NetdiskException(
+            '下载服务请求失败（HTTP $status），请检查服务状态后重试。', 'http_error');
+      }
       throw const NetdiskException('下载服务返回了无效响应', 'invalid_response');
     }
     if (envelope['code'] != 0) {

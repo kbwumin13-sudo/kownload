@@ -1,9 +1,13 @@
 package base
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -303,6 +307,50 @@ func (cfg *DownloaderProxyConfig) ToHandler() func(r *http.Request) (*url.URL, e
 		return nil
 	}
 	return http.ProxyURL(util.BuildProxyUrl(cfg.Scheme, cfg.Host, cfg.Usr, cfg.Pwd))
+}
+
+// PolicyID identifies the proxy behaviour of ToHandler for connection
+// pooling: requests share connections only under the same policy. A system
+// proxy is identified by a digest of its current configuration, so a changed
+// system setting starts new connections. Credentials only enter the digest.
+func (cfg *DownloaderProxyConfig) PolicyID() string {
+	if cfg == nil || !cfg.Enable {
+		return "direct"
+	}
+	if cfg.System {
+		conf := ieproxy.GetConf()
+		env := []string{}
+		for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} {
+			env = append(env, os.Getenv(key))
+		}
+		return "system:" + policyDigest(fmt.Sprintf("%+v", conf), strings.Join(env, "\x00"))
+	}
+	if cfg.Scheme == "" || cfg.Host == "" {
+		return "direct"
+	}
+	return "global:" + policyDigest(cfg.Scheme, cfg.Host, cfg.Usr, cfg.Pwd)
+}
+
+// PolicyID identifies a request-level custom proxy, or "" to follow settings.
+func (p *RequestProxy) PolicyID() string {
+	if p == nil {
+		return ""
+	}
+	switch p.Mode {
+	case RequestProxyModeNone:
+		return "direct"
+	case RequestProxyModeCustom:
+		if p.Scheme == "" || p.Host == "" {
+			return "direct"
+		}
+		return "custom:" + policyDigest(p.Scheme, p.Host, p.Usr, p.Pwd)
+	}
+	return ""
+}
+
+func policyDigest(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:8])
 }
 
 // ToUrl returns the proxy url, just for git clone

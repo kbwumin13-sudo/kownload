@@ -20,25 +20,49 @@ import (
 )
 
 type pending struct {
-	Request   model.BrowserRequest
-	Nonce     string
-	ContextID string
+	Request          model.BrowserRequest
+	Nonce            string
+	ContextID        string
+	CaptureStartedAt time.Time
 }
+
+const captureFailureMessage = "网盘页面同步失败，请重新同步"
+
+// Called with Service.mu held. Terminal states never become claimable again.
+func (p *pending) update(now time.Time) {
+	if p.Request.State != "waiting" && p.Request.State != "capturing" {
+		return
+	}
+	if p.Request.State == "capturing" && !p.CaptureStartedAt.IsZero() && !now.Before(p.CaptureStartedAt.Add(60*time.Second)) {
+		p.Request.State = "failed"
+		p.Request.Message = captureFailureMessage
+	} else if !now.Before(p.Request.ExpiresAt) {
+		p.Request.State = "expired"
+		p.Request.Message = "页面同步已超时，请重试"
+	}
+}
+
+func (p *pending) ownsCapture(nonce string, c model.Capture) bool {
+	return p != nil && nonce != "" && p.Nonce == nonce && c.InstanceID != "" && p.Request.InstanceID == c.InstanceID && c.ContextID != "" && p.ContextID == c.ContextID
+}
+
 type Service struct {
-	mu        sync.Mutex
-	providers map[string]Provider
-	sessions  map[string]*Session
-	requests  map[string]*pending
-	transfers map[string]*model.TransferReceipt
-	downloads map[string]*Download
-	state     fetcher.ProtocolStateStore
+	mu         sync.Mutex
+	providers  map[string]Provider
+	sessions   map[string]*Session
+	requests   map[string]*pending
+	transfers  map[string]*model.TransferReceipt
+	batches    map[string]*deferredBatch
+	batchLocks map[string]chan struct{}
+	downloads  map[string]*Download
+	state      fetcher.ProtocolStateStore
 }
 
 func NewService(providers ...Provider) *Service {
 	if len(providers) == 0 {
 		providers = BuiltinProviders()
 	}
-	s := &Service{providers: map[string]Provider{}, sessions: map[string]*Session{}, requests: map[string]*pending{}, transfers: map[string]*model.TransferReceipt{}, downloads: map[string]*Download{}}
+	s := &Service{providers: map[string]Provider{}, sessions: map[string]*Session{}, requests: map[string]*pending{}, transfers: map[string]*model.TransferReceipt{}, batches: map[string]*deferredBatch{}, batchLocks: map[string]chan struct{}{}, downloads: map[string]*Download{}}
 	for _, p := range providers {
 		s.providers[p.Info().ID] = p
 	}
@@ -139,7 +163,39 @@ func sameSource(a, b model.Source) bool {
 	}
 	x, e1 := url.Parse(a.URL)
 	y, e2 := url.Parse(b.URL)
-	return e1 == nil && e2 == nil && x.Host == y.Host && x.Path == y.Path
+	if e1 != nil || e2 != nil {
+		return false
+	}
+	xHome, yHome := personalHomeURL(a.Provider, x), personalHomeURL(b.Provider, y)
+	if x.Host != y.Host && !(a.Provider == "aliyun" && xHome && yHome) {
+		return false
+	}
+	if xHome || yHome {
+		return xHome && yHome
+	}
+	return x.Path == y.Path
+}
+
+// Only observed personal entry/home routes are equivalent; share identity is
+// checked first, and unknown paths or hash routes keep their own identity.
+func personalHomeURL(provider string, u *url.URL) bool {
+	route := strings.SplitN(u.EscapedFragment(), "?", 2)[0]
+	entry := (u.EscapedPath() == "" || u.EscapedPath() == "/") && route == ""
+	switch provider {
+	case "quark", "uc":
+		host := "pan.quark.cn"
+		if provider == "uc" {
+			host = "drive.uc.cn"
+		}
+		return u.Host == host && (entry || u.EscapedPath() == "/list" && (route == "" || route == "/list/all"))
+	case "mcloud":
+		return (u.Host == "yun.139.com" || u.Host == "caiyun.139.com") && (entry || u.EscapedPath() == "/w/" && (route == "/index" || route == "/"))
+	case "tcloud":
+		return u.Host == "cloud.189.cn" && route == "" && (u.EscapedPath() == "/web/main/" || u.EscapedPath() == "/web/main" || u.EscapedPath() == "/web/main/file/folder/-11")
+	case "aliyun":
+		return (u.Host == "www.alipan.com" || u.Host == "alipan.com") && u.EscapedPath() == "/drive/file/all" && route == ""
+	}
+	return false
 }
 func (s *Service) RequestBrowser(src model.Source, instance string) (*model.BrowserRequest, error) {
 	if src.ShareID == "" {
@@ -177,10 +233,7 @@ func (s *Service) BrowserStatus(id string) (*model.BrowserRequest, error) {
 	if p == nil {
 		return nil, Fail("expired", "页面同步请求不存在或已取消")
 	}
-	if time.Now().After(p.Request.ExpiresAt) && p.Request.State != "ready" {
-		p.Request.State = "expired"
-		p.Request.Message = "页面同步已超时，请重试"
-	}
+	p.update(time.Now())
 	r := clone(p.Request)
 	return &r, nil
 }
@@ -209,7 +262,8 @@ func (s *Service) Claim(raw, instance, browser, contextID string, requestID ...s
 		} else if p.Request.InstanceID == "" {
 			continue
 		}
-		if time.Now().After(p.Request.ExpiresAt) || p.Request.State == "ready" || !sameSource(src, p.Request.Source) {
+		p.update(time.Now())
+		if (p.Request.State != "waiting" && p.Request.State != "capturing") || !sameSource(src, p.Request.Source) {
 			continue
 		}
 		if p.Request.InstanceID != "" && p.Request.InstanceID != instance {
@@ -224,6 +278,9 @@ func (s *Service) Claim(raw, instance, browser, contextID string, requestID ...s
 		p.Request.InstanceID = instance
 		p.ContextID = contextID
 		p.Request.State = "capturing"
+		if p.CaptureStartedAt.IsZero() {
+			p.CaptureStartedAt = time.Now()
+		}
 		if p.Nonce == "" {
 			p.Nonce = randomID()
 		}
@@ -244,9 +301,53 @@ type CaptureResult struct {
 	Files     []model.File `json:"files"`
 }
 
+// Ownership is checked before payload validation, including CaptureContext's
+// preflight. An invalid payload can fail only the request that sent it.
+func (s *Service) capturePending(requestID, nonce string, c model.Capture) (*pending, error) {
+	if requestID == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.requests[requestID]
+	if p != nil {
+		p.update(time.Now())
+	}
+	if !p.ownsCapture(nonce, c) || (p.Request.State != "capturing" && p.Request.State != "ready") {
+		return nil, Fail("expired", "来源页面已变化，请重新同步")
+	}
+	return p, nil
+}
+
+func (s *Service) failCapture(requestID, nonce string, c model.Capture, owner *pending) {
+	if owner == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.requests[requestID]
+	if p != owner || !p.ownsCapture(nonce, c) {
+		return
+	}
+	p.update(time.Now())
+	if p.Request.State == "capturing" {
+		p.Request.State = "failed"
+		p.Request.Message = captureFailureMessage
+	}
+}
+
 // CaptureContext uses the official current-user response where a browser page
 // does not expose a stable UID. Transient cookies cannot identify an account.
-func (s *Service) CaptureContext(ctx context.Context, ctl *controller.Controller, requestID, nonce string, c model.Capture) (*CaptureResult, error) {
+func (s *Service) CaptureContext(ctx context.Context, ctl *controller.Controller, requestID, nonce string, c model.Capture) (_ *CaptureResult, err error) {
+	owner, err := s.capturePending(requestID, nonce, c)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			s.failCapture(requestID, nonce, c, owner)
+		}
+	}()
 	src, err := s.Detect(c.SourcePage)
 	if err != nil {
 		return nil, err
@@ -277,7 +378,17 @@ func quarkIdentityData(data object) string {
 	return first(obj(at(data, "config", "cloudDriveConfig", "paramInfo")), "ucid")
 }
 
-func (s *Service) Capture(requestID, nonce string, c model.Capture) (*CaptureResult, error) {
+func (s *Service) Capture(requestID, nonce string, c model.Capture) (_ *CaptureResult, err error) {
+	owner, err := s.capturePending(requestID, nonce, c)
+	if err != nil {
+		return nil, err
+	}
+	// Registered before the commit lock's Unlock defer so failures can lock safely.
+	defer func() {
+		if err != nil {
+			s.failCapture(requestID, nonce, c, owner)
+		}
+	}()
 	src, err := s.Detect(c.SourcePage)
 	if err != nil {
 		return nil, err
@@ -305,6 +416,10 @@ func (s *Service) Capture(requestID, nonce string, c model.Capture) (*CaptureRes
 	}
 	info := s.providers[src.Provider].Info()
 	hosts := append(append([]string{}, info.Hosts...), info.APIHosts...)
+	// Detect has already bound SourcePage to this provider. Only this page's
+	// actual host may extend the cookie validation targets, not arbitrary siblings.
+	page, _ := url.Parse(src.URL)
+	hosts = append(hosts, page.Hostname())
 	for _, cookie := range c.Cookies {
 		ok := false
 		for _, h := range hosts {
@@ -323,7 +438,10 @@ func (s *Service) Capture(requestID, nonce string, c model.Capture) (*CaptureRes
 	defer s.mu.Unlock()
 	if requestID != "" {
 		p := s.requests[requestID]
-		if p == nil || p.Nonce == "" || p.Nonce != nonce || p.ContextID != c.ContextID || p.Request.InstanceID != c.InstanceID || time.Now().After(p.Request.ExpiresAt) || !sameSource(actualSource, p.Request.Source) || !sameSource(src, p.Request.Source) {
+		if p != nil {
+			p.update(time.Now())
+		}
+		if p != owner || !p.ownsCapture(nonce, c) || (p.Request.State != "capturing" && p.Request.State != "ready") || !sameSource(actualSource, p.Request.Source) || !sameSource(src, p.Request.Source) {
 			return nil, Fail("expired", "来源页面已变化，请重新同步")
 		}
 		if p.Request.State == "ready" {
@@ -449,6 +567,12 @@ func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *
 	if p == nil {
 		return nil, Fail("unsupported", "不支持的网盘类型")
 	}
+	s.mu.Lock()
+	deferred := e.Deferred || s.batches[e.BatchID] != nil
+	s.mu.Unlock()
+	if deferred {
+		return s.resolveDeferred(ctx, ctl, req, e, p)
+	}
 	ss, err := s.session(e.Provider, e.SessionID, e.AccountID)
 	if err != nil {
 		ss = s.sourceSession(e)
@@ -467,7 +591,11 @@ func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *
 	if cached != nil && (cached.ExpiresAt.IsZero() || time.Now().Before(cached.ExpiresAt)) {
 		return cached, nil
 	}
-	return p.Resolve(ctx, NewAPIClient(ctl, req, p.Info(), ss), ss, e.Source, e.File)
+	download, err := p.Resolve(ctx, NewAPIClient(ctl, req, p.Info(), ss), ss, e.Source, e.File)
+	if err == nil {
+		s.rememberSessionCache(ss, e.Source)
+	}
+	return download, err
 }
 func (s *Service) List(ctx context.Context, ctl *controller.Controller, req *base.Request, src model.Source, sessionID, cursor string) (*model.Listing, error) {
 	var err error
@@ -495,6 +623,7 @@ func (s *Service) List(ctx context.Context, ctl *controller.Controller, req *bas
 	l.Files = publicFiles(l.Files)
 	l.SessionID = ss.ID
 	l.Source = src
+	s.rememberSessionCache(ss, src)
 	return l, nil
 }
 
@@ -566,7 +695,9 @@ func (s *Service) Prepare(ctx context.Context, ctl *controller.Controller, req *
 		}
 		return nil
 	}
+	hasDirectory := false
 	for _, f := range selected {
+		hasDirectory = hasDirectory || f.IsDir
 		if err = walk(f, 0); err != nil {
 			return nil, err
 		}
@@ -574,23 +705,35 @@ func (s *Service) Prepare(ctx context.Context, ctl *controller.Controller, req *
 	if len(files) == 0 {
 		return nil, Fail("empty_selection", "所选目录没有可下载文件")
 	}
+	s.rememberSessionCache(ss, src)
 	batch := randomID()
-	needTransfer := false
-	resolved := map[string]*Download{}
-	for _, f := range files {
-		var download *Download
-		download, err = p.Resolve(ctx, client, ss, src, f)
-		if err != nil {
-			var typed *Error
-			if errors.As(err, &typed) && typed.Code == "transfer_required" {
-				needTransfer = true
-				break
-			}
+	// Directory preparation lists metadata only. Links are resolved after the
+	// downloader grants a slot; shared directories retain the whole batch so a
+	// later transfer_required can never lose the other selected files.
+	deferred := hasDirectory && src.ShareID != ""
+	if deferred {
+		if err = s.prepareDeferred(batch, src, ss, files); err != nil {
 			return nil, err
 		}
-		resolved[f.ID] = download
-		if download != nil && download.ExpiresAt.IsZero() {
-			download.ExpiresAt = time.Now().Add(30 * time.Second)
+	}
+	needTransfer := false
+	resolved := map[string]*Download{}
+	if src.ShareID != "" && !deferred {
+		for _, f := range files {
+			var download *Download
+			download, err = p.Resolve(ctx, client, ss, src, f)
+			if err != nil {
+				var typed *Error
+				if errors.As(err, &typed) && typed.Code == "transfer_required" {
+					needTransfer = true
+					break
+				}
+				return nil, err
+			}
+			resolved[f.ID] = download
+			if download != nil && download.ExpiresAt.IsZero() {
+				download.ExpiresAt = time.Now().Add(30 * time.Second)
+			}
 		}
 	}
 	if needTransfer {
@@ -664,8 +807,12 @@ func (s *Service) Prepare(ctx context.Context, ctl *controller.Controller, req *
 	}
 	out := &Prepared{BatchID: batch, Reqs: []*base.CreateTaskBatchItem{}}
 	for _, f := range publicFiles(files) {
-		e := &model.ReqExtra{Provider: src.Provider, Source: src, File: f, SessionID: ss.ID, AccountID: ss.Capture.AccountID, BatchID: batch}
-		out.Reqs = append(out.Reqs, &base.CreateTaskBatchItem{Req: &base.Request{URL: src.URL, Protocol: "netdisk", Extra: e, Proxy: req.Proxy}, Opts: opts.Clone()})
+		e := &model.ReqExtra{Provider: src.Provider, Source: src, File: f, SessionID: ss.ID, AccountID: ss.Capture.AccountID, BatchID: batch, Deferred: deferred}
+		fileOpts := opts.Clone()
+		if fileOpts.Name == "" {
+			fileOpts.Name = f.Name
+		}
+		out.Reqs = append(out.Reqs, &base.CreateTaskBatchItem{Req: &base.Request{URL: src.URL, Protocol: "netdisk", Extra: e, Proxy: req.Proxy}, Opts: fileOpts})
 	}
 	return out, nil
 }
@@ -675,10 +822,25 @@ func (s *Service) SetStateStore(store fetcher.ProtocolStateStore) {
 	s.state = store
 	var v struct {
 		Transfers map[string]*model.TransferReceipt `json:"transfers"`
+		Batches   map[string]*deferredBatch         `json:"batches,omitempty"`
 	}
-	if ok, err := store.Load(&v); ok && err == nil && v.Transfers != nil {
-		s.transfers = v.Transfers
+	if ok, err := store.Load(&v); ok && err == nil {
+		if v.Transfers != nil {
+			s.transfers = v.Transfers
+		}
+		if v.Batches != nil {
+			s.batches = v.Batches
+		}
+		for _, b := range s.batches {
+			if b.State == "transferring" {
+				b.State = "transfer_failed"
+			}
+		}
 		for _, r := range s.transfers {
+			if r.State == "transferring" {
+				r.State = "transfer_failed"
+				r.Message = deferredFailureMessage
+			}
 			if r.State == "cleaning" {
 				r.State = "cleanup_failed"
 				r.Message = "上次清理中断，可重新同步登录后重试"
@@ -695,7 +857,8 @@ func (s *Service) persistLocked() error {
 	}
 	return s.state.Save(struct {
 		Transfers map[string]*model.TransferReceipt `json:"transfers"`
-	}{clone(s.transfers)})
+		Batches   map[string]*deferredBatch         `json:"batches,omitempty"`
+	}{clone(s.transfers), clone(s.batches)})
 }
 func (s *Service) Transfers() []*model.TransferReceipt {
 	s.mu.Lock()
@@ -707,6 +870,13 @@ func (s *Service) Transfers() []*model.TransferReceipt {
 	return v
 }
 func (s *Service) Complete(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) {
+	s.mu.Lock()
+	deferred := e.Deferred || s.batches[e.BatchID] != nil
+	s.mu.Unlock()
+	if deferred {
+		s.completeDeferred(ctx, ctl, req, e)
+		return
+	}
 	s.mu.Lock()
 	r := s.transfers[e.BatchID]
 	if r == nil {
@@ -738,11 +908,20 @@ func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *
 		s.mu.Unlock()
 		return Fail("in_use", "此批次还有文件未下载完成，临时副本继续保留")
 	}
+	if b := s.batches[batch]; b != nil && (len(b.Remaining) > 0 || b.State != "downloading" || r.State == "transfer_failed" || r.State == "transferring") {
+		s.mu.Unlock()
+		return Fail("in_use", "此批次转存或下载未确认完成，临时副本继续保留")
+	}
 	if r.State == "cleaned" || r.State == "cleaning" {
 		s.mu.Unlock()
 		return nil
 	}
 	s.transfers[batch].State = "cleaning"
+	if err := s.persistLocked(); err != nil {
+		s.transfers[batch].State = "cleanup_failed"
+		s.mu.Unlock()
+		return err
+	}
 	s.mu.Unlock()
 	ss, err := s.session(r.Provider, "", r.AccountID)
 	if err == nil {
@@ -759,11 +938,17 @@ func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *
 	if err != nil {
 		current.State = "cleanup_failed"
 		current.Message = err.Error()
+		if s.batches[batch] != nil {
+			// Provider transport errors may contain signed request URLs.
+			current.Message = "临时副本清理失败，请同步原账号后重试，副本继续保留"
+		}
 	} else {
 		current.State = "cleaned"
 		current.Message = ""
 	}
-	_ = s.persistLocked()
+	if saveErr := s.persistLocked(); saveErr != nil && err == nil {
+		err = saveErr
+	}
 	return err
 }
 func (s *Service) Close() {

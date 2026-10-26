@@ -8,23 +8,22 @@ class MacColors {
   static MacColors of(BuildContext context) =>
       MacColors(Theme.of(context).brightness == Brightness.dark);
   Color get background =>
-      dark ? const Color(0xff1f2022) : const Color(0xfffaf9f7);
-  Color get surface => dark ? const Color(0xff292a2d) : Colors.white;
-  Color get sidebar => dark ? const Color(0xff28292b) : const Color(0xffecebea);
-  Color get text => dark ? const Color(0xfff0f0f2) : const Color(0xff242426);
+      dark ? const Color(0xff1d1d1f) : const Color(0xfff5f5f7);
+  Color get surface => dark ? const Color(0xff2a2a2d) : Colors.white;
+  Color get sidebar => dark ? const Color(0xff1c1c1e) : const Color(0xffededf0);
+  Color get text => dark ? const Color(0xffefeff1) : const Color(0xff242426);
   Color get secondary =>
-      dark ? const Color(0xffa6a6ad) : const Color(0xff737378);
+      dark ? const Color(0xffa0a0a6) : const Color(0xff6e6e73);
   Color get border =>
-      (dark ? Colors.white : Colors.black).withValues(alpha: dark ? .12 : .10);
-  Color get accent => dark ? const Color(0xff79cca0) : const Color(0xff258350);
-  Color get primaryFill =>
-      dark ? const Color(0xff79cca0) : const Color(0xff258350);
-  Color get primaryText => dark ? const Color(0xff10291b) : Colors.white;
+      (dark ? Colors.white : Colors.black).withValues(alpha: .09);
+  Color get accent => dark ? const Color(0xff0a84ff) : const Color(0xff007aff);
+  Color get primaryFill => accent;
+  Color get primaryText => Colors.white;
   Color get windowTop =>
-      (dark ? const Color(0xff252629) : const Color(0xfff6f5f3))
+      (dark ? const Color(0xff1d1d1f) : const Color(0xfff5f5f7))
           .withValues(alpha: .08);
   Color get windowBottom => windowTop;
-  Color get selection => accent.withValues(alpha: dark ? .20 : .12);
+  Color get selection => accent.withValues(alpha: dark ? .18 : .085);
 }
 
 class MacToolbar extends StatelessWidget {
@@ -32,24 +31,26 @@ class MacToolbar extends StatelessWidget {
   final List<Widget> actions;
   final Widget? leading;
   final Widget? bottom;
+  final double height;
   const MacToolbar(
       {super.key,
       required this.title,
       this.actions = const [],
       this.leading,
-      this.bottom});
+      this.bottom,
+      this.height = MacMetrics.toolbarHeight});
   @override
   Widget build(BuildContext context) {
     final c = MacColors.of(context);
     return Container(
         decoration: BoxDecoration(
             color: c.background,
-            border: Border(bottom: BorderSide(color: c.border, width: .7))),
+            border: Border(bottom: BorderSide(color: c.border, width: .5))),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           SizedBox(
-              height: MacMetrics.toolbarHeight,
+              height: height,
               child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Row(children: [
                     if (leading != null) ...[
                       leading!,
@@ -62,14 +63,14 @@ class MacToolbar extends StatelessWidget {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
                                     color: c.text))),
                     ...actions.expand((w) => [const SizedBox(width: 8), w]),
                   ]))),
           if (bottom != null)
             Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 9),
                 child: bottom!),
         ]));
   }
@@ -81,19 +82,25 @@ class MacPage extends StatelessWidget {
   final List<Widget> actions;
   final Widget? leading;
   final Widget? bottom;
+  final double headerHeight;
   const MacPage(
       {super.key,
       required this.title,
       required this.child,
       this.actions = const [],
       this.leading,
-      this.bottom});
+      this.bottom,
+      this.headerHeight = MacMetrics.toolbarHeight});
   @override
   Widget build(BuildContext context) => Material(
       color: MacColors.of(context).background,
       child: Column(children: [
         MacToolbar(
-            title: title, actions: actions, leading: leading, bottom: bottom),
+            title: title,
+            actions: actions,
+            leading: leading,
+            bottom: bottom,
+            height: headerHeight),
         Expanded(child: child)
       ]));
 }
@@ -128,45 +135,65 @@ class _MacButtonState extends State<MacButton> {
         cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
         onEnter: (_) => setState(() => hover = true),
         onExit: (_) => setState(() => hover = false),
-        child: TextButton(
-          onPressed: widget.onPressed,
-          onFocusChange: (value) => setState(() => focused = value),
-          style: TextButton.styleFrom(
-            foregroundColor: foreground,
-            disabledForegroundColor: c.secondary.withValues(alpha: .55),
-            backgroundColor: hover && enabled
-                ? Color.alphaBlend(c.text.withValues(alpha: .04), fill)
-                : fill,
-            minimumSize: const Size(32, MacMetrics.controlHeight),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            padding: const EdgeInsets.symmetric(horizontal: 11),
-            side: BorderSide(
-                color: focused
-                    ? c.accent
-                    : widget.primary && enabled
-                        ? Colors.transparent
-                        : c.border,
-                width: focused ? 2 : .7),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(MacMetrics.controlRadius)),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(MacMetrics.controlRadius),
+            boxShadow: enabled
+                ? [
+                    BoxShadow(
+                        color:
+                            Colors.black.withValues(alpha: c.dark ? .10 : .055),
+                        blurRadius: 2,
+                        offset: const Offset(0, 1))
+                  ]
+                : null,
           ),
-          child: DefaultTextStyle.merge(
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color:
-                    enabled ? foreground : c.secondary.withValues(alpha: .55)),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              if (widget.icon != null) ...[
-                Icon(widget.icon,
-                    size: 16,
-                    color: enabled
-                        ? foreground
-                        : c.secondary.withValues(alpha: .55)),
-                const SizedBox(width: 6),
-              ],
-              widget.child,
-            ]),
+          child: TextButton(
+            onPressed: widget.onPressed,
+            onFocusChange: (value) => setState(() => focused = value),
+            style: TextButton.styleFrom(
+              foregroundColor: foreground,
+              disabledForegroundColor: c.secondary.withValues(alpha: .55),
+              backgroundColor: hover && enabled
+                  ? Color.alphaBlend(c.text.withValues(alpha: .04), fill)
+                  : fill,
+              minimumSize: const Size(28, MacMetrics.controlHeight),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              textStyle: const TextStyle(
+                  fontFamily: '.AppleSystemUIFont', fontSize: 12, height: 1.15),
+              side: BorderSide(
+                  color: focused
+                      ? c.accent
+                      : widget.primary && enabled
+                          ? Colors.transparent
+                          : c.border,
+                  width: focused ? 1.5 : .5),
+              shape: RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.circular(MacMetrics.controlRadius)),
+            ),
+            child: DefaultTextStyle.merge(
+              style: TextStyle(
+                  fontFamily: '.AppleSystemUIFont',
+                  fontSize: 12,
+                  height: 1.15,
+                  fontWeight: FontWeight.w500,
+                  color: enabled
+                      ? foreground
+                      : c.secondary.withValues(alpha: .55)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (widget.icon != null) ...[
+                  Icon(widget.icon,
+                      size: 14,
+                      color: enabled
+                          ? foreground
+                          : c.secondary.withValues(alpha: .55)),
+                  const SizedBox(width: 5),
+                ],
+                widget.child,
+              ]),
+            ),
           ),
         ),
       ),
@@ -179,36 +206,44 @@ class MacSearchField extends StatelessWidget {
   final String hint;
   final ValueChanged<String>? onChanged;
   final FocusNode? focusNode;
+  final bool prominent;
   const MacSearchField(
       {super.key,
       required this.controller,
       this.hint = '搜索',
       this.onChanged,
-      this.focusNode});
+      this.focusNode,
+      this.prominent = false});
   @override
   Widget build(BuildContext context) {
     final c = MacColors.of(context);
     return SizedBox(
-        height: MacMetrics.controlHeight,
+        height: prominent ? 40 : MacMetrics.controlHeight,
         child: CupertinoTextField(
           controller: controller,
           focusNode: focusNode,
           onChanged: onChanged,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
           prefix: Padding(
-              padding: const EdgeInsets.only(left: 9),
+              padding: EdgeInsets.only(left: prominent ? 0 : 8),
               child: MacSymbol('magnifyingglass',
                   fallback: CupertinoIcons.search,
-                  size: 15,
+                  size: prominent ? 19 : 14,
                   color: c.secondary)),
           placeholder: hint,
-          placeholderStyle: TextStyle(fontSize: 13, color: c.secondary),
+          placeholderStyle: TextStyle(
+              fontSize: prominent ? 20 : 12,
+              fontWeight: FontWeight.w400,
+              color: c.secondary),
           style: TextStyle(
-              fontFamily: '.AppleSystemUIFont', fontSize: 13, color: c.text),
+              fontFamily: '.AppleSystemUIFont',
+              fontSize: prominent ? 20 : 12,
+              fontWeight: FontWeight.w400,
+              color: c.text),
           cursorColor: c.accent,
           decoration: BoxDecoration(
-              color: c.surface,
-              border: Border.all(color: c.border, width: .7),
+              color: prominent ? Colors.transparent : c.surface,
+              border: prominent ? null : Border.all(color: c.border, width: .5),
               borderRadius: BorderRadius.circular(MacMetrics.controlRadius)),
           clearButtonMode: OverlayVisibilityMode.editing,
         ));
@@ -236,21 +271,22 @@ class MacEmptyState extends StatelessWidget {
             padding: const EdgeInsets.all(24),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               MacSymbol(symbol ?? _symbolForIcon(icon),
-                  fallback: icon, size: 44, color: c.secondary),
-              const SizedBox(height: 16),
+                  fallback: icon,
+                  size: 32,
+                  color: c.secondary.withValues(alpha: .75)),
+              const SizedBox(height: 13),
               Text(title,
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -.4,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
                       color: c.text)),
               if (message != null) ...[
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 Text(message!,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                        fontSize: 13, color: c.secondary, height: 1.5))
+                        fontSize: 12, color: c.secondary, height: 1.4))
               ],
               if (action != null) ...[const SizedBox(height: 18), action!],
             ])));

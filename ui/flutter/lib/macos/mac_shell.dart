@@ -67,11 +67,9 @@ class _MacShellState extends State<MacShell> {
   }
 
   static const _sections = <String, String>{
-    'tasks': '任务',
+    'tasks': '下载列表',
     'general': '通用',
     'download': '下载',
-    'connections': '连接与能力',
-    'advanced': '高级',
   };
 
   @override
@@ -82,9 +80,9 @@ class _MacShellState extends State<MacShell> {
       builder: (context, section, _) {
         final selected = widget.selectedIndex == 0
             ? 'tasks'
-            : widget.selectedIndex == 1
-                ? 'connections'
-                : section;
+            : _sections.containsKey(section)
+                ? section
+                : 'general';
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           MacAppearance.setWindowTint(
@@ -114,46 +112,64 @@ class _MacShellState extends State<MacShell> {
                   height: 44,
                   decoration: BoxDecoration(
                     color: c.background,
-                    border: Border(bottom: BorderSide(color: c.border)),
+                    border:
+                        Border(bottom: BorderSide(color: c.border, width: .5)),
                   ),
                   child: Row(children: [
                     const SizedBox(width: 8),
                     const IconButton(
                       tooltip: '返回轻面板',
                       onPressed: MacPanel.showPanel,
-                      icon: Icon(CupertinoIcons.chevron_left, size: 16),
+                      icon: Icon(CupertinoIcons.chevron_left, size: 14),
                     ),
                     Expanded(
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
-                        child: Row(children: [
-                          for (final entry in _sections.entries)
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 2),
-                              child: Semantics(
-                                selected: selected == entry.key,
-                                button: true,
-                                child: TextButton(
-                                  style: TextButton.styleFrom(
-                                    minimumSize: const Size(0, 30),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 12),
-                                    foregroundColor: selected == entry.key
-                                        ? c.accent
-                                        : c.text,
-                                    backgroundColor: selected == entry.key
-                                        ? c.selection
-                                        : Colors.transparent,
-                                    textStyle: const TextStyle(fontSize: 13),
+                        child: Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            color: c.text.withValues(alpha: .045),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(children: [
+                            for (final entry in _sections.entries)
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 1),
+                                child: Semantics(
+                                  selected: selected == entry.key,
+                                  button: true,
+                                  child: TextButton(
+                                    style: TextButton.styleFrom(
+                                      minimumSize: const Size(0, 25),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 14),
+                                      foregroundColor: selected == entry.key
+                                          ? c.text
+                                          : c.secondary,
+                                      backgroundColor: selected == entry.key
+                                          ? c.surface
+                                          : Colors.transparent,
+                                      shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(6)),
+                                      textStyle: TextStyle(
+                                          fontFamily: '.AppleSystemUIFont',
+                                          fontSize: 12,
+                                          fontWeight: selected == entry.key
+                                              ? FontWeight.w500
+                                              : FontWeight.w400),
+                                    ),
+                                    onPressed: () => MacPanel.showSettings(
+                                        section: entry.key),
+                                    child: Text(entry.value),
                                   ),
-                                  onPressed: () =>
-                                      MacPanel.showSettings(section: entry.key),
-                                  child: Text(entry.value),
                                 ),
                               ),
-                            ),
-                        ]),
+                          ]),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),

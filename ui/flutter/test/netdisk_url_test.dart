@@ -47,6 +47,8 @@ void main() {
       'A1b2'
     ),
     ('https://www.alipan.com/s/abc?pass_code=A1b2', 'aliyun', 'abc', 'A1b2'),
+    ('https://www.alipan.com/drive/file/all', 'aliyun', '', ''),
+    ('https://alipan.com/drive/file/all', 'aliyun', '', ''),
     ('https://pan.xunlei.com/s/abc?receive_code=A1b2', 'xunlei', 'abc', 'A1b2'),
     (
       'https://pan.quark.cn/s/abc?pwd=A1b2&gopeed_request=public-marker',
