@@ -36,3 +36,7 @@ All 28 runs completed; all 6,706 file hashes were correct. The token-bucket scen
 Independent API snapshots before/after installation and after restart, plus direct cold-backup/database and Hive comparisons, matched: 38 tasks, 37 restore records, all configuration fields, 13 extensions, extension/protocol state, 176 extension-file hashes, three plist files and all existing Hive keys. Both existing task files retained their full hashes and metadata. Creation history and window state were unchanged. Only the two explicitly identified acceptance tasks were removed after the smoke test.
 
 Raw local acceptance logs and user data backups are intentionally not included in the public repository.
+
+## GitHub CI after publication
+
+The automatic full CI run did not pass: `TestDownloader_Extension_OnStart` timed out after 30 seconds during a network download. Dependent build jobs were skipped. This is separate from the completed local focused checks and installed-app acceptance above. [CI run and logs](https://github.com/kbwumin13-sudo/kownload/actions/runs/40344630475).
