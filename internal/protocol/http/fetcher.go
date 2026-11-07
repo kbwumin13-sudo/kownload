@@ -341,6 +341,13 @@ type Fetcher struct {
 	liveStreams atomic.Int32
 	streamExit  chan struct{}
 
+	// When this run last refreshed the public link, and a shorter interval or
+	// lower limit than publicRefreshInterval and maxPublicRefreshes for tests
+	// (zero keeps them); see refreshPublicLink. Guarded by publicMu.
+	publicRefreshedAt  time.Time
+	publicRefreshGap   time.Duration
+	publicRefreshLimit int
+
 	diag diagnostics
 }
 
@@ -922,7 +929,7 @@ func (f *Fetcher) doStart() error {
 		return err
 	}
 	// The resume checks below are this run's first requests: a public link
-	// that expired while paused may use this run's refresh.
+	// that expired while paused may use this run's refreshes.
 	f.publicMu.Lock()
 	f.publicRefreshes = 0
 	f.publicMu.Unlock()
