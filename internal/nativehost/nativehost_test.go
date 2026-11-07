@@ -36,13 +36,13 @@ func (f *fixture) Post(ctx context.Context, _ string, r Request) (int, []byte, e
 	return f.status, []byte(f.body), nil
 }
 
-func TestForwardExactPathBudgets(t *testing.T) {
+func TestForwardDefaultBudget(t *testing.T) {
 	for _, tc := range []struct {
 		path string
 		want time.Duration
 	}{
-		{"/api/v1/netdisk/prepare", 310 * time.Second},
-		{"/api/v1/netdisk/prepare?fixture=1", 310 * time.Second},
+		{"/api/v1/netdisk/prepare", 60 * time.Second},
+		{"/api/v1/netdisk/prepare?fixture=1", 60 * time.Second},
 		{"/api/v1/netdisk/prepare/child", 60 * time.Second},
 		{"/api/v1/netdisk/prepare/", 60 * time.Second},
 		{"/api/v1/info", 60 * time.Second},
@@ -113,7 +113,7 @@ func TestLegacyEnvelopeAndValidation(t *testing.T) {
 	if r.Code != 0 || string(r.Data.(json.RawMessage)) != f.body {
 		t.Fatal("old successful business data changed")
 	}
-	for _, body := range []string{`{"method":"create","operationId":"bad\r\n"}`, `{"method":"forward","params":{"method":"POST","path":"https://example.org/"}}`, `{"method":"forward","params":{"method":"POST","path":"/api/v1/%2e%2e/private"}}`, `{"method":"create","params":null}`, `{"method":"create","meta":{"silent":"yes"},"params":{}}`} {
+	for _, body := range []string{`{"method":"create","operationId":""}`, `{"method":"create","operationId":null}`, `{"method":"create","operationId":"bad\r\n"}`, `{"method":"forward","params":{"method":"POST","path":"https://example.org/"}}`, `{"method":"forward","params":{"method":"POST","path":"/api/v1/%2e%2e/private"}}`, `{"method":"create","params":null}`, `{"method":"create","meta":{"silent":"yes"},"params":{}}`} {
 		if d.Dispatch(context.Background(), []byte(body)).Code == 0 {
 			t.Fatal("accepted invalid request")
 		}
@@ -212,6 +212,49 @@ func TestUnixIPCStatusHeadersAndNoRedirect(t *testing.T) {
 		t.Fatal("POST replayed")
 	}
 }
+func TestTruncatedHTTPBodyRetainsStatus(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "knh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "rpc.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(500)
+		w.Write([]byte(`oops`))
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+	client := UnixClient{Socket: socket}
+	f := &fixture{}
+	d := Dispatcher{Client: client, Wakeup: f}
+	r := d.Dispatch(context.Background(), []byte(`{"method":"create","params":{}}`))
+	if r.Code != 1 || r.HTTPStatus == nil || *r.HTTPStatus != 500 || r.Error != "http_error" || calls != 1 {
+		t.Fatal("lost HTTP status/replayed request", r, calls)
+	}
+}
+
+func TestInvalidUTF8AndMissingIPC(t *testing.T) {
+	invalid := []byte(`{"code":0,"data":"`)
+	invalid = append(invalid, 0xff)
+	invalid = append(invalid, []byte(`"}`)...)
+	if r := interpret(Request{Method: "forward"}, 200, invalid, false); r.Code != 1 || r.Error != "invalid_response" {
+		t.Fatal(r)
+	}
+	d := Dispatcher{Client: UnixClient{Socket: "/tmp/kownload-definitely-missing-rpc.sock"}, Wakeup: &fixture{}}
+	r := d.Dispatch(context.Background(), []byte(`{"method":"forward","params":{"method":"GET","path":"/api/v1/info"}}`))
+	if r.Code != 1 || r.Error != "request_failed" || r.HTTPStatus != nil {
+		t.Fatal(r)
+	}
+}
+
 func TestWakeupAndOrigins(t *testing.T) {
 	f := &fixture{}
 	opens := 0

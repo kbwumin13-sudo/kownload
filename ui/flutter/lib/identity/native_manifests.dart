@@ -41,13 +41,17 @@ Future<void> writeNativeManifests(
       if (base64Encode(previous) == base64Encode(bytes)) continue;
       // Never overwrite the first rollback copy of this installation.
       final backup = File(path.join(backupDirectory, '$name.json'));
-      if (!await backup.exists()) {
+      final absent = File(path.join(backupDirectory, '$name.absent'));
+      if (!await backup.exists() && !await absent.exists()) {
         await backup.writeAsBytes(previous, flush: true);
         await Process.run('/bin/chmod', ['600', backup.path]);
       }
     } else {
       final absent = File(path.join(backupDirectory, '$name.absent'));
-      if (!await absent.exists()) await absent.writeAsString('', flush: true);
+      final backup = File(path.join(backupDirectory, '$name.json'));
+      if (!await absent.exists() && !await backup.exists()) {
+        await absent.writeAsString('', flush: true);
+      }
     }
     final temp = File('${file.path}.tmp');
     await temp.writeAsBytes(bytes, flush: true);

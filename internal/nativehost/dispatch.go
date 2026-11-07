@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Request struct {
@@ -52,6 +53,13 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 	if json.Unmarshal(body, &req) != nil || (req.OperationID != "" && !operationID.MatchString(req.OperationID)) {
 		return failure("", "invalid_request", nil, nil)
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
+		return failure("", "invalid_request", nil, nil)
+	}
+	if _, present := fields["operationId"]; present && !operationID.MatchString(req.OperationID) {
+		return failure("", "invalid_request", nil, nil)
+	}
 	if v, ok := req.Meta["silent"]; ok {
 		if _, ok = v.(bool); !ok {
 			return failure(req.OperationID, "invalid_request", nil, nil)
@@ -88,7 +96,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 				return failure(req.OperationID, "invalid_request", nil, nil)
 			}
 			creation = forward.Method == "POST" && (strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks" || strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks/batch")
-			budget = ForwardBudget(forward.Path)
+			budget = 60 * time.Second
 		}
 		if req.Method == "create" {
 			wake, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -102,22 +110,18 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 		defer cancel()
 		status, reply, err := d.Client.Post(requestCtx, "/"+req.Method, req)
 		if err != nil {
+			if status > 0 {
+				if status < 200 || status >= 300 {
+					return failureWithBusiness(req.OperationID, "http_error", status, nil)
+				}
+				return failure(req.OperationID, "request_failed", &status, nil)
+			}
 			return failure(req.OperationID, "request_failed", nil, nil)
 		}
 		return interpret(req, status, reply, creation)
 	default:
 		return failure(req.OperationID, "unknown_method", nil, nil)
 	}
-}
-
-// ForwardBudget follows the exact-path table in contract v2. Query parameters
-// do not change a route; prefixes and trailing slashes are different paths.
-func ForwardBudget(path string) time.Duration {
-	u, err := url.Parse(path)
-	if err == nil && u.Path == "/api/v1/netdisk/prepare" {
-		return 310 * time.Second
-	}
-	return 60 * time.Second
 }
 
 func validForward(method, path string) bool {
@@ -140,7 +144,7 @@ func validForward(method, path string) bool {
 
 func interpret(req Request, status int, body []byte, creation bool) Response {
 	var envelope map[string]json.RawMessage
-	valid := json.Unmarshal(body, &envelope) == nil && envelope != nil
+	valid := utf8.Valid(body) && json.Unmarshal(body, &envelope) == nil && envelope != nil
 	var code *int
 	if valid {
 		var value int

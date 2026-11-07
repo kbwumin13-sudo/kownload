@@ -35,6 +35,18 @@ void main() {
           'original fixture');
       expect(
           await File('$backup/${AppIdentity.hostName}.absent').exists(), true);
+      await writeNativeManifests(
+          directory: dir,
+          executable: '${root.path}/updated-host',
+          backupDirectory: backup);
+      expect(
+          await File('$backup/${AppIdentity.legacyHostName}.json')
+              .readAsString(),
+          'original fixture');
+      expect(
+          await File('$backup/${AppIdentity.hostName}.json').exists(), false);
+      expect(
+          await File('$backup/${AppIdentity.hostName}.absent').exists(), true);
     } finally {
       await root.delete(recursive: true);
     }

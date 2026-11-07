@@ -57,6 +57,11 @@ def main():
         return
     if not new.is_dir() or not (new / '.kownload-identity.json').is_file() or backup.exists():
         p.error('Require a completed new identity root and a new backup destination')
+    for saved, _ in a.manifest_pair:
+        saved = pathlib.Path(saved)
+        for name in [IDENTITY['hostName'], IDENTITY['legacyHostName']]:
+            if (saved / (name + '.json')).is_file() == (saved / (name + '.absent')).is_file():
+                p.error('Require exactly one original/absent backup for each host name')
     if not a.fixture:
         commands = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True).splitlines()
         if any(x.strip().endswith(('/Contents/MacOS/kownload', '/Contents/MacOS/Gopeed')) for x in commands):

@@ -49,7 +49,9 @@ Future<void> runIdentityImport(
   RandomAccessFile? legacyHiveLock;
   try {
     final lock = File(path.join(source, 'database.lock'));
-    if (await lock.exists()) {
+    final imported =
+        await File(path.join(target, '.kownload-identity.json')).exists();
+    if (!imported && await lock.exists()) {
       legacyHiveLock = await lock.open(mode: FileMode.append);
       await legacyHiveLock.lock(FileLock.exclusive);
     }

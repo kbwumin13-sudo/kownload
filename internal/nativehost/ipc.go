@@ -47,7 +47,7 @@ func (c UnixClient) Post(ctx context.Context, path string, request Request) (int
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxOutput+1))
 	if err != nil {
-		return 0, nil, err
+		return resp.StatusCode, nil, err
 	}
 	if len(body) > MaxOutput {
 		return resp.StatusCode, nil, nil

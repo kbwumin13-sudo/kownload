@@ -27,6 +27,18 @@ void main() {
               }),
           throwsA(isA<IdentityBootstrapException>()));
       expect(called, false);
+      await Directory('${root.path}/target').create();
+      await File('${root.path}/target/.kownload-identity.json')
+          .writeAsString('{"version":1}');
+      await runIdentityImport(
+          source: root.path,
+          target: '${root.path}/target',
+          run: (_) async {
+            called = true;
+            return ProcessResult(1, 0, '{"ok":true}', '');
+          });
+      expect(called, true,
+          reason: 'completed imports must not depend on the old lock');
     } finally {
       await holder.stdin.close();
       await holder.exitCode;
