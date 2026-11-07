@@ -383,19 +383,23 @@ func TestPatchedQueryComparesSavedBytes(t *testing.T) {
 // anything else, or adding a parameter, gives another one.
 func TestQueryKeyIgnoresSignatureParameters(t *testing.T) {
 	key := func(raw string) string { return requestQueryKey(&base.Request{URL: raw}) }
-	for _, pair := range [][2]string{
-		{"https://x.example/f.bin?e=1&token=ak:a", "https://x.example/f.bin?e=2&token=ak:b"},                                          // Qiniu
-		{"https://a.blob.core.windows.net/c/f.bin?sv=1&st=1&se=1&sp=r&sr=b&sig=a", "https://a.blob.core.windows.net/c/f.bin?sv=2&st=2&se=2&sp=rw&sr=c&sig=b"}, // Azure SAS
-		{"https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=1&q-key-time=1&q-signature=a", "https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=2&q-key-time=2&q-signature=b"}, // Tencent Cloud
-		{"https://d.cloudfront.net/f.bin?Expires=1&Signature=a&Key-Pair-Id=K1", "https://d.cloudfront.net/f.bin?Policy=p&Signature=b&Key-Pair-Id=K2"}, // CloudFront
-		{"https://b.oss.example/f.bin?OSSAccessKeyId=a&Expires=1&Signature=a", "https://b.oss.example/f.bin?OSSAccessKeyId=b&Expires=2&Signature=b&security-token=t"}, // Alibaba Cloud OSS
-		{"https://cdn.example/f.bin?auth_key=1-0-0-a", "https://cdn.example/f.bin?auth_key=2-0-0-b"},                                     // Alibaba Cloud CDN
-		{"https://ak.example/f.bin?hdnts=exp=1~hmac=a", "https://ak.example/f.bin?__token__=exp=2~hmac=b"},                               // Akamai
-		{"https://s3.example/f.bin?X-Amz-Expires=1&X-Amz-Signature=a", "https://s3.example/f.bin?X-Amz-Expires=2&X-Amz-Signature=b"},   // Amazon S3
-		{"https://x.example/f.bin?id=7&token=a", "https://x.example/f.bin?token=b&id=7"},                                                 // order
+	for _, tc := range []struct{ name, old, renewed string }{
+		{"Qiniu", "https://x.example/f.bin?e=1&token=ak:a", "https://x.example/f.bin?e=2&token=ak:b"},
+		{"Azure SAS", "https://a.blob.core.windows.net/c/f.bin?sv=1&st=1&se=1&sp=r&sr=b&sig=a",
+			"https://a.blob.core.windows.net/c/f.bin?sv=2&st=2&se=2&sp=rw&sr=c&sig=b"},
+		{"Tencent Cloud", "https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=1&q-key-time=1&q-signature=a",
+			"https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=2&q-key-time=2&q-signature=b"},
+		{"CloudFront", "https://d.cloudfront.net/f.bin?Expires=1&Signature=a&Key-Pair-Id=K1",
+			"https://d.cloudfront.net/f.bin?Policy=p&Signature=b&Key-Pair-Id=K2"},
+		{"Alibaba Cloud OSS", "https://b.oss.example/f.bin?OSSAccessKeyId=a&Expires=1&Signature=a",
+			"https://b.oss.example/f.bin?OSSAccessKeyId=b&Expires=2&Signature=b&security-token=t"},
+		{"Alibaba Cloud CDN", "https://cdn.example/f.bin?auth_key=1-0-0-a", "https://cdn.example/f.bin?auth_key=2-0-0-b"},
+		{"Akamai", "https://ak.example/f.bin?hdnts=exp=1~hmac=a", "https://ak.example/f.bin?__token__=exp=2~hmac=b"},
+		{"Amazon S3", "https://s3.example/f.bin?X-Amz-Expires=1&X-Amz-Signature=a", "https://s3.example/f.bin?X-Amz-Expires=2&X-Amz-Signature=b"},
+		{"parameter order", "https://x.example/f.bin?id=7&token=a", "https://x.example/f.bin?token=b&id=7"},
 	} {
-		if key(pair[0]) != key(pair[1]) {
-			t.Errorf("signature renewal changed the query key: %s -> %s", pair[0], pair[1])
+		if key(tc.old) != key(tc.renewed) {
+			t.Errorf("%s: signature renewal changed the query key", tc.name)
 		}
 	}
 	for _, pair := range [][2]string{
