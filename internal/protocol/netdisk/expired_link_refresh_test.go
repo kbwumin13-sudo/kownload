@@ -60,6 +60,7 @@ func TestExpiredLinkRefreshesAndResumes(t *testing.T) {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(body)))
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("ETag", `"stable-file"`)
 		w.Header().Set("Content-Length", fmt.Sprint(end-start+1))
 		if raw != "" {
 			w.WriteHeader(http.StatusPartialContent)

@@ -207,10 +207,7 @@ func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Cli
 	if f.meta.Res.Range && rangeEnd > 0 {
 		httpReq.Header.Set(base.HttpHeaderRange,
 			fmt.Sprintf(base.HttpHeaderRangeFormat, rangeStart, rangeEnd))
-		if f.rangeResumeValidator != "" {
-			httpReq.Header.Set("If-Range", f.rangeResumeValidator)
-			httpReq.Header.Set("Accept-Encoding", "identity")
-		}
+		f.applyIfRange(httpReq)
 	}
 
 	resp, err := client.Do(httpReq)

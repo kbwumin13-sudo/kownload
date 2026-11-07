@@ -10,7 +10,7 @@ import (
 // A declared Range capability without a total length still needs a full stream;
 // the placeholder chunk is not a byte range or evidence of completion.
 func (f *Fetcher) usesRanges() bool {
-	return f.meta.Res.Range && f.meta.Res.Size > 0
+	return f.meta != nil && f.meta.Res != nil && f.meta.Res.Range && f.meta.Res.Size > 0
 }
 
 type localFileError struct{ err error }
@@ -64,6 +64,7 @@ func (f *Fetcher) writeDownloadAt(data []byte, offset int64) error {
 }
 
 func (f *Fetcher) failSingleStream(conn *connection, err error) {
+	f.diag.failure(err)
 	f.connMu.Lock()
 	conn.State = connFailed
 	conn.failed = true

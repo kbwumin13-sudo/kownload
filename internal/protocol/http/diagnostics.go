@@ -117,6 +117,10 @@ func (d *diagnostics) failure(err error) {
 		text = "HTTP " + strconv.Itoa(re.Code) + " " + text
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		text = "timeout"
+	} else if errors.Is(err, ErrUnsafeResume) {
+		text = "cannot verify resource identity; partial file preserved"
+	} else if isLocalFileError(err) {
+		text = "local file write failed"
 	} else if errors.Is(err, errInvalidRangeResponse) {
 		text = "invalid range response"
 	}

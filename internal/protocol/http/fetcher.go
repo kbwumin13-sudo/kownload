@@ -18,6 +18,7 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/netdisk/mailru"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
@@ -251,12 +252,21 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
-	requestPolicy  func(*http.Request)
-	responsePolicy func(*http.Request, *http.Response) error
-	ctl            *controller.Controller
-	config         *config
-	cookieJar      http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
-	doneCh         chan error
+	resourceKey     string
+	publicMu        sync.Mutex
+	publicSource    atomic.Pointer[mailru.Source]
+	publicRefreshes int
+	identityMu      sync.RWMutex
+	identity        representation
+	resumeHash      string
+	restored        bool
+	linkPatched     bool
+	requestPolicy   func(*http.Request)
+	responsePolicy  func(*http.Request, *http.Response) error
+	ctl             *controller.Controller
+	config          *config
+	cookieJar       http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
+	doneCh          chan error
 
 	meta *fetcher.FetcherMeta
 
@@ -464,6 +474,11 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 		}
 	}
 
+	if err := f.configurePublicSource(ctx); err != nil {
+		f.setState(stateError)
+		return err
+	}
+
 	// Build HTTP request WITHOUT Range header (normal request)
 	// This allows the response to be reused for downloading (important for one-time URLs)
 	httpReq, err := f.buildRequest(f.requestContext(ctx), req)
@@ -481,6 +496,9 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	// Track connection time for adaptive timeout in download phase
 	connStartTime := time.Now()
 	resp, err := client.Do(httpReq)
+	if err == nil {
+		resp, err = f.refreshResponse(ctx, client, httpReq, resp)
+	}
 	finishHeaders()
 	if err != nil {
 		f.diag.failure(err)
@@ -578,6 +596,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 
 	res.Files = append(res.Files, file)
 	f.meta.Res = res
+	f.rememberRepresentation(resp, res.Size)
 
 	// Save redirect URL for later connections
 	f.redirectURL = resp.Request.URL.String()
@@ -910,6 +929,21 @@ func (f *Fetcher) doStart() error {
 	if err := f.resetUnavailableResumeData(); err != nil {
 		return err
 	}
+	if f.restored || f.linkPatched || state == statePaused || state == stateError {
+		if f.completedLocalCheckpoint() {
+			f.setState(stateDone)
+			select {
+			case f.doneCh <- nil:
+			default:
+			}
+			return nil
+		}
+		if err := f.checkResumeIdentity(); err != nil {
+			f.diag.failure(err)
+			f.setState(stateError)
+			return err
+		}
+	}
 
 	if state == stateError {
 		f.connMu.Lock()
@@ -971,6 +1005,10 @@ func (f *Fetcher) doStart() error {
 	maxConns := f.meta.Opts.Extra.(*fhttp.OptsExtra).Connections
 	f.configuredStreams.Store(int32(maxConns))
 	f.slowStart = newSlowStartController(maxConns)
+
+	f.publicMu.Lock()
+	f.publicRefreshes = 0
+	f.publicMu.Unlock()
 
 	// Create main context
 	f.ctx, f.cancel = context.WithCancel(context.Background())
@@ -1418,7 +1456,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 		f.diag.failure(err)
 
-		if isLocalFileError(err) {
+		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return
 		}
@@ -1509,6 +1547,14 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	if conn.ctx.Err() != nil {
 		return conn.ctx.Err()
 	}
+	if conn.lastErr != nil {
+		if err := f.checkResumeIdentity(); err != nil {
+			if re := extractRequestError(conn.lastErr); re != nil {
+				return errors.Join(err, re)
+			}
+			return err
+		}
+	}
 
 	// Read chunk boundaries under lock to get a consistent snapshot
 	// This protects against concurrent modification by helpOtherConnection
@@ -1537,16 +1583,16 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	if f.usesRanges() {
 		httpReq.Header.Set(base.HttpHeaderRange,
 			fmt.Sprintf(base.HttpHeaderRangeFormat, rangeStart, rangeEnd))
-		if f.rangeResumeValidator != "" {
-			httpReq.Header.Set("If-Range", f.rangeResumeValidator)
-			httpReq.Header.Set("Accept-Encoding", "identity")
-		}
+		f.applyIfRange(httpReq)
 	}
 
 	// Record connection start time for adaptive timeout tracking
 	connStartTime := time.Now()
 
 	resp, err := client.Do(httpReq)
+	if err == nil {
+		resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
+	}
 	if err != nil {
 		return err
 	}
@@ -1557,7 +1603,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 
 		// Check if this might be a redirect URL expiration error
 		// If so, try falling back to the original URL
-		if f.hasRedirectURL() && isRedirectExpiredError(originalErr) {
+		if f.publicSourceSnapshot() == nil && f.hasRedirectURL() && isRedirectExpiredError(originalErr) {
 			fallbackResp, fallbackErr := f.tryFallbackToOriginalURL(conn.ctx, client, rangeStart, rangeEnd)
 			if fallbackErr == nil && fallbackResp != nil {
 				// Fallback succeeded, use this response instead
@@ -1578,6 +1624,9 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		}
 	}
 	defer resp.Body.Close()
+	if err := f.validateRepresentation(resp); err != nil {
+		return err
+	}
 	if f.usesRanges() {
 		begin, end, total, valid := parseContentRange(resp.Header.Get(base.HttpHeaderContentRange))
 		if resp.StatusCode != http.StatusPartialContent || !valid ||
@@ -1836,6 +1885,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			connStartTime := time.Now()
 
 			resp, err := client.Do(httpReq)
+			if err == nil {
+				resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
+			}
 			if err != nil {
 				return err
 			}
@@ -1853,6 +1905,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				member.Succeeded()
 			}
 
+			if err := f.validateRepresentation(resp); err != nil {
+				return err
+			}
 			if err := f.resetSingleStreamAttempt(conn); err != nil {
 				return err
 			}
@@ -1917,7 +1972,7 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			conn.lastErr = err
 		}
 		f.diag.failure(err)
-		if isLocalFileError(err) {
+		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return
 		}
@@ -2321,7 +2376,40 @@ func (f *Fetcher) checkCompletion() bool {
 }
 
 // Patch modifies the HTTP request information.
+
 func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
+	if req != nil && (req.URL != "" || req.Extra != nil) {
+		state := f.getState()
+		if state == stateResolving || state == stateSlowStart || state == stateSteady {
+			return errors.New("pause HTTP task before changing the request")
+		}
+		if f.downloadLoopDone != nil {
+			<-f.downloadLoopDone
+		}
+		f.stopPrefetch()
+		if err := f.checkResumeIdentity(); err != nil {
+			return err
+		}
+		if req.URL != "" && f.usesRanges() && f.hasResumeData() {
+			candidate := *f.meta.Req
+			candidate.URL = req.URL
+			r := f.representationSnapshot()
+			key := r.ResourceKey
+			if key == "" {
+				key = requestResourceKey(f.meta.Req)
+			}
+			if requestResourceKey(&candidate) != key {
+				return fmt.Errorf("%w: new URL is outside the saved resource", ErrUnsafeResume)
+			}
+		}
+		f.linkPatched = true
+		f.resolveRespLock.Lock()
+		if f.resolveResp != nil {
+			f.resolveResp.Body.Close()
+			f.resolveResp = nil
+		}
+		f.resolveRespLock.Unlock()
+	}
 	// Patch request info
 	if req != nil {
 		if req.URL != "" {

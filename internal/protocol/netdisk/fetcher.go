@@ -341,6 +341,14 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 			res.Hash = "md5:" + digest
 		}
 	}
+	if err := child.SetResourceKey(e.Provider + "|" + e.Source.URL + "|" + e.File.ID); err != nil {
+		_ = child.Close()
+		return err
+	}
+	if err := child.SetResumeHash(resumeDigest(e, res)); err != nil {
+		_ = child.Close()
+		return err
+	}
 	res.Name = ""
 	res.Files[0].Name = e.File.Name
 	res.Files[0].Path = e.File.Path
@@ -479,16 +487,9 @@ func (f *Fetcher) Start() error {
 	return nil
 }
 func refreshable(err error) bool {
-	if err == nil {
-		return false
-	}
-	var re *httpfetch.RequestError
-	if errors.As(err, &re) {
-		return re.Code == 401 || re.Code == 403 || re.Code == 410 || re.Code == 412
-	}
-	text := err.Error()
-	return strings.Contains(text, "尚未完整") || strings.Contains(text, "status=401") || strings.Contains(text, "status=403") || strings.Contains(text, "status=410") || strings.Contains(text, "status=412")
+	return err != nil && (strings.Contains(err.Error(), "尚未完整") || httpfetch.IsExpiredLinkError(err))
 }
+
 func (f *Fetcher) syncOptions(child *httpfetch.Fetcher) error {
 	opts := f.meta.Opts.Clone()
 	if opts.Extra == nil && child.Meta().Opts != nil {

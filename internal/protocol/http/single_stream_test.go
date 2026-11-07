@@ -132,6 +132,10 @@ func TestSingleStreamWriteFailureIsTerminal(t *testing.T) {
 	if f.Progress().TotalDownloaded() != 0 {
 		t.Fatal("unwritten bytes were counted")
 	}
+	if !strings.Contains(f.Stats().(*fhttp.Stats).LastError, "file write") {
+		t.Fatal("write failure missing from task diagnostics")
+	}
+
 }
 
 func TestSingleStreamPauseDuringRetryReset(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"path"
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/netdisk/mailru"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 )
@@ -14,6 +15,8 @@ import (
 // ============================================================================
 
 type fetcherData struct {
+	PublicSource         *mailru.Source  `json:",omitempty"`
+	Representation       *representation `json:",omitempty"`
 	Connections          []*connection
 	RedirectURL          string // Saved redirect URL for resume
 	RangeResumeValidator string `json:",omitempty"`
@@ -94,7 +97,10 @@ func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 		connections[i] = copyConn
 	}
 	_f.connMu.Unlock()
+	identity := _f.representationSnapshot()
 	return &fetcherData{
+		Representation:       &identity,
+		PublicSource:         _f.publicSourceSnapshot(),
 		Connections:          connections,
 		RedirectURL:          redirectURL,
 		RangeResumeValidator: rangeResumeValidator,
@@ -107,6 +113,14 @@ func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v 
 		fb := &FetcherManager{}
 		fetcher := fb.Build().(*Fetcher)
 		fetcher.meta = meta
+		fetcher.restored = true
+		if fd.PublicSource != nil {
+			source := *fd.PublicSource
+			fetcher.publicSource.Store(&source)
+		}
+		if fd.Representation != nil {
+			fetcher.identity = *fd.Representation
+		}
 		base.ParseReqExtra[fhttp.ReqExtra](fetcher.meta.Req)
 		base.ParseOptExtra[fhttp.OptsExtra](fetcher.meta.Opts)
 		if len(fd.Connections) > 0 {

@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -86,11 +87,25 @@ func TestDownloadAuditPatchedVersionMustNotSplice(t *testing.T) {
 	controller := buildFetcher().ctl
 	f.Setup(controller)
 	defer f.Close()
-	if err := f.Patch(&base.Request{URL: srv.URL + "/version-2"}, nil); err != nil {
-		t.Fatal(err)
+	checkRejected := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if !errors.Is(err, ErrUnsafeResume) {
+			t.Fatal(err)
+		}
+		got, readErr := os.ReadFile(meta.SingleFilepath())
+		if readErr != nil || !bytes.Equal(got, old[:8]) {
+			t.Fatal("rejected resume changed the existing prefix")
+		}
+		t.Log("unverifiable checkpoint rejected before writing; old prefix preserved")
+		return true
 	}
-	if err := f.Start(); err != nil {
-		t.Fatal(err)
+	if checkRejected(f.Patch(&base.Request{URL: srv.URL + "/version-2"}, nil)) {
+		return
+	}
+	if checkRejected(f.Start()) {
+		return
 	}
 	err := waitDone(t, f, 10*time.Second)
 	got, readErr := os.ReadFile(meta.SingleFilepath())
