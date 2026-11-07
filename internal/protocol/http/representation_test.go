@@ -196,3 +196,72 @@ func TestRepresentationHashRequiresCurrentWrapper(t *testing.T) {
 		t.Fatalf("changed expected hash: %v", err)
 	}
 }
+
+// A renewed signed link of the same file only changes the query. With a saved
+// validator, scheme, host and path decide whether the link may continue the
+// task; build 25 accepted these renewals.
+func TestRepresentationPatchRenewedSignature(t *testing.T) {
+	payload := bytes.Repeat([]byte("A"), 32)
+	for _, tc := range []struct {
+		old, renewed string
+		accepted     bool
+	}{
+		{"https://cdn.example/file.bin?token=old-sign&e=1700000000", "https://cdn.example/file.bin?token=new-sign&e=1700003600", true},
+		{"https://acct.blob.core.windows.net/c/file.bin?sv=2022&st=2026-11-07&se=2026-11-08&sp=r&sig=a", "https://acct.blob.core.windows.net/c/file.bin?sv=2022&st=2026-11-08&se=2026-11-09&sp=r&sig=b", true},
+		{"https://cdn.example/file.bin?q-sign-time=1&q-key-time=1", "https://CDN.example/file.bin?q-sign-time=2&q-key-time=2", true},
+		{"https://cdn.example/file.bin?token=a", "https://other.example/file.bin?token=a", false},
+		{"https://cdn.example/file.bin?token=a", "http://cdn.example/file.bin?token=a", false},
+		{"https://cdn.example/a/file.bin?token=a", "https://cdn.example/b/file.bin?token=a", false},
+	} {
+		f := representationPrefix(t, tc.old, &representation{ETag: `"v1"`, Size: int64(len(payload))}, payload)
+		f.identity.ResourceKey = requestResourceKey(f.meta.Req) // as Resolve saved it
+		err := f.Patch(&base.Request{URL: tc.renewed}, nil)
+		if tc.accepted && err != nil || !tc.accepted && !errors.Is(err, ErrUnsafeResume) {
+			t.Errorf("patch %s -> %s: %v", tc.old, tc.renewed, err)
+		}
+	}
+}
+
+// After such a renewal the resume sends the saved validator as If-Range and
+// checks it on the response: the same version continues, another one is
+// refused before a byte is written.
+func TestRepresentationRenewedSignatureResumes(t *testing.T) {
+	payload := bytes.Repeat([]byte("A"), 32)
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprint("changed=", changed), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("token") != "new" || r.Header.Get("If-Range") != `"v1"` {
+					t.Errorf("resume request: %s If-Range=%q", r.URL, r.Header.Get("If-Range"))
+				}
+				etag := `"v1"`
+				if changed {
+					etag = `"v2"`
+				}
+				w.Header().Set("ETag", etag)
+				w.Header().Set("Content-Range", "bytes 8-31/32")
+				w.Header().Set("Content-Length", "24")
+				w.WriteHeader(http.StatusPartialContent)
+				w.Write(payload[8:])
+			}))
+			defer srv.Close()
+			f := representationPrefix(t, srv.URL+"/file.bin?token=old", &representation{ETag: `"v1"`, Size: 32}, payload)
+			f.identity.ResourceKey = requestResourceKey(f.meta.Req)
+			if err := f.Patch(&base.Request{URL: srv.URL + "/file.bin?token=new"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			err := f.Start()
+			if err == nil {
+				err = waitDone(t, f, 3*time.Second)
+			}
+			got, _ := os.ReadFile(f.Meta().SingleFilepath())
+			if changed {
+				// A stream reports the refusal through the completion error.
+				if err == nil || !strings.Contains(err.Error(), "ETag changed") || !bytes.Equal(got, payload[:8]) {
+					t.Fatalf("changed version after renewal: %v bytes=%d", err, len(got))
+				}
+			} else if err != nil || !bytes.Equal(got, payload) {
+				t.Fatalf("renewed link: %v bytes=%d", err, len(got))
+			}
+		})
+	}
+}

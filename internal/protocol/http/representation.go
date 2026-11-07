@@ -65,6 +65,13 @@ func (f *Fetcher) rememberRepresentation(resp *http.Response, size int64) {
 	f.identityMu.Unlock()
 }
 
+// requestResourceKey scopes saved validators to one resource: the scheme,
+// host and path of the URL, or a Mail.ru link's public share page. It is only
+// compared when a validator was saved. The query may change, as it does for
+// renewed signed links of the same file (token, e, st/se, q-sign-time, hdnts,
+// Policy...); If-Range and the validator check on every response decide
+// whether the saved bytes still match. Without a validator the saved-overlap
+// comparison decides instead.
 func requestResourceKey(req *base.Request) string {
 	raw := req.URL
 	if extra, ok := req.Extra.(*fhttp.ReqExtra); ok && extra != nil {
@@ -79,16 +86,7 @@ func requestResourceKey(req *base.Request) string {
 		raw = source.Page()
 	}
 	if u, err := url.Parse(raw); err == nil {
-		u.Fragment = ""
-		query := u.Query()
-		for key := range query {
-			lower := strings.ToLower(key)
-			if lower == "sig" || lower == "signature" || lower == "expires" || lower == "expire" || strings.HasPrefix(lower, "x-amz-") || strings.HasPrefix(lower, "x-goog-") {
-				query.Del(key)
-			}
-		}
-		u.RawQuery = query.Encode()
-		raw = u.String()
+		raw = u.Scheme + "://" + strings.ToLower(u.Host) + u.EscapedPath()
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
 }
