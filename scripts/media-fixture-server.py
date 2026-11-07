@@ -156,7 +156,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18794)
-    parser.add_argument('--root', type=Path, default=Path('../artifacts/media-fixtures'))
+    parser.add_argument('--root', type=Path, default=Path(os.environ.get('KOWNLOAD_PROJECT_DIR', '.')) / 'artifacts/media-fixtures')
     parser.add_argument('--delay', type=float, default=0, help='seconds between media chunks')
     args = parser.parse_args()
     if args.delay < 0:

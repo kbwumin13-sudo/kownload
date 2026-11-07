@@ -1,12 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
+import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/create_task.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/options.dart';
+import 'package:gopeed/api/model/resolve_result.dart';
+import 'package:gopeed/api/model/resolve_task.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/app/modules/create/controllers/create_controller.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
@@ -14,6 +18,7 @@ import 'package:gopeed/database/database.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
 
 class _App extends AppController {
   @override
@@ -36,6 +41,82 @@ class _Box extends Fake implements Box {
 }
 
 void main() {
+  testWidgets('magnet timeout preserves the draft and allows another resolve',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    Database.instance.box = _Box()..onboardingCompleted = true;
+    final app = _App();
+    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+    app.downloaderConfig.value.extra.defaultDirectDownload = false;
+    Get.put<AppController>(app);
+    final controller = Get.put(CreateController());
+    MacPanel.presentation.value = 'panel';
+    MacPanel.incoming.value = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await tester.binding.setSurfaceSize(const Size(640, 400));
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      MacPanel.cancelAutoHide();
+      MacPanel.incoming.value = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+      Get.reset();
+      Get.routerDelegate = null;
+      Get.routeInformationParser = null;
+      await tester.binding.setSurfaceSize(null);
+    });
+    final requests = <ResolveTask>[];
+    var pending = Completer<ResolveResult>();
+    await tester.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(
+          name: '/',
+          page: () => CreateView(taskResolver: (task) {
+                requests.add(task);
+                return pending.future;
+              }))
+    ]));
+    await tester.pumpAndSettle();
+    const magnet =
+        'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+    const error = '获取种子信息超时，请检查网络或稍后重试';
+    final input = find.byKey(const ValueKey('panel-download-input'));
+    final button = find.descendant(
+        of: find.byTooltip('开始下载'), matching: find.byType(MacButton));
+    await tester.enterText(input, magnet);
+    await tester.pump();
+    await tester.tap(button);
+    await tester.pump();
+    expect(requests, hasLength(1));
+    expect(controller.isConfirming.value, isTrue);
+    expect(tester.widget<MacButton>(button).onPressed, isNull);
+    // Submitting with Return while waiting must not start another resolve.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(requests, hasLength(1));
+    pending.completeError(api.TimeoutException(error));
+    await tester.pumpAndSettle();
+    expect(find.text(error), findsOneWidget);
+    expect(controller.isConfirming.value, isFalse);
+    expect(tester.widget<MacButton>(button).onPressed, isNotNull);
+    expect(tester.widget<TextFormField>(input).controller!.text, magnet);
+    pending = Completer<ResolveResult>();
+    await tester.tap(button);
+    await tester.pump();
+    expect(requests, hasLength(2));
+    expect(requests.last.req!.url, magnet);
+    expect(find.text(error), findsNothing);
+    expect(controller.isConfirming.value, isTrue);
+    pending.completeError(api.ConnectionException('无法连接下载服务'));
+    await tester.pumpAndSettle();
+    expect(find.text('无法连接下载服务'), findsOneWidget);
+    expect(controller.isConfirming.value, isFalse);
+    expect(tester.widget<MacButton>(button).onPressed, isNotNull);
+    expect(tester.widget<TextFormField>(input).controller!.text, magnet);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'successful capture clears authentication for the next site and advanced errors stay visible',
       (tester) async {

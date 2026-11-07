@@ -3,6 +3,7 @@ package bt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -24,12 +25,31 @@ import (
 )
 
 var (
-	cfg       *torrent.ClientConfig
-	client    *torrent.Client
-	lock      sync.Mutex
-	closeCtx  context.Context
-	closeFunc func()
+	cfg         *torrent.ClientConfig
+	client      *torrent.Client
+	lock        sync.Mutex
+	closeCtx    context.Context
+	closeFunc   func()
+	torrentRefs = make(map[*torrent.Torrent]*torrentRef)
 )
+
+const metadataTimeout = 45 * time.Second
+
+type metadataResolveError struct{ cause error }
+
+func (e *metadataResolveError) Error() string {
+	if errors.Is(e.cause, context.DeadlineExceeded) {
+		return "获取种子信息超时，请检查网络或稍后重试"
+	}
+	return "已取消获取种子信息"
+}
+
+func (e *metadataResolveError) Unwrap() error { return e.cause }
+
+type torrentRef struct {
+	count int
+	owned bool
+}
 
 type Fetcher struct {
 	ctl    *controller.Controller
@@ -44,6 +64,11 @@ type Fetcher struct {
 	torrentDropCtx  context.Context
 	torrentDropFunc func()
 	uploadDoneCh    chan any
+	opMu            sync.Mutex
+	closeOnce       sync.Once
+	heldTorrent     *torrent.Torrent // protected by opMu; references use the global lock
+	resolveMu       sync.Mutex
+	resolveCancel   context.CancelFunc
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -60,10 +85,8 @@ func (f *Fetcher) Setup(ctl *controller.Controller) {
 	return
 }
 
-func (f *Fetcher) initClient() (err error) {
-	lock.Lock()
-	defer lock.Unlock()
-
+// initClientLocked must be called under lock, together with AddTorrentSpec.
+func (f *Fetcher) initClientLocked() (err error) {
 	if client != nil {
 		return
 	}
@@ -85,30 +108,63 @@ func (f *Fetcher) initClient() (err error) {
 	}
 
 	closeCtx, closeFunc = context.WithCancel(context.Background())
-	go func() {
-		dnsResolver.Run(closeCtx)
-	}()
+	go dnsResolver.Run(closeCtx)
 	return
 }
 
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
+	return f.ResolveContext(context.Background(), req, opts)
+}
+
+func (f *Fetcher) ResolveContext(parent context.Context, req *base.Request, opts *base.Options) error {
+	ctx, cancel := context.WithTimeout(parent, metadataTimeout)
+	defer cancel()
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	f.setResolveCancel(cancel)
+	defer f.setResolveCancel(nil)
 	f.meta.Req = req
 	f.meta.Opts = opts
 	if f.meta.Opts == nil {
 		f.meta.Opts = &base.Options{}
 	}
-	if err := f.addTorrent(req, false); err != nil {
+	if err := f.addTorrent(ctx, req); err != nil {
 		return err
 	}
 	f.updateRes()
 	return nil
 }
 
-func (f *Fetcher) Start() (err error) {
+func (f *Fetcher) PrepareContext(ctx context.Context, req *base.Request, opts *base.Options) error {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if f.torrentReady.Load() {
+		return nil
+	}
+	f.meta.Req = req
+	f.meta.Opts = opts
+	return f.prepareLocked(ctx)
+}
+
+func (f *Fetcher) prepareLocked(parent context.Context) error {
+	if f.torrentDropCtx.Err() != nil {
+		return context.Canceled
+	}
 	if !f.torrentReady.Load() {
-		if err = f.addTorrent(f.meta.Req, false); err != nil {
-			return
-		}
+		ctx, cancel := context.WithTimeout(parent, metadataTimeout)
+		defer cancel()
+		f.setResolveCancel(cancel)
+		defer f.setResolveCancel(nil)
+		return f.addTorrent(ctx, f.meta.Req)
+	}
+	return nil
+}
+
+func (f *Fetcher) Start() (err error) {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if err = f.prepareLocked(context.Background()); err != nil {
+		return
 	}
 
 	files := f.torrent.Files()
@@ -131,31 +187,73 @@ func (f *Fetcher) Start() (err error) {
 		}
 	}
 	f.torrent.AllowDataDownload()
+	go f.doUpload(false)
 	return
 }
 
 func (f *Fetcher) Pause() (err error) {
-	f.torrent.DisallowDataDownload()
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if f.heldTorrent != nil {
+		f.torrent.DisallowDataDownload()
+	}
 	return
 }
 
+func (f *Fetcher) setResolveCancel(cancel context.CancelFunc) {
+	f.resolveMu.Lock()
+	f.resolveCancel = cancel
+	f.resolveMu.Unlock()
+}
+
+func (f *Fetcher) CancelResolve() {
+	f.resolveMu.Lock()
+	defer f.resolveMu.Unlock()
+	if f.resolveCancel != nil {
+		f.resolveCancel()
+	}
+}
+
 func (f *Fetcher) Close() (err error) {
-	f.safeDrop()
-	f.torrentDropFunc()
-	f.uploadDoneCh <- nil
-	if len(client.Torrents()) == 0 {
-		err = closeClient()
+	f.closeOnce.Do(func() {
+		if f.torrentDropFunc != nil {
+			f.torrentDropFunc()
+		}
+		if f.uploadDoneCh != nil {
+			close(f.uploadDoneCh)
+		}
+	})
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	return f.releaseTorrent()
+}
+
+// releaseTorrent only drops the last reference created by our shared client.
+// Another resolver or an existing task can hold the same Torrent pointer.
+func (f *Fetcher) releaseTorrent() error {
+	lock.Lock()
+	defer lock.Unlock()
+	if f.heldTorrent == nil {
+		return nil
+	}
+	releaseTorrentRefLocked(f.heldTorrent)
+	f.heldTorrent = nil
+	if client != nil && len(client.Torrents()) == 0 {
+		return closeClientLocked()
 	}
 	return nil
 }
 
-func (f *Fetcher) safeDrop() {
-	defer func() {
-		// ignore panic
-		_ = recover()
-	}()
-
-	f.torrent.Drop()
+func releaseTorrentRefLocked(t *torrent.Torrent) {
+	if ref := torrentRefs[t]; ref != nil {
+		ref.count--
+		if ref.count == 0 {
+			delete(torrentRefs, t)
+			if ref.owned {
+				t.Drop()
+			}
+		}
+	}
 }
 
 func (f *Fetcher) Meta() *fetcher.FetcherMeta {
@@ -310,7 +408,17 @@ func (f *Fetcher) updateRes() {
 }
 
 func (f *Fetcher) Upload() (err error) {
-	return f.addTorrent(f.meta.Req, true)
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
+	defer cancel()
+	f.setResolveCancel(cancel)
+	defer f.setResolveCancel(nil)
+	if err = f.addTorrent(ctx, f.meta.Req); err != nil {
+		return
+	}
+	go f.doUpload(true)
+	return nil
 }
 
 func (f *Fetcher) doUpload(fromUpload bool) {
@@ -390,11 +498,19 @@ func (f *Fetcher) WaitUpload() (err error) {
 	return nil
 }
 
-func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
-	if err = base.ParseReqExtra[bt.ReqExtra](req); err != nil {
+func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error) {
+	defer func() {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			err = &metadataResolveError{cause: err}
+		}
+	}()
+	if err = ctx.Err(); err != nil {
 		return
 	}
-	if err = f.initClient(); err != nil {
+	if f.torrentDropCtx.Err() != nil {
+		return context.Canceled
+	}
+	if err = base.ParseReqExtra[bt.ReqExtra](req); err != nil {
 		return
 	}
 	schema := util.ParseSchema(req.URL)
@@ -414,6 +530,7 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 			if err != nil {
 				return
 			}
+			defer reader.(io.Closer).Close()
 		} else if schema == "DATA" {
 			_, data := util.ParseDataUri(req.URL)
 			reader = bytes.NewBuffer(data)
@@ -446,16 +563,46 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 			return
 		}
 	}
+	// Serialize client creation, acquisition and final release. A timeout must
+	// never drop a torrent which another fetcher acquired in the meantime.
+	f.torrentReady.Store(false)
+	lock.Lock()
+	if err = f.initClientLocked(); err != nil {
+		lock.Unlock()
+		return
+	}
+	downloadPath := f.meta.Opts.Path
 	spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
 		ClientBaseDir: cfg.DataDir,
 		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
-			return f.meta.Opts.Path
+			return downloadPath
 		},
 	})
-	f.torrent, _, err = client.AddTorrentSpec(spec)
+	var added bool
+	f.torrent, added, err = client.AddTorrentSpec(spec)
 	if err != nil {
+		if len(client.Torrents()) == 0 {
+			_ = closeClientLocked()
+		}
+		lock.Unlock()
 		return
 	}
+	ref := torrentRefs[f.torrent]
+	if ref == nil {
+		ref = &torrentRef{owned: added}
+		torrentRefs[f.torrent] = ref
+	}
+	ref.count++
+	// Acquire first: a repeated resolve/upload of the same hash must retain
+	// its metadata even if this fetcher was previously the only owner.
+	releaseTorrentRefLocked(f.heldTorrent)
+	f.heldTorrent = f.torrent
+	lock.Unlock()
+	defer func() {
+		if err != nil {
+			_ = f.releaseTorrent()
+		}
+	}()
 
 	// Do not add external tracker to a private torrent.
 	if !privateTorrent {
@@ -482,10 +629,22 @@ func (f *Fetcher) addTorrent(req *base.Request, fromUpload bool) (err error) {
 			f.torrent.AddTrackers(announceList)
 		}
 	}
-	<-f.torrent.GotInfo()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-f.torrentDropCtx.Done():
+		return context.Canceled
+	case <-f.torrent.Closed():
+		return errors.New("torrent closed while resolving metadata")
+	case <-f.torrent.GotInfo():
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	if f.torrentDropCtx.Err() != nil {
+		return context.Canceled
+	}
 	f.torrentReady.Store(true)
-
-	go f.doUpload(fromUpload)
 	return
 }
 
@@ -513,18 +672,22 @@ type fetcherData struct {
 func closeClient() error {
 	lock.Lock()
 	defer lock.Unlock()
+	return closeClientLocked()
+}
 
+func closeClientLocked() error {
 	if closeFunc != nil {
 		closeFunc()
 	}
 	if client != nil {
 		errs := client.Close()
-		if len(errs) > 0 {
-			return errs[0]
-		}
 		client = nil
 		closeCtx = nil
 		closeFunc = nil
+		torrentRefs = make(map[*torrent.Torrent]*torrentRef)
+		if len(errs) > 0 {
+			return errs[0]
+		}
 	}
 	return nil
 }

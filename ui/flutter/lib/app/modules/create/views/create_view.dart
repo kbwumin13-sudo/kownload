@@ -46,8 +46,13 @@ class CreateView extends StatefulWidget {
   final NetdiskApi? netdiskApi;
   final NetdiskBrowserTool? netdiskBrowserTool;
   final Future<String> Function(CreateTask)? taskCreator;
+  final Future<ResolveResult> Function(ResolveTask)? taskResolver;
   const CreateView(
-      {super.key, this.netdiskApi, this.netdiskBrowserTool, this.taskCreator});
+      {super.key,
+      this.netdiskApi,
+      this.netdiskBrowserTool,
+      this.taskCreator,
+      this.taskResolver});
   Protocol? parseProtocol(String url) => _parseProtocol(url);
   @override
   State<CreateView> createState() => _CreateViewState();
@@ -1994,7 +1999,7 @@ class _CreateViewState extends State<CreateView> {
           }));
           _completeCreate();
         } else {
-          final rr = await resolve(ResolveTask(
+          final rr = await (widget.taskResolver ?? resolve)(ResolveTask(
             req: _requestForUrl(submitUrl),
             opts: opt,
           ));

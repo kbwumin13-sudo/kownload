@@ -297,7 +297,7 @@ func (f *Fetcher) parkOne() bool {
 	defer f.connMu.Unlock()
 	var victim *connection
 	for _, c := range f.connections {
-		if c.parked || c.shedding || c.Completed || c.State != connDownloading {
+		if c.parked || c.shedding || c.Completed || c.State != connDownloading || c.steal != nil {
 			continue
 		}
 		if victim == nil || c.Chunk.remain() > victim.Chunk.remain() {

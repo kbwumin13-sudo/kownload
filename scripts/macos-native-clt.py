@@ -13,7 +13,7 @@ import shutil
 import subprocess
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-PROJECT = REPO.parent
+PROJECT = pathlib.Path(os.environ.get('KOWNLOAD_PROJECT_DIR', REPO)).resolve()
 FLUTTER = PROJECT / 'toolchains/flutter'
 UI = REPO / 'ui/flutter'
 OUT = pathlib.Path(os.environ.get('GOPEED_NATIVE_OUT', PROJECT / 'artifacts/native-build')).resolve()

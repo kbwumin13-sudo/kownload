@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -42,7 +43,8 @@ type Task struct {
 	lock       *sync.Mutex
 	// Guarded by statusLock; invalidates queued start work after a pause.
 	runGeneration  uint64
-	pauseDone      chan struct{} // Guarded by statusLock; closes after pause persistence.
+	runCancel      context.CancelFunc // Guarded by statusLock; cancels preparation for this generation.
+	pauseDone      chan struct{}      // Guarded by statusLock; closes after pause persistence.
 	speedArr       []int64
 	uploadSpeedArr []int64
 	// In memory only, guarded by dataLock: a rate-limited task stays queued

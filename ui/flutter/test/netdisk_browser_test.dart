@@ -227,9 +227,12 @@ void main() {
           browser.profiles.last,
           const NetdiskSource(
               provider: 'quark', url: 'https://pan.quark.cn/s/a?pwd=abcd'));
-      expect(launches.last.$1,
-          '${browser.application}/Contents/MacOS/${browser.name}');
+      expect(launches.last.$1, '/usr/bin/open');
       expect(launches.last.$2, [
+        '-n',
+        '-a',
+        browser.application,
+        '--args',
         '--profile-directory=Profile 2',
         'https://pan.quark.cn/s/a?pwd=abcd',
       ]);
@@ -273,7 +276,7 @@ void main() {
   });
 
   test(
-      'direct launch preserves the selected profile, custom root and claim URL',
+      'system launch preserves the selected profile, custom root and claim URL',
       () async {
     final launches = <(String, List<String>)>[];
     final tool = NetdiskBrowserTool(
@@ -294,10 +297,15 @@ void main() {
           const NetdiskSource(
               provider: 'quark', url: 'https://pan.quark.cn/s/a?pwd=abcd#file'),
           requestId: 'request with space/&');
-      expect(launches.last.$1,
-          '/fake/Applications/$name.app/Contents/MacOS/$name');
-      expect(launches.last.$2.take(2),
-          ['--profile-directory=Default', '--user-data-dir=/custom root']);
+      expect(launches.last.$1, '/usr/bin/open');
+      expect(launches.last.$2.take(6), [
+        '-n',
+        '-a',
+        '/fake/Applications/$name.app',
+        '--args',
+        '--profile-directory=Default',
+        '--user-data-dir=/custom root'
+      ]);
       final url = Uri.parse(launches.last.$2.last);
       expect(url.host, 'pan.quark.cn');
       expect(url.queryParameters,
@@ -339,6 +347,16 @@ void main() {
       final app = '${root.path}/Google Chrome.app';
       final executable = File('$app/Contents/MacOS/Google Chrome');
       await executable.parent.create(recursive: true);
+      await File('$app/Contents/Info.plist').writeAsString('''
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Google Chrome</string>
+<key>CFBundleIdentifier</key><string>test.kownload.launch.${DateTime.now().microsecondsSinceEpoch}</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSBackgroundOnly</key><true/>
+</dict></plist>
+''');
       // A browser-shaped fixture records argv and stays running until cleanup.
       await executable.writeAsString(r'''#!/bin/sh
 printf '%s\n' "$$" "$@" > "$0.invocation"
@@ -388,4 +406,28 @@ exec /bin/sleep 30
       await root.delete(recursive: true);
     }
   });
+
+  test('default launcher reports an application missing at launch time',
+      () async {
+    final root = await Directory.systemTemp.createTemp('netdisk-invalid-app-');
+    try {
+      final app = '${root.path}/Google Chrome.app';
+      // The app can disappear after discovery (e.g. during a browser update).
+      final tool = NetdiskBrowserTool(home: root.path, isMacOS: true);
+      await expectLater(
+          tool.launch(
+              NetdiskBrowser(
+                  name: 'Google Chrome',
+                  application: app,
+                  localStatePath: '${root.path}/Local State',
+                  profiles: []),
+              const NetdiskBrowserProfile('Default', '默认'),
+              const NetdiskSource(
+                  provider: 'quark', url: 'https://pan.quark.cn/s/a')),
+          throwsA(isA<NetdiskException>()
+              .having((e) => e.reasonCode, 'reason', 'browser_launch_failed')));
+    } finally {
+      await root.delete(recursive: true);
+    }
+  }, skip: !Platform.isMacOS);
 }

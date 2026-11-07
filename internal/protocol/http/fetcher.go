@@ -122,6 +122,15 @@ type connection struct {
 	// parked for a running stream to take over, up to maxHandoffs times.
 	handoffs int
 
+	// steal is the tail this stream plans to take from a slower one. The tail
+	// stays with that stream, whose open response may already cover it, until
+	// this stream's own response for it is valid, so a refused request (such
+	// as one sent after the link expired) leaves no range without an owner.
+	// stealTarget marks a stream with a planned steal so no second helper
+	// picks it. Guarded by connMu, never persisted.
+	steal       *pendingSteal
+	stealTarget bool
+
 	// Speed tracking for work stealing decisions
 	speed             int64 // bytes per second
 	lastSpeedCheck    int64 // timestamp in nanoseconds
@@ -129,6 +138,13 @@ type connection struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// pendingSteal is a planned split of victim's range at begin; see
+// connection.steal.
+type pendingSteal struct {
+	victim     *connection
+	begin, end int64
 }
 
 // ============================================================================
@@ -711,7 +727,12 @@ func (f *Fetcher) adoptPrefetch() error {
 		f.setState(stateError)
 		return fmt.Errorf("copy prefetch data: %w", err)
 	}
+	f.connMu.Lock()
+	// A new adoption replaces the previous run's prefetch accounting, including
+	// the completion-only connection used when no range stream was needed.
+	f.resolveConn = nil
 	f.resolveDataPos.Store(prefetchedBytes)
+	f.connMu.Unlock()
 
 	// Also close resolve response if still open
 	f.resolveRespLock.Lock()
@@ -813,6 +834,46 @@ func (f *Fetcher) Start() error {
 	}
 }
 
+// Saved ranges are useful only while the bytes they count still exist locally.
+// A missing file would otherwise be recreated as zeros while completed ranges
+// are skipped; a truncated file can lose the same bytes without disappearing.
+func (f *Fetcher) resetUnavailableResumeData() error {
+	f.connMu.Lock()
+	defer f.connMu.Unlock()
+	if len(f.connections) == 0 && f.resolveConn == nil && f.resolveDataPos.Load() == 0 {
+		return nil
+	}
+	info, err := os.Stat(f.meta.SingleFilepath())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	requiredSize := f.resolveDataPos.Load()
+	if f.resolveConn != nil {
+		requiredSize = max(requiredSize, f.resolveConn.Downloaded)
+	}
+	for _, conn := range f.connections {
+		if conn.Chunk == nil {
+			continue
+		}
+		// The first range can begin after a prefetched prefix even before the
+		// range itself writes a byte. Restore retains that boundary in Chunk.
+		requiredSize = max(requiredSize, conn.Chunk.Begin+conn.Chunk.Downloaded)
+		if conn.Completed || conn.State == connCompleted {
+			requiredSize = max(requiredSize, conn.Chunk.End+1)
+		}
+	}
+	if err == nil && info.Size() >= requiredSize {
+		return nil
+	}
+	f.connections = nil
+	f.resolveConn = nil
+	f.resolveDataPos.Store(0)
+	f.rangeResumeValidator = ""
+	f.primaryReadyOnce = sync.Once{}
+	f.primaryReadyCh = make(chan struct{})
+	return nil
+}
+
 func (f *Fetcher) doStart() error {
 	// Wait for resolve to complete
 	<-f.resolvedCh
@@ -842,6 +903,11 @@ func (f *Fetcher) doStart() error {
 		return err
 	}
 	if err := f.upgradeRangeResume(); err != nil {
+		return err
+	}
+	// Keep the legacy prefix probe's fail-closed contract, then validate local
+	// range data before Touch can replace a missing target with a zero-filled file.
+	if err := f.resetUnavailableResumeData(); err != nil {
 		return err
 	}
 
@@ -1259,6 +1325,8 @@ func (f *Fetcher) runConnection(conn *connection) {
 	defer f.wg.Done()
 	defer f.streamExited()
 	defer f.releasePermit(conn)
+	// A steal still planned when the stream stops stays with its victim.
+	defer f.dropSteal(conn)
 
 	f.connMu.Lock()
 	conn.State = connConnecting
@@ -1316,6 +1384,30 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 
 		if errors.Is(err, context.Canceled) {
+			return
+		}
+
+		// A failed steal never took the tail: the slower stream still owns it,
+		// usually with a response that already covers it, so this stream only
+		// stops helping. A rate limit still holds for the whole source.
+		if f.dropSteal(conn) {
+			f.diag.failure(err)
+			if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
+				if _, _, giveUp := f.rateLimit(re, 1); giveUp {
+					// A wait too long to honour must end the task, as on any
+					// other stream, not leave it deferred for days.
+					f.connMu.Lock()
+					conn.lastErr = re
+					conn.failed = true
+					conn.State = connFailed
+					f.connMu.Unlock()
+					return
+				}
+			}
+			f.connMu.Lock()
+			conn.Completed = true
+			conn.State = connCompleted
+			f.connMu.Unlock()
 			return
 		}
 
@@ -1416,12 +1508,20 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	// Read chunk boundaries under lock to get a consistent snapshot
 	// This protects against concurrent modification by helpOtherConnection
 	f.connMu.Lock()
-	if f.meta.Res.Range && conn.Chunk.remain() <= 0 {
-		f.connMu.Unlock()
-		return nil
+	steal := conn.steal
+	var rangeStart, rangeEnd int64
+	if steal != nil {
+		// A planned steal asks for the tail first and takes it over only
+		// once the response for it is valid (commitSteal).
+		rangeStart, rangeEnd = steal.begin, steal.end
+	} else {
+		if f.meta.Res.Range && conn.Chunk.remain() <= 0 {
+			f.connMu.Unlock()
+			return nil
+		}
+		rangeStart = conn.Chunk.Begin + conn.Chunk.Downloaded
+		rangeEnd = conn.Chunk.End
 	}
-	rangeStart := conn.Chunk.Begin + conn.Chunk.Downloaded
-	rangeEnd := conn.Chunk.End
 	f.connMu.Unlock()
 
 	httpReq, err := f.buildRequest(f.requestContext(conn.ctx), f.meta.Req)
@@ -1498,6 +1598,11 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	member := f.member.Load()
 	if member != nil {
 		member.Succeeded()
+	}
+	if steal != nil && !f.commitSteal(conn) {
+		// The slower stream got there first; this stream's range is done and
+		// it may help elsewhere.
+		return nil
 	}
 
 	f.connMu.Lock()
@@ -1915,7 +2020,7 @@ func (f *Fetcher) helpOtherConnection(helper *connection) bool {
 	var slowestConn *connection
 	var maxRemainSeconds int64
 	for _, r := range f.connections {
-		if r == helper || r.Completed || r.State == connFailed || r.parked {
+		if r == helper || r.Completed || r.State == connFailed || r.parked || r.stealTarget {
 			continue
 		}
 
@@ -1944,12 +2049,53 @@ func (f *Fetcher) helpOtherConnection(helper *connection) bool {
 		return false
 	}
 
-	// Re-calculate the chunk range: steal half of the remaining work
-	helper.Chunk.Begin = slowestConn.Chunk.End - slowestConn.Chunk.remain()/2
-	helper.Chunk.End = slowestConn.Chunk.End
-	helper.Chunk.Downloaded = 0
+	// Plan to take the second half of the remaining work; the slower stream
+	// keeps it until this stream's request for it succeeds (commitSteal).
+	helper.steal = &pendingSteal{
+		victim: slowestConn,
+		begin:  slowestConn.Chunk.End - slowestConn.Chunk.remain()/2,
+		end:    slowestConn.Chunk.End,
+	}
 	helper.handoffs = 0
-	slowestConn.Chunk.End = helper.Chunk.Begin - 1
+	slowestConn.stealTarget = true
+	return true
+}
+
+// commitSteal hands conn the tail it planned to steal, now that its response
+// for it is valid. The slower stream keeps the tail when its range changed
+// meanwhile or it came within one read of the tail, since a read in flight
+// may already be writing there; conn then drops the steal.
+func (f *Fetcher) commitSteal(conn *connection) bool {
+	f.connMu.Lock()
+	defer f.connMu.Unlock()
+	s := conn.steal
+	if s == nil {
+		return true
+	}
+	conn.steal = nil
+	victim := s.victim
+	victim.stealTarget = false
+	inFlight := max(int64(f.tuning().readBuffer), transfer.SmallBuffer)
+	if victim.Chunk.End != s.end || victim.Chunk.Begin+victim.Chunk.Downloaded+inFlight > s.begin {
+		return false
+	}
+	victim.Chunk.End = s.begin - 1
+	conn.Chunk.Begin = s.begin
+	conn.Chunk.End = s.end
+	conn.Chunk.Downloaded = 0
+	return true
+}
+
+// dropSteal abandons conn's planned steal, if any, leaving the tail with the
+// stream it was planned from.
+func (f *Fetcher) dropSteal(conn *connection) bool {
+	f.connMu.Lock()
+	defer f.connMu.Unlock()
+	if conn.steal == nil {
+		return false
+	}
+	conn.steal.victim.stealTarget = false
+	conn.steal = nil
 	return true
 }
 
@@ -2061,8 +2207,9 @@ func (f *Fetcher) onDownloadComplete() {
 
 		if needsMoreData && !conn.Completed && conn.State != connCompleted {
 			// This connection has remaining work and isn't done
-			// Check if it failed with 403 (server limit) - these can be ignored if other connections completed the work
-			if conn.State == connFailed && conn.failed {
+			// Check if it failed with 403 (server limit) - these can be ignored if other connections completed the work.
+			// A single-stream download has no other connection to do so.
+			if f.meta.Res.Range && f.meta.Res.Size > 0 && conn.State == connFailed && conn.failed {
 				if re := extractRequestError(conn.lastErr); re != nil && re.Code == 403 {
 					// 403 is server connection limit, check if other connections will complete this chunk
 					continue
@@ -2088,12 +2235,18 @@ func (f *Fetcher) onDownloadComplete() {
 		// single-stream response, a range nobody took): missing bytes are an
 		// error, never a finished download.
 		finalErr = fmt.Errorf("download incomplete: %d of %d bytes", totalDownloaded, f.meta.Res.Size)
+		var refused *connection
 		for _, conn := range f.connections {
 			if conn.State == connFailed && conn.failed {
-				// Skip 403 errors (server connection limit) - these are expected when exceeding server's limit
+				// A 403 is usually a server connection limit that another stream
+				// works around; it explains the result only if nothing else does.
 				if re := extractRequestError(conn.lastErr); re != nil && re.Code == 403 {
+					if refused == nil {
+						refused = conn
+					}
 					continue
 				}
+				refused = nil
 				if re := extractRequestError(conn.lastErr); re != nil {
 					finalErr = fmt.Errorf("connection %d failed: retries=%d, status=%d", conn.ID, conn.retryTimes, re.Code)
 				} else if conn.lastErr != nil {
@@ -2103,6 +2256,11 @@ func (f *Fetcher) onDownloadComplete() {
 				}
 				break
 			}
+		}
+		// Only refusals account for the missing bytes. Name the status, which
+		// also lets a netdisk task refresh its link.
+		if refused != nil {
+			finalErr = fmt.Errorf("connection %d failed: status=403, request refused; the download link may have expired", refused.ID)
 		}
 	}
 	f.connMu.Unlock()

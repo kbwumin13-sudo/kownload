@@ -217,7 +217,8 @@ func (p *baiduProvider) List(ctx context.Context, c *APIClient, s *Session, src 
 			root = "1"
 			dir = ""
 		}
-		r, e = apiForm(ctx, c, "https://pan.baidu.com/share/wxlist?channel=weixin&version=2.2.2&clienttype=25&web=1", values(map[string]string{"shorturl": strings.TrimPrefix(src.ShareID, "1"), "pwd": src.Password, "root": root, "dir": dir, "num": "100", "order": "time", "page": strconv.Itoa(n)}), p.headers(s, src))
+		// wxlist expects the complete /s/ ID, including its leading 1.
+		r, e = apiForm(ctx, c, "https://pan.baidu.com/share/wxlist?channel=weixin&version=2.2.2&clienttype=25&web=1", values(map[string]string{"shorturl": src.ShareID, "pwd": src.Password, "root": root, "dir": dir, "num": "100", "order": "time", "page": strconv.Itoa(n)}), p.headers(s, src))
 	} else {
 		token := sessionValue(s, "access_token", "accessToken", "baidu_access_token")
 		if token == "" {

@@ -318,7 +318,7 @@ func (d *Downloader) Setup() error {
 							return
 						}
 						if task.Protocol == "netdisk" {
-							d.saveActiveNetdiskTask(task)
+							d.saveActiveTask(task)
 						} else {
 							d.saveTask(task)
 						}
@@ -514,14 +514,17 @@ func (d *Downloader) queueWaiting() bool {
 	return false
 }
 
-// Serialize late netdisk progress/start saves with deletion. A removed task
+// Serialize late progress/start/pause saves with deletion. A removed task
 // must never be recreated when asynchronous startup or polling finishes.
-func (d *Downloader) saveActiveNetdiskTask(task *Task) error {
+func (d *Downloader) saveActiveTask(task *Task) error {
 	lock := d.errorPersistenceLock(task)
 	lock.Lock()
 	defer lock.Unlock()
 	if d.getTask(task.ID) != task {
 		return nil
+	}
+	if task.fetcherManager == nil || task.fetcher == nil {
+		return d.storage.Put(bucketTask, task.ID, task.clone())
 	}
 	return d.saveTask(task)
 }
@@ -551,6 +554,17 @@ func (d *Downloader) saveTask(task *Task) error {
 }
 
 func (d *Downloader) Resolve(req *base.Request, opts *base.Options) (rr *ResolveResult, err error) {
+	return d.ResolveContext(context.Background(), req, opts)
+}
+
+// ResolveContext resolves metadata without tying the resulting task to ctx.
+func (d *Downloader) ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) (rr *ResolveResult, err error) {
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	if req == nil {
+		return nil, fmt.Errorf("invalid request")
+	}
 	rrId, err := gonanoid.New()
 	if err != nil {
 		return
@@ -568,24 +582,39 @@ func (d *Downloader) Resolve(req *base.Request, opts *base.Options) (rr *Resolve
 		}
 	}
 
-	fetcher, err := d.buildFetcher(req)
+	resolvedFetcher, err := d.buildFetcher(req)
 	if err != nil {
 		return
 	}
+	resolver, supportsContext := resolvedFetcher.(fetcher.ContextResolver)
+	defer func() {
+		// Legacy resolvers may only inspect a hash without owning the matching
+		// transfer. Closing those (notably ED2K) can remove an existing task.
+		if err != nil && supportsContext {
+			_ = resolvedFetcher.Close()
+		}
+	}()
 	initOpt, err := d.initOptions(opts)
 	if err != nil {
 		return
 	}
-	err = fetcher.Resolve(req, initOpt)
+	if supportsContext {
+		err = resolver.ResolveContext(ctx, req, initOpt)
+	} else {
+		err = resolvedFetcher.Resolve(req, initOpt)
+	}
 	if err != nil {
 		return
 	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
 	d.fetcherMapLock.Lock()
-	d.fetcherCache[rrId] = fetcher
+	d.fetcherCache[rrId] = resolvedFetcher
 	d.fetcherMapLock.Unlock()
 	rr = &ResolveResult{
 		ID:  rrId,
-		Res: fetcher.Meta().Res,
+		Res: resolvedFetcher.Meta().Res,
 	}
 	return
 }
@@ -785,7 +814,7 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		return ErrTaskNotFound
 	}
 
-	realContinueTasks := make([]*Task, 0)
+	pauseTasks := make([]*Task, 0)
 	func() {
 		d.lock.Lock()
 		defer d.lock.Unlock()
@@ -795,24 +824,42 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		needRunningCount := int(math.Min(float64(d.cfg.MaxRunning), float64(continueCount)))
 		needPauseCount := needRunningCount - remainRunningCount
 		if needPauseCount > 0 {
-			pausedCount := 0
 			for _, task := range d.tasks {
 				if task.getStatus() == base.DownloadStatusRunning {
-					if err = d.doPause(task); err != nil {
-						return
-					}
-					task.updateStatus(base.DownloadStatusWait)
-					d.enqueueLocked(task)
-					pausedCount++
+					pauseTasks = append(pauseTasks, task)
 				}
-				if pausedCount == needPauseCount {
+				if len(pauseTasks) == needPauseCount {
 					break
 				}
 			}
 		}
+	}()
 
+	// Startup and progress persistence can hold task.lock while checking task
+	// membership under d.lock. Never hold d.lock while joining their pause.
+	for _, task := range pauseTasks {
+		if err = d.doPause(task); err != nil {
+			return
+		}
+		d.lock.Lock()
+		if d.getTaskLocked(task.ID) == task && task.getStatus() == base.DownloadStatusPause {
+			task.updateStatus(base.DownloadStatusWait)
+			d.enqueueLocked(task)
+		}
+		d.lock.Unlock()
+	}
+
+	realContinueTasks := make([]*Task, 0)
+	func() {
+		d.lock.Lock()
+		defer d.lock.Unlock()
+		// A task may have been deleted or another slot claimed while Pause ran.
+		remainRunningCount := d.remainRunningCount()
 		for _, task := range continueTasks {
-			if len(realContinueTasks) < needRunningCount {
+			if d.getTaskLocked(task.ID) != task || task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
+				continue
+			}
+			if len(realContinueTasks) < remainRunningCount {
 				realContinueTasks = append(realContinueTasks, task)
 			} else {
 				task.updateStatus(base.DownloadStatusWait)
@@ -1130,7 +1177,11 @@ func (d *Downloader) GetTask(id string) *Task {
 func (d *Downloader) getTask(id string) *Task {
 	d.lock.Lock()
 	defer d.lock.Unlock()
+	return d.getTaskLocked(id)
+}
 
+// getTaskLocked requires d.lock and preserves task identity across async work.
+func (d *Downloader) getTaskLocked(id string) *Task {
 	for _, task := range d.tasks {
 		if task.ID == id {
 			return task
@@ -1619,6 +1670,8 @@ func (d *Downloader) doStart(task *Task) (err error) {
 func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var needCreate bool
 	var generation uint64
+	var runCtx context.Context
+	var runCancel context.CancelFunc
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
 		if onlyWaiting && task.getStatus() != base.DownloadStatusWait ||
 			task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
@@ -1636,6 +1689,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.dataLock.RUnlock()
 		task.runGeneration++
 		generation = task.runGeneration
+		if task.runCancel != nil {
+			task.runCancel()
+		}
+		runCtx, runCancel = context.WithCancel(context.Background())
+		task.runCancel = runCancel
 		task.updateStatus(base.DownloadStatusRunning)
 
 		return
@@ -1649,6 +1707,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	}
 
 	handler := func() error {
+		defer runCancel()
 		task.lock.Lock()
 		defer task.lock.Unlock()
 		task.statusLock.Lock()
@@ -1670,7 +1729,17 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		resolveMeta := util.DeepClone(task.Meta)
 		task.dataLock.RUnlock()
 		if resolveMeta.Res == nil {
-			if err := task.fetcher.Resolve(resolveMeta.Req, resolveMeta.Opts); err != nil {
+			var resolveErr error
+			if resolver, ok := task.fetcher.(fetcher.ContextResolver); ok {
+				resolveErr = resolver.ResolveContext(runCtx, resolveMeta.Req, resolveMeta.Opts)
+			} else {
+				resolveErr = task.fetcher.Resolve(resolveMeta.Req, resolveMeta.Opts)
+			}
+			if resolveErr != nil {
+				return resolveErr
+			}
+		} else if preparer, ok := task.fetcher.(fetcher.StartPreparer); ok {
+			if err := preparer.PrepareContext(runCtx, resolveMeta.Req, resolveMeta.Opts); err != nil {
 				return err
 			}
 		}
@@ -1745,7 +1814,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		}
 		var saveErr error
 		if task.Protocol == "netdisk" {
-			saveErr = d.saveActiveNetdiskTask(task)
+			saveErr = d.saveActiveTask(task)
 		} else {
 			saveErr = d.saveTask(task)
 		}
@@ -1781,6 +1850,9 @@ func (d *Downloader) doPause(task *Task) (err error) {
 		previousPauseDone = task.pauseDone
 		pauseDone = make(chan struct{})
 		task.pauseDone = pauseDone
+		if task.runCancel != nil {
+			task.runCancel()
+		}
 		task.updateStatus(base.DownloadStatusPause)
 		task.runGeneration++
 		task.timer.Pause()
@@ -1815,16 +1887,7 @@ func (d *Downloader) doPause(task *Task) (err error) {
 					return err
 				}
 			}
-			if task.fetcherManager != nil && task.fetcher != nil {
-				if err := d.saveTask(task); err != nil {
-					return err
-				}
-			} else {
-				if err := d.storage.Put(bucketTask, task.ID, task.clone()); err != nil {
-					return err
-				}
-			}
-			return nil
+			return d.saveActiveTask(task)
 		}()
 		// Callbacks may invoke Close themselves. Publish persistence completion
 		// and release operation locks before delivering the event.

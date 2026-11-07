@@ -44,17 +44,9 @@ class NetdiskBrowserTool {
       bool? isMacOS})
       : _readText = readText ?? BrowserProfileAccess.read,
         _appExists = appExists ?? ((p) => Directory(p).exists()),
-        _run = run ?? _startDetached,
+        _run = run ?? Process.run,
         _home = home ?? Platform.environment['HOME'] ?? '',
         _isMacOS = isMacOS ?? Platform.isMacOS;
-
-  static Future<ProcessResult> _startDetached(
-      String executable, List<String> arguments) async {
-    // Await startup only: a newly opened browser can stay alive indefinitely.
-    final process = await Process.start(executable, arguments,
-        mode: ProcessStartMode.detached);
-    return ProcessResult(process.pid, 0, '', '');
-  }
 
   static List<NetdiskBrowserProfile> parseProfiles(String localState) {
     final root = jsonDecode(localState);
@@ -169,12 +161,16 @@ class NetdiskBrowserTool {
             ...uri.queryParameters,
             'gopeed_request': requestId
           }).toString();
-    // Invoke Chromium directly so its existing instance receives the profile
-    // and URL too; LaunchServices may ignore --args for an already running app.
-    final executable = '${browser.application}/Contents/MacOS/${browser.name}';
+    // Let LaunchServices start the browser with its own application identity.
+    // -n delivers the profile and handoff URL even when Chromium is running;
+    // Chromium's singleton then forwards them to its existing instance.
     final ProcessResult result;
     try {
-      result = await _run(executable, [
+      result = await _run('/usr/bin/open', [
+        '-n',
+        '-a',
+        browser.application,
+        '--args',
         '--profile-directory=${profile.directory}',
         if (![
           '$_home/Library/Application Support/Google/Chrome/Local State',

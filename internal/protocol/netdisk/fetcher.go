@@ -287,12 +287,13 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 			f.ctl.GetConfig(v)
 		}
 	}
+	integrity := &baiduResponseDigest{enabled: e.Provider == "baidu" && !f.meta.Req.SkipVerifyCert, total: e.File.Size}
 	var child *httpfetch.Fetcher
 	if f.resume != nil && len(f.resume.Child) > 0 && f.resume.Resource != nil {
 		// Probe the refreshed file before using saved byte ranges.
 		probe := hm.Build().(*httpfetch.Fetcher)
 		probe.SetRequestPolicy(policy)
-		probe.SetResponsePolicy(rangeResponse(e.File.Size))
+		probe.SetResponsePolicy(integrity.policy)
 		probe.Setup(&httpCtl)
 		if err = probe.ResolveContext(ctx, hreq, f.meta.Opts.Clone()); err != nil {
 			return err
@@ -309,12 +310,12 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 		meta := &fetcher.FetcherMeta{Req: hreq, Res: clone(f.resume.Resource), Opts: f.meta.Opts.Clone()}
 		child = restore(meta, template).(*httpfetch.Fetcher)
 		child.SetRequestPolicy(policy)
-		child.SetResponsePolicy(rangeResponse(e.File.Size))
+		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
 	} else {
 		child = hm.Build().(*httpfetch.Fetcher)
 		child.SetRequestPolicy(policy)
-		child.SetResponsePolicy(rangeResponse(e.File.Size))
+		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
 		if err = child.ResolveContext(ctx, hreq, f.meta.Opts.Clone()); err != nil {
 			_ = child.Close()
@@ -325,6 +326,20 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 	if e.File.Size > 0 && res.Size > 0 && e.File.Size != res.Size {
 		_ = child.Close()
 		return errors.New("下载响应与网盘文件大小不符")
+	}
+	if e.Provider == "baidu" {
+		digest := integrity.value()
+		if f.resume != nil && f.resume.Resource != nil && digest != "" {
+			if previous, ok := storedResponseMD5(f.resume.Resource.Hash); ok && previous != digest {
+				_ = child.Close()
+				return errors.New("网盘文件内容已经变化，已保留现有文件，请重新下载")
+			}
+		}
+		// A restored resource must not retain a digest from an earlier response.
+		res.Hash = ""
+		if digest != "" {
+			res.Hash = "md5:" + digest
+		}
 	}
 	res.Name = ""
 	res.Files[0].Name = e.File.Name
@@ -497,10 +512,14 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 		return errors.New("下载文件不完整，临时网盘副本已保留")
 	}
 	digest := e.File.Hash
-	if e.Provider == "baidu" && len(digest) == 32 {
-		digest, err = cloud.BaiduMD5(digest)
-		if err != nil {
-			return err
+	if e.Provider == "baidu" {
+		if responseDigest, ok := storedResponseMD5(f.meta.Res.Hash); ok {
+			digest = "md5:" + responseDigest
+		} else if len(digest) == 32 {
+			digest, err = cloud.BaiduMD5(digest)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	parts := strings.SplitN(digest, ":", 2)
@@ -624,6 +643,12 @@ func safeError(err error) error {
 func rangeResponse(total int64) func(*http.Request, *http.Response) error {
 	return func(req *http.Request, res *http.Response) error {
 		if req.Header.Get("Range") == "" || res.StatusCode >= 400 {
+			return nil
+		}
+		// Client follows these responses and reapplies the scoped request policy.
+		// Validate the final byte response after redirects have been followed.
+		switch res.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
 			return nil
 		}
 		var begin, end, gotBegin, gotEnd, gotTotal int64

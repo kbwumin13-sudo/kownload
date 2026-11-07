@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"context"
 	"path"
 	"strings"
 
@@ -29,6 +30,19 @@ type Fetcher interface {
 	Progress() Progress
 	// Wait for the download to complete, this method will block until the download is done.
 	Wait() error
+}
+
+// ContextResolver optionally supports cancellation while resolving metadata.
+// The context does not control the subsequent download's lifetime.
+type ContextResolver interface {
+	ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) error
+}
+
+// StartPreparer restores protocol readiness for tasks whose metadata is already
+// persisted. Preparation runs without task status/data locks so CancelResolve
+// can interrupt it; Start can then perform its normal synchronous transition.
+type StartPreparer interface {
+	PrepareContext(ctx context.Context, req *base.Request, opts *base.Options) error
 }
 
 type Uploader interface {

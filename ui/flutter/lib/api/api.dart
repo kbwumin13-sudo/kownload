@@ -92,6 +92,18 @@ class TimeoutException implements Exception {
   final String message;
 
   TimeoutException(this.message);
+
+  @override
+  String toString() => message;
+}
+
+class ConnectionException implements Exception {
+  final String message;
+
+  ConnectionException(this.message);
+
+  @override
+  String toString() => message;
 }
 
 late _Client _client;
@@ -102,8 +114,9 @@ void init(String network, String address, String apiToken) {
 
 Future<T> _parse<T>(
   Future<Response> Function() fetch,
-  T Function(dynamic json)? fromJsonT,
-) async {
+  T Function(dynamic json)? fromJsonT, {
+  String timeoutMessage = '请求超时，请稍后重试',
+}) async {
   try {
     var resp = await fetch();
     fromJsonT ??= (json) => null as T;
@@ -114,11 +127,15 @@ Future<T> _parse<T>(
       throw Exception(result);
     }
   } on DioException catch (e) {
-    if (e.type == DioExceptionType.sendTimeout ||
-        e.type == DioExceptionType.receiveTimeout ||
-        e.type == DioExceptionType.connectionTimeout ||
+    if (e.type == DioExceptionType.connectionTimeout ||
         e.type == DioExceptionType.connectionError) {
-      throw TimeoutException("request timeout");
+      throw ConnectionException('无法连接下载服务，请检查服务是否运行及连接设置');
+    }
+    if (e.type == DioExceptionType.sendTimeout) {
+      throw TimeoutException('发送请求超时，请检查下载服务连接或稍后重试');
+    }
+    if (e.type == DioExceptionType.receiveTimeout) {
+      throw TimeoutException(timeoutMessage);
     }
     throw Exception(Result(code: 1000, msg: e.message));
   }
@@ -127,7 +144,11 @@ Future<T> _parse<T>(
 Future<ResolveResult> resolve(ResolveTask resolveTask) async {
   return _parse<ResolveResult>(
       () => _client.dio.post("api/v1/resolve", data: resolveTask),
-      (data) => ResolveResult.fromJson(data));
+      (data) => ResolveResult.fromJson(data),
+      timeoutMessage:
+          resolveTask.req?.url.toLowerCase().startsWith('magnet:') == true
+              ? '获取种子信息超时，请检查网络或稍后重试'
+              : '解析下载链接超时，请检查网络或稍后重试');
 }
 
 Future<String> createTask(CreateTask createTask) async {

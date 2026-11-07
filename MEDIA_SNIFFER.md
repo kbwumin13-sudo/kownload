@@ -23,7 +23,7 @@
 
 ## 验证与回退
 
-本地样本服务器：`python3 scripts/media-fixture-server.py --port 18794 --root ../artifacts/media-fixtures`。
+本地样本服务器：`python3 scripts/media-fixture-server.py --port 18794 --root artifacts/media-fixtures`。
 
 安装后验收：`python3 scripts/media-native-acceptance.py --output ../artifacts/media-installed-final-acceptance`。
 

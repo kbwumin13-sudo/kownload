@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-project_dir="$(dirname "$repo_dir")"
+project_dir="${KOWNLOAD_PROJECT_DIR:-$repo_dir}"
 flutter_bin="${FLUTTER_BIN:-$project_dir/toolchains/flutter/bin/flutter}"
 if [[ ! -x "$flutter_bin" ]]; then flutter_bin="$(command -v flutter)"; fi
 go_bin="${GO_BIN:-$project_dir/toolchains/go/bin/go}"
