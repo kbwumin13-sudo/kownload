@@ -24,6 +24,7 @@ import '../../../../api/model/request.dart';
 import '../../../../api/model/result.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../core/libgopeed_boot.dart';
+import '../../../../identity/app_identity.dart';
 import '../../../../database/database.dart';
 import '../../../../database/entity.dart';
 import '../../../../i18n/message.dart';
@@ -218,7 +219,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
     // Priority 1: gopeed: URL scheme hidden parameter
     // Priority 2: Command line --hidden flag
     bool shouldHide = hiddenFromArgs;
-    if (initialLink?.scheme == "gopeed") {
+    if (initialLink != null &&
+        [AppIdentity.scheme, AppIdentity.legacyScheme]
+            .contains(initialLink.scheme)) {
       shouldHide = initialLink!.queryParameters["hidden"] == "true";
     }
 
@@ -472,7 +475,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
   }
 
   Future<void> _handleDeepLink(Uri uri) async {
-    if (uri.scheme == "gopeed") {
+    if ([AppIdentity.scheme, AppIdentity.legacyScheme].contains(uri.scheme)) {
       // gopeed:///create?params=eyJyZXEiOnsidXJsIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9maWxlLnR4dCJ9fQ==
       if (uri.path == "/create") {
         final params = uri.queryParameters["params"];
@@ -544,10 +547,17 @@ class AppController extends GetxController with WindowListener, TrayListener {
     } else {
       _defaultStartConfig!.network = "unix";
       _defaultStartConfig!.address = Util.isIsolatedPreview || Util.isMacos()
-          ? path.join(Util.getStorageDir(), unixSocketPath)
+          ? path.join(Util.getStorageDir(),
+              Util.isMacos() ? AppIdentity.apiSocket : unixSocketPath)
           : "${(await getTemporaryDirectory()).path}/$unixSocketPath";
     }
     _defaultStartConfig!.apiToken = '';
+    if (Util.isMacos()) {
+      await File(_defaultStartConfig!.address).parent.create(recursive: true);
+      if (utf8.encode(_defaultStartConfig!.address).length >= 104) {
+        throw StateError('IPC 路径过长，请使用更短的数据目录');
+      }
+    }
     return _defaultStartConfig!;
   }
 
@@ -558,10 +568,21 @@ class AppController extends GetxController with WindowListener, TrayListener {
           network: defaultCfg.network,
           address: defaultCfg.address,
           apiToken: defaultCfg.apiToken),
-      saved: Database.instance.getStartConfig(),
+      saved: Util.isIsolatedPreview ? null : Database.instance.getStartConfig(),
       legacyUnixAddress: Util.isMacos()
           ? path.join((await getTemporaryDirectory()).path, unixSocketPath)
           : defaultCfg.address,
+      additionalLegacyUnixAddresses: Util.isMacos()
+          ? [
+              path.join(Util.getStorageDir(), unixSocketPath),
+              path.join(
+                  Platform.environment['HOME']!,
+                  'Library',
+                  'Application Support',
+                  AppIdentity.legacyBundleId,
+                  unixSocketPath),
+            ]
+          : const [],
     );
     startConfig.value.network = saveCfg.network;
     startConfig.value.address = saveCfg.address;

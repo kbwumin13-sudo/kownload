@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'asset_installer.dart';
+import '../identity/app_identity.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -87,7 +88,10 @@ class Util {
           storageDir = (await getApplicationSupportDirectory()).path;
         }
       } else {
-        storageDir = (await getApplicationSupportDirectory()).path;
+        storageDir = Util.isMacos()
+            ? path.join(Platform.environment['HOME']!, 'Library',
+                'Application Support', AppIdentity.bundleId)
+            : (await getApplicationSupportDirectory()).path;
       }
     }
     _storageDir = storageDir;
@@ -177,7 +181,8 @@ class Util {
   }
 
   static Future<String> homePathJoin(String fileName) async {
-    if (isIsolatedPreview) return path.join(getStorageDir(), fileName);
+    if (isIsolatedPreview || isMacos())
+      return path.join(getStorageDir(), fileName);
     if (Util.isWindows()) {
       final execPath = Platform.resolvedExecutable;
       final execDir = path.dirname(execPath);

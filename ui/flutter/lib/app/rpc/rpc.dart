@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:dart_ipc/dart_ipc.dart';
 
 import '../../util/util.dart';
+import '../../identity/app_identity.dart';
 
 /// RPC context class that contains request information and response methods
 class RpcContext {
@@ -15,7 +16,8 @@ class RpcContext {
 
   /// Read and parse JSON request body
   Future<Map<String, dynamic>> readJSON() async {
-    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
+    _bodyCache ??=
+        await request.cast<List<int>>().transform(utf8.decoder).join();
 
     if (_bodyCache!.isEmpty) {
       return {};
@@ -25,7 +27,8 @@ class RpcContext {
   }
 
   Future<String> readText() async {
-    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
+    _bodyCache ??=
+        await request.cast<List<int>>().transform(utf8.decoder).join();
 
     return _bodyCache ?? '';
   }
@@ -71,7 +74,12 @@ Future<void> startRpcServer([Map<String, RouteHandler>? routes]) async {
   if (Util.isWindows()) {
     path = r'\\.\pipe\gopeed_host';
   } else {
-    path = await Util.homePathJoin("gopeed_host.sock");
+    path = await Util.homePathJoin(
+        Util.isMacos() ? AppIdentity.hostSocket : "gopeed_host.sock");
+    await File(path).parent.create(recursive: true);
+    if (Util.isMacos() && utf8.encode(path).length >= 104) {
+      throw StateError('IPC 路径过长，请使用更短的数据目录');
+    }
     // try to delete existing socket file
     final socketFile = File(path);
     if (await socketFile.exists()) {

@@ -40,8 +40,14 @@ def main():
     p.add_argument('--ref', default='HEAD')
     p.add_argument('--output', type=pathlib.Path, required=True)
     p.add_argument('--preview', action='store_true')
+    p.add_argument('--migration-source', type=pathlib.Path)
     p.add_argument('--work-dir', type=pathlib.Path)
     a = p.parse_args()
+    if a.migration_source and not a.preview:
+        p.error('--migration-source is available only for isolated previews')
+    if a.migration_source and (not a.migration_source.is_dir() or
+        not a.migration_source.resolve().is_relative_to(pathlib.Path('/private/tmp'))):
+        p.error('--migration-source must be a private clone under /private/tmp')
     # A clean tree makes the running build control and archived inputs reviewable.
     if output('git', 'status', '--porcelain', cwd=REPO):
         raise RuntimeError('Commit changes before packaging a source revision')
@@ -60,6 +66,8 @@ def main():
     with tarfile.open(fileobj=io.BytesIO(archive)) as t:
         t.extractall(source, filter='data')
     config = json.loads((source / 'config/release.json').read_text())
+    identity = json.loads((source / 'config/identity.json').read_text())
+    run('python3', source / 'scripts/generate-identity.py', '--check')
     version = config['appVersion']
     revision = config['revision']
     build = config['buildNumber']
@@ -87,15 +95,18 @@ def main():
     env['PATH'] = str(pathlib.Path(go).parent) + os.pathsep + env.get('PATH', '')
     ui = source / 'ui/flutter'
     core = work / 'libgopeed.dylib'
-    host = work / 'host'
+    host = work / identity['hostExecutable']
+    migration = work / identity['migrationExecutable']
     run(go, 'build', '-trimpath', '-tags', 'nosqlite', '-buildmode=c-shared',
         '-ldflags=-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=' + release,
         '-o', core, './bind/desktop', cwd=source, env=env)
-    run(go, 'build', '-trimpath', '-ldflags=-w -s', '-o', host, './cmd/host', cwd=source, env=env)
+    host_flags = '-w -s' + (' -X main.previewBuild=true' if a.preview else '')
+    run(go, 'build', '-trimpath', '-ldflags=' + host_flags, '-o', host, './cmd/native-host', cwd=source, env=env)
+    run(go, 'build', '-trimpath', '-ldflags=-w -s', '-o', migration, './cmd/identity-migrate', cwd=source, env=env)
     (ui / 'macos/Frameworks').mkdir(parents=True, exist_ok=True)
     (ui / 'assets/exec').mkdir(parents=True, exist_ok=True)
     shutil.copy2(core, ui / 'macos/Frameworks/libgopeed.dylib')
-    shutil.copy2(host, ui / 'assets/exec/host')
+    shutil.copy2(host, ui / ('assets/exec/' + identity['hostExecutable']))
     # Map compiler source/debug paths instead of mutating emitted string tables.
     home = str(pathlib.Path.home())
     xcconfig = work / 'privacy.xcconfig'
@@ -114,24 +125,30 @@ def main():
     preview_storage = work / 'preview-data'
     if a.preview:
         flags.append('--dart-define=KOWNLOAD_PREVIEW_STORAGE=' + str(preview_storage))
+        if a.migration_source:
+            flags.append('--dart-define=KOWNLOAD_MIGRATION_SOURCE=' + str(a.migration_source.resolve()))
+        with xcconfig.open('a') as f:
+            f.write('PRODUCT_BUNDLE_IDENTIFIER = ' + identity['previewBundleId'] + '\n')
     run(flutter_bin, 'build', 'macos', *flags, cwd=ui, env=env)
     stage = work / 'dmg'
     stage.mkdir()
     app = stage / 'kownload.app'
-    shutil.copytree(ui / 'build/macos/Build/Products/Release/Gopeed.app', app, symlinks=True)
+    shutil.copytree(ui / ('build/macos/Build/Products/Release/' + identity['productName'] + '.app'), app, symlinks=True)
+    (app / 'Contents/Helpers').mkdir(exist_ok=True)
+    shutil.copy2(migration, app / ('Contents/Helpers/' + identity['migrationExecutable']))
     info_path = app / 'Contents/Info.plist'
     info = plistlib.loads(info_path.read_bytes())
     if a.preview:
-        info['CFBundleIdentifier'] = 'com.gopeed.gopeed.independence-preview'
-        info['CFBundleDisplayName'] = 'kownload 阶段一预览'
-        info['CFBundleName'] = 'kownload 阶段一预览'
+        info['CFBundleIdentifier'] = identity['previewBundleId']
+        info['CFBundleDisplayName'] = 'kownload 独立身份预览'
+        info['CFBundleName'] = 'kownload 独立身份预览'
         for key in ['CFBundleURLTypes', 'CFBundleDocumentTypes', 'UTExportedTypeDeclarations']:
             info.pop(key, None)
     info_path.write_bytes(plistlib.dumps(info))
     resources = app / 'Contents/Resources'
     legal = resources / 'legal'
     notices = load('kownload_notices', source / 'scripts/collect-macos-notices.py')
-    modules = notices.collect(source, legal, [core, host], go, flutter)
+    modules = notices.collect(source, legal, [core, host, migration], go, flutter)
     helper = resources / 'browser-media-extension'
     helper.mkdir()
     for file in (source / 'browser-media-extension').iterdir():
@@ -161,7 +178,7 @@ def main():
                 'goVersion': go_version, 'flutterVersion': config['flutterVersion'],
                 'xcodeVersion': xcode_version,
                 'flutterRevision': flutter_meta['frameworkRevision'], 'helperVersion': helper_version,
-                'projectComponentsFromSourceCommit': ['Go engine', 'Native host', 'Flutter app'],
+                'projectComponentsFromSourceCommit': ['Go engine', 'Native host', 'Identity migration', 'Flutter app'],
                 'nativePlugins': 'rebuilt from locked third-party source',
                 'automaticInstaller': False}
     (resources / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')

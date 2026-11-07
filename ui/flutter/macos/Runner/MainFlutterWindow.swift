@@ -84,6 +84,7 @@ class MainFlutterWindow: NSWindow {
   private var appearanceChannel: FlutterMethodChannel?
   private var panelChannel: FlutterMethodChannel?
   private var browserProfileChannel: FlutterMethodChannel?
+  private var identityChannel: FlutterMethodChannel?
   private var observers: [(NotificationCenter, NSObjectProtocol)] = []
   private let hotKey = PanelHotKey()
   // Also used by the native harness without starting a Flutter engine.
@@ -153,6 +154,20 @@ class MainFlutterWindow: NSWindow {
     orderOut(nil)
 
     let messenger = flutter.engine.binaryMessenger
+    let identity = FlutterMethodChannel(name: "kownload/identity", binaryMessenger: messenger)
+    identityChannel = identity
+    identity.setMethodCallHandler { call, result in
+      switch call.method {
+      case "legacyRunning":
+        result(!NSRunningApplication.runningApplications(withBundleIdentifier: AppIdentity.legacyBundleId).isEmpty)
+      case "migratePreferences":
+        // Preview must never import from a live user's preference domain.
+        guard Bundle.main.bundleIdentifier == AppIdentity.bundleId else { result(nil); return }
+        IdentityPreferences.importAllowedKeys()
+        result(nil)
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
     let panel = FlutterMethodChannel(name: "gopeed/macos_panel", binaryMessenger: messenger)
     panelChannel = panel
     sendPanelEvent = { [weak panel] method, arguments in panel?.invokeMethod(method, arguments: arguments) }

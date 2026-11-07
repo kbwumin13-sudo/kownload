@@ -5,10 +5,14 @@ import 'package:path/path.dart' as path;
 import 'package:win32_registry/win32_registry.dart';
 
 import '../../util.dart';
+import '../../../identity/app_identity.dart';
+import '../../../identity/native_manifests.dart';
 import '../../win32.dart';
 import '../browser_extension_host.dart';
 
-final _hostExecName = 'host${Platform.isWindows ? '.exe' : ''}';
+final _hostExecName = Platform.isMacOS
+    ? AppIdentity.hostExecutable
+    : 'host${Platform.isWindows ? '.exe' : ''}';
 
 const _hostName = 'com.gopeed.gopeed';
 const _chromeExtensionId = 'mijpgljlfcapndmchhjffkpckknofcnd';
@@ -89,6 +93,24 @@ Future<bool> doCheckManifestInstalled(Browser browser) async {
 
 /// Install browser extension manifest
 Future<void> doInstallManifest(Browser browser) async {
+  if (Platform.isMacOS) {
+    // Candidates may generate fixtures only. A future confirmed installer may
+    // use writeNativeManifests with explicit production destinations.
+    final directory = Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR'];
+    if (directory == null ||
+        !(path.isWithin('/tmp', path.canonicalize(directory)) ||
+            path.isWithin(
+                Directory.systemTemp.path, path.canonicalize(directory)))) {
+      throw StateError('请选择临时清单目录；正式连接在确认安装时切换');
+    }
+    await writeNativeManifests(
+        directory: directory,
+        executable: await Util.homePathJoin(_hostExecName),
+        backupDirectory: path.join(
+            Util.getStorageDir(), 'native-manifest-backups', browser.name),
+        firefox: browser == Browser.firefox);
+    return;
+  }
   if (await checkBrowserInstalled(browser) == false) return;
   if (await checkManifestInstalled(browser)) return;
 
