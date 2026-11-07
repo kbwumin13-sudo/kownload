@@ -950,7 +950,7 @@ func (f *Fetcher) doStart() error {
 	// For range-supported resources, stop prefetch and copy data
 	// For non-range resources, the response will be used directly
 	f.drainPrefetch = false
-	if f.meta.Res.Range {
+	if f.usesRanges() {
 		if len(f.connections) == 0 && f.meta.Res.Size > 0 && f.meta.Res.Size < 2*stealMinChunkSize && f.prefetchRunning() {
 			// A file too small to split finishes on its first response; the
 			// download loop waits for it so that response's connection stays
@@ -1060,13 +1060,13 @@ func (f *Fetcher) downloadLoop() {
 		if f.getState() == stateDone {
 			return
 		}
-		if !f.meta.Res.Range || f.meta.Res.Size == 0 {
+		if !f.usesRanges() || f.meta.Res.Size == 0 {
 			return
 		}
 	} else {
 		// Resume: restart existing connections
 		f.resumeConnections()
-		if !f.meta.Res.Range {
+		if !f.usesRanges() {
 			// Resumed single streams can wait in a source cooldown too. Keep
 			// listening for queued work while they wait, without adding ranges.
 			f.superviseStreams(false)
@@ -1130,7 +1130,7 @@ func (f *Fetcher) superviseStreams(expand bool) {
 			queued = f.queueChanged()
 			f.deferIfCooling()
 		case <-governor:
-			if f.meta.Res.Range {
+			if f.usesRanges() {
 				f.govern()
 			}
 		case <-f.streamExit:
@@ -1140,7 +1140,7 @@ func (f *Fetcher) superviseStreams(expand bool) {
 
 func (f *Fetcher) startResolveDownload() {
 	// If no range support or size unknown, just use single connection with resolve response
-	if !f.meta.Res.Range || f.meta.Res.Size == 0 {
+	if !f.usesRanges() || f.meta.Res.Size == 0 {
 		// Create a single connection for the entire file
 		conn := &connection{
 			ID:    0,
@@ -1367,7 +1367,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 			f.connMu.Lock()
 			shedding := conn.shedding
 			f.connMu.Unlock()
-			if shedding || !f.meta.Res.Range || f.yieldStream() || !f.helpOtherConnection(conn) {
+			if shedding || !f.usesRanges() || f.yieldStream() || !f.helpOtherConnection(conn) {
 				f.connMu.Lock()
 				conn.Completed = true
 				conn.State = connCompleted
@@ -1418,6 +1418,11 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 		f.diag.failure(err)
 
+		if isLocalFileError(err) {
+			f.failSingleStream(conn, err)
+			return
+		}
+
 		// 429/503 pause the whole source: no stream retries early, and a long
 		// server-requested wait releases the task's running slot.
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
@@ -1458,7 +1463,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 				// of this range for a stream that already holds a connection,
 				// instead of orphaning it; a range refused again and again is a
 				// real failure.
-				if f.meta.Res.Range && conn.Chunk.remain() > 0 && conn.handoffs < maxHandoffs {
+				if f.usesRanges() && conn.Chunk.remain() > 0 && conn.handoffs < maxHandoffs {
 					conn.handoffs++
 					conn.parked = true
 				}
@@ -1515,7 +1520,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		// once the response for it is valid (commitSteal).
 		rangeStart, rangeEnd = steal.begin, steal.end
 	} else {
-		if f.meta.Res.Range && conn.Chunk.remain() <= 0 {
+		if f.usesRanges() && conn.Chunk.remain() <= 0 {
 			f.connMu.Unlock()
 			return nil
 		}
@@ -1529,7 +1534,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		return err
 	}
 
-	if f.meta.Res.Range {
+	if f.usesRanges() {
 		httpReq.Header.Set(base.HttpHeaderRange,
 			fmt.Sprintf(base.HttpHeaderRangeFormat, rangeStart, rangeEnd))
 		if f.rangeResumeValidator != "" {
@@ -1573,7 +1578,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		}
 	}
 	defer resp.Body.Close()
-	if f.meta.Res.Range {
+	if f.usesRanges() {
 		begin, end, total, valid := parseContentRange(resp.Header.Get(base.HttpHeaderContentRange))
 		if resp.StatusCode != http.StatusPartialContent || !valid ||
 			begin != rangeStart || end < rangeEnd || total != f.meta.Res.Size ||
@@ -1588,6 +1593,12 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 				resp.Uncompressed || (encoding != "" && !strings.EqualFold(encoding, "identity")) {
 				return fmt.Errorf("%w: saved representation changed", errInvalidRangeResponse)
 			}
+		}
+	}
+
+	if !f.usesRanges() {
+		if err := f.resetSingleStreamAttempt(conn); err != nil {
+			return err
 		}
 	}
 
@@ -1633,7 +1644,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 			// Lock to safely read chunk state and calculate write parameters
 			// This protects against concurrent chunk splitting by helpOtherConnection
 			f.connMu.Lock()
-			if f.meta.Res.Range {
+			if f.usesRanges() {
 				// Check current chunk boundaries - this respects any concurrent chunk splitting
 				remain := conn.Chunk.remain()
 				if remain <= 0 {
@@ -1649,15 +1660,9 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 			writeOffset = conn.Chunk.Begin + conn.Chunk.Downloaded
 			f.connMu.Unlock()
 
-			f.fileMu.RLock()
-			if f.file != nil {
-				_, writeErr := f.file.WriteAt(buf[:n], writeOffset)
-				if writeErr != nil {
-					f.fileMu.RUnlock()
-					return writeErr
-				}
+			if err := f.writeDownloadAt(buf[:n], writeOffset); err != nil {
+				return err
 			}
-			f.fileMu.RUnlock()
 
 			// Lock again to update Downloaded atomically with the read above
 			f.connMu.Lock()
@@ -1691,14 +1696,14 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		if err != nil {
 			if err == io.EOF {
 				f.connMu.Lock()
-				incomplete := f.meta.Res.Range && conn.Chunk.remain() > 0
+				incomplete := f.usesRanges() && conn.Chunk.remain() > 0
 				f.connMu.Unlock()
 				if incomplete {
 					return fmt.Errorf("%w: short range body", errInvalidRangeResponse)
 				}
 				return nil
 			}
-			if f.meta.Res.Range && errors.Is(err, io.ErrUnexpectedEOF) {
+			if f.usesRanges() && errors.Is(err, io.ErrUnexpectedEOF) {
 				return fmt.Errorf("%w: truncated range body", errInvalidRangeResponse)
 			}
 			return err
@@ -1739,6 +1744,10 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 	}
 
 	defer resp.Body.Close()
+	if err := f.resetSingleStreamAttempt(conn); err != nil {
+		f.failSingleStream(conn, err)
+		return
+	}
 
 	f.connMu.Lock()
 	conn.State = connDownloading
@@ -1762,22 +1771,10 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 
 		n, err := reader.Read(buf)
 		if n > 0 {
-			f.fileMu.RLock()
-			if f.file != nil {
-				_, writeErr := f.file.WriteAt(buf[:n], conn.Chunk.Downloaded)
-				if writeErr != nil {
-					f.fileMu.RUnlock()
-					f.connMu.Lock()
-					conn.State = connFailed
-					conn.failed = true
-					f.connMu.Unlock()
-					if f.slowStart != nil {
-						f.slowStart.onConnectFailed()
-					}
-					return
-				}
+			if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded); err != nil {
+				f.failSingleStream(conn, err)
+				return
 			}
-			f.fileMu.RUnlock()
 
 			f.connMu.Lock()
 			conn.Chunk.Downloaded += int64(n)
@@ -1797,10 +1794,7 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 				return
 			}
 			f.diag.failure(err)
-			// Reading from resolve response failed: treat as transient (do not count as fail)
-			f.connMu.Lock()
-			conn.State = connFailed
-			f.connMu.Unlock()
+			f.failSingleStream(conn, err)
 			return
 		}
 	}
@@ -1859,6 +1853,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				member.Succeeded()
 			}
 
+			if err := f.resetSingleStreamAttempt(conn); err != nil {
+				return err
+			}
+
 			f.connMu.Lock()
 			conn.State = connDownloading
 			conn.failed = false
@@ -1879,15 +1877,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 				n, err := reader.Read(buf)
 				if n > 0 {
-					f.fileMu.RLock()
-					if f.file != nil {
-						_, writeErr := f.file.WriteAt(buf[:n], conn.Chunk.Downloaded)
-						if writeErr != nil {
-							f.fileMu.RUnlock()
-							return writeErr
-						}
+					if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded); err != nil {
+						return err
 					}
-					f.fileMu.RUnlock()
 
 					f.connMu.Lock()
 					conn.Chunk.Downloaded += int64(n)
@@ -1925,6 +1917,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			conn.lastErr = err
 		}
 		f.diag.failure(err)
+		if isLocalFileError(err) {
+			f.failSingleStream(conn, err)
+			return
+		}
 
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
 			rateLimits++
@@ -2100,7 +2096,7 @@ func (f *Fetcher) dropSteal(conn *connection) bool {
 }
 
 func (f *Fetcher) resetConnectionForRestart(conn *connection) {
-	if f.meta.Res.Range {
+	if f.usesRanges() {
 		return
 	}
 
@@ -2158,7 +2154,7 @@ func (f *Fetcher) resumeConnections() {
 	f.connMu.Unlock()
 
 	// Start connections outside the lock
-	if f.meta.Res.Range && f.rangeResumeValidator != "" {
+	if f.usesRanges() && f.rangeResumeValidator != "" {
 		f.slowStart.commitBatch(len(toResume))
 		if len(toResume) == 0 {
 			f.slowStart.onConnectFailed()
@@ -2197,7 +2193,7 @@ func (f *Fetcher) onDownloadComplete() {
 	allChunksComplete := true
 	for _, conn := range f.connections {
 		needsMoreData := false
-		if f.meta.Res.Range {
+		if f.usesRanges() {
 			needsMoreData = conn.Chunk != nil && conn.Chunk.remain() > 0
 		} else if f.meta.Res.Size > 0 {
 			needsMoreData = conn.Downloaded < f.meta.Res.Size
@@ -2209,7 +2205,7 @@ func (f *Fetcher) onDownloadComplete() {
 			// This connection has remaining work and isn't done
 			// Check if it failed with 403 (server limit) - these can be ignored if other connections completed the work.
 			// A single-stream download has no other connection to do so.
-			if f.meta.Res.Range && f.meta.Res.Size > 0 && conn.State == connFailed && conn.failed {
+			if f.usesRanges() && f.meta.Res.Size > 0 && conn.State == connFailed && conn.failed {
 				if re := extractRequestError(conn.lastErr); re != nil && re.Code == 403 {
 					// 403 is server connection limit, check if other connections will complete this chunk
 					continue
@@ -2221,7 +2217,7 @@ func (f *Fetcher) onDownloadComplete() {
 	}
 
 	// If total downloaded matches file size, consider it a success regardless of connection failures
-	downloadComplete := f.meta.Res.Size > 0 && totalDownloaded >= f.meta.Res.Size
+	downloadComplete := f.meta.Res.Size > 0 && totalDownloaded == f.meta.Res.Size
 	// With a known size every byte must be accounted for; ranges of failed
 	// connections are never taken over, so they cannot count as finished.
 	if f.meta.Res.Size > 0 && !downloadComplete {
@@ -2299,7 +2295,7 @@ func (f *Fetcher) checkCompletion() bool {
 		totalDownloaded += conn.Downloaded
 	}
 
-	if f.meta.Res.Size > 0 && totalDownloaded >= f.meta.Res.Size {
+	if f.meta.Res.Size > 0 && totalDownloaded == f.meta.Res.Size {
 		// Don't start a new goroutine - let the caller handle completion
 		return true
 	}
