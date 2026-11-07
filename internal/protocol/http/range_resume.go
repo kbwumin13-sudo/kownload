@@ -261,7 +261,8 @@ func (f *Fetcher) readOverlapSamples() ([]overlapSample, error) {
 }
 
 // verifySavedOverlaps confirms a checkpoint without a validator or trusted
-// digest before any stream writes next to its saved bytes. It runs in the
+// digest, or one whose link changed in more than its signatures, before any
+// stream writes next to its saved bytes. It runs in the
 // download loop, so no task lock waits for the network. Only a changed source
 // (see compareRangeOverlap) fails the task as an unsafe resume, keeping the
 // file. A rate limit follows the source cooldown, Retry-After and deferral
@@ -279,6 +280,10 @@ func (f *Fetcher) verifySavedOverlaps() bool {
 	for {
 		err := f.compareOverlapSamples(samples)
 		if err == nil {
+			// The saved bytes match this link; resumes from it need no check.
+			f.identityMu.Lock()
+			f.identity.QueryKey = requestQueryKey(f.meta.Req)
+			f.identityMu.Unlock()
 			f.deferrals.Store(0)
 			f.diag.setRange(rangeResumed, "仅按重叠比对确认")
 			return true
@@ -322,18 +327,20 @@ func (f *Fetcher) verifySavedOverlaps() bool {
 }
 
 // compareOverlapSamples holds one stream permit of the source budget and
-// sends one request per sample, each with its own timeout.
+// sends one request per sample, each with its own timeout. Saved validators
+// must match too.
 func (f *Fetcher) compareOverlapSamples(samples []overlapSample) error {
 	release, err := f.checkPermit()
 	if err != nil {
 		return err
 	}
 	defer release()
+	sameValidator := func(response *http.Response) bool { return f.validateRepresentation(response) == nil }
 	for _, sample := range samples {
 		ctx, cancel := context.WithTimeout(f.ctx, overlapCheckTimeout)
 		request, err := f.buildRequest(ctx, f.meta.Req)
 		if err == nil {
-			err = f.compareRangeOverlap(request, sample.begin, sample.expected, nil)
+			err = f.compareRangeOverlap(request, sample.begin, sample.expected, sameValidator)
 		} else {
 			err = fmt.Errorf("%w: invalid resume request", ErrUnsafeResume)
 		}

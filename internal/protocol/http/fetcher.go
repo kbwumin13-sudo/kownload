@@ -341,6 +341,13 @@ type Fetcher struct {
 	liveStreams atomic.Int32
 	streamExit  chan struct{}
 
+	// When this run last refreshed the public link, and a shorter interval or
+	// lower limit than publicRefreshInterval and maxPublicRefreshes for tests
+	// (zero keeps them); see refreshPublicLink. Guarded by publicMu.
+	publicRefreshedAt  time.Time
+	publicRefreshGap   time.Duration
+	publicRefreshLimit int
+
 	diag diagnostics
 }
 
@@ -922,7 +929,7 @@ func (f *Fetcher) doStart() error {
 		return err
 	}
 	// The resume checks below are this run's first requests: a public link
-	// that expired while paused may use this run's refresh.
+	// that expired while paused may use this run's refreshes.
 	f.publicMu.Lock()
 	f.publicRefreshes = 0
 	f.publicMu.Unlock()
@@ -2401,6 +2408,15 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 			if requestResourceKey(&candidate) != key {
 				return fmt.Errorf("%w: new URL is outside the saved resource", ErrUnsafeResume)
 			}
+		}
+		if req.URL != "" {
+			// A checkpoint saved without a query key keeps the one of the link
+			// its bytes came from, so that a changed query is noticed.
+			f.identityMu.Lock()
+			if f.identity.QueryKey == "" {
+				f.identity.QueryKey = requestQueryKey(f.meta.Req)
+			}
+			f.identityMu.Unlock()
 		}
 		f.linkPatched = true
 		f.resolveRespLock.Lock()
