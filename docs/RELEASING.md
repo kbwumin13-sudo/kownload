@@ -14,7 +14,7 @@
 scripts/macos-frontend-build.sh --preview --output /tmp/kownload-candidate-dist
 ```
 
-构建脚本只接受干净的当前提交，导出其源码到临时目录，重新构建 Go 内核、host、Flutter 和原生插件；Flutter 引擎来自固定 SDK。组件来源、SDK 与版本写入 `build-manifest.json`。Go 使用 `-trimpath`；Swift/Clang 用源/调试路径映射，Dart 分离调试信息，全部 Mach-O 去除本机调试符号后只做 ad-hoc 候选签名，不使用开发者凭据。
+构建脚本只接受干净的当前提交，导出其源码到临时目录，以显式 darwin/arm64 目标重新构建 Go 内核、host、Flutter 和原生插件；Flutter 引擎来自固定 SDK。组件来源、SDK 与版本写入 `build-manifest.json`。Go 使用 `-trimpath`；Swift/Clang 用源/调试路径映射，Dart 分离调试信息，全部 Mach-O 去除本机调试符号后只做 ad-hoc 候选签名，不使用开发者凭据。
 
 `--preview` 会在最终 plist 使用临时 Bundle ID，移除 URL/文件关联，编译时固定临时数据目录。不要将预览包安装到 Applications。预览包不安装正式 Native manifest 或注册系统 scheme。脚本打印候选 App 和临时数据路径。
 

@@ -81,7 +81,8 @@ def main():
     if go_version != config['goVersion'] or (flutter_meta['frameworkVersion'] != config['flutterVersion'] or flutter_meta['frameworkRevision'] != config['flutterRevision']):
         raise RuntimeError('SDK version differs from config/release.json')
     env = os.environ.copy()
-    env.update({'CGO_ENABLED': '1', 'MACOSX_DEPLOYMENT_TARGET': config['minimumMacOS'],
+    env.update({'CGO_ENABLED': '1', 'GOOS': 'darwin', 'GOARCH': 'arm64',
+                'MACOSX_DEPLOYMENT_TARGET': config['minimumMacOS'],
                 'COCOAPODS_DISABLE_STATS': 'true', 'FLUTTER_SUPPRESS_ANALYTICS': 'true'})
     env['PATH'] = str(pathlib.Path(go).parent) + os.pathsep + env.get('PATH', '')
     ui = source / 'ui/flutter'
