@@ -357,14 +357,29 @@ void main() {
 <key>LSBackgroundOnly</key><true/>
 </dict></plist>
 ''');
-      // A browser-shaped fixture records argv and stays running until cleanup.
-      await executable.writeAsString(r'''#!/bin/sh
-printf '%s\n' "$$" "$@" > "$0.invocation"
-exec /bin/sleep 30
+      // LaunchServices may accept a script bundle without executing it. A native
+      // fixture exercises the real app-launch boundary and records the same argv.
+      final source = File('${root.path}/browser_fixture.c');
+      await source.writeAsString(r'''
+#include <stdio.h>
+#include <unistd.h>
+#include <limits.h>
+int main(int argc, char **argv) {
+  char path[PATH_MAX];
+  snprintf(path, sizeof(path), "%s.invocation", argv[0]);
+  FILE *file = fopen(path, "w");
+  if (!file) return 2;
+  fprintf(file, "%d\n", getpid());
+  for (int i = 1; i < argc; i++) fprintf(file, "%s\n", argv[i]);
+  fclose(file);
+  sleep(30);
+  return 0;
+}
 ''');
-      expect(
-          (await Process.run('/bin/chmod', ['+x', executable.path])).exitCode,
-          0);
+      final compile = await Process.run(
+          '/usr/bin/xcrun', ['clang', source.path, '-o', executable.path]);
+      expect(compile.exitCode, 0,
+          reason: '${compile.stdout}\n${compile.stderr}');
       final invocation = File('${executable.path}.invocation');
       final tool = NetdiskBrowserTool(home: root.path, isMacOS: true);
       try {

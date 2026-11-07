@@ -138,9 +138,11 @@ def main():
     source_notice = (f'kownload {release} (build {build})\nSource commit: {commit}\n'
         f'Corresponding Source: {source_name}, distributed beside this package.\n'
         f'Repository: https://github.com/kbwumin13-sudo/kownload\n'
-        f'Commit archive after publication: https://github.com/kbwumin13-sudo/kownload/archive/{commit}.tar.gz\n'
-        'This local candidate is unpublished. Publication must include its source archive,\n'
-        'build instructions, dependency source locations and license notices.\n'
+        f'Commit archive after publication: https://github.com/kbwumin13-sudo/kownload/archive/{commit}.tar.gz\n' +
+        ('This isolated local preview is unpublished.\n' if a.preview else
+         'Distribute this binary and its Corresponding Source together.\n') +
+        'Publication must include the source archive, build instructions,\n'
+        'dependency source locations and license notices.\n'
         'Exact Go dependency source archives: go-modules.json in Corresponding Source\n'
         '(also App Contents/Resources/legal/go-modules.json).\n'
         'Flutter dependencies: ui/flutter/pubspec.lock in Corresponding Source;\n'
