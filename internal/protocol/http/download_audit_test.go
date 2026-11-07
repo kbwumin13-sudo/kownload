@@ -105,7 +105,7 @@ func TestDownloadAuditPatchedVersionMustNotSplice(t *testing.T) {
 }
 
 // Public Resolve/Start/Wait path, including one manual restart then an automatic
-// fallback retry. A full GET must never append behind the previous partial GET.
+// full-GET retry. A full GET must never append behind the previous partial GET.
 func TestDownloadAuditNonRangeRetryMustMatchResource(t *testing.T) {
 	payload := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUV")
 	var requests atomic.Int32
