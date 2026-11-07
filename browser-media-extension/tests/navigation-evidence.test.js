@@ -1,3 +1,4 @@
+import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -22,7 +23,7 @@ function browser() {
     runtime:{onMessage:{addListener(fn) { handler = fn; }},sendMessage:async () => {},sendNativeMessage:(_,message,callback) => {
       messages.push(message);
       const data = message.params?.path === '/api/v1/media/inspect' ? {supported:true,formats:[{id:'best'}]} : 'fixture-task';
-      callback(message.method === 'wakeup' ? {code:0,data:true} : {code:0,data:{code:0,data}});
+      callback(contractReply(message,message.method === 'wakeup' ? {code:0,data:true} : {code:0,data:{code:0,data}}));
     }}
   };
   vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
@@ -113,7 +114,7 @@ for (const mime of ['application/vnd.apple.mpegurl','application/dash+xml']) {
       const item = (await list(b,{target:id}))[0];
       assert.equal((await b.request({type:'INSPECT',...scope(),id})).ok,true);
       assert.equal((await b.request({type:'CREATE',...scope(),id,options:{format:'best'}})).ok,true);
-      const req = b.messages.find(x => x.params?.path === '/api/v1/tasks').params.data.req;
+      const req = taskPayload(b.messages.find(isTaskCreation)).req;
       assert.equal(req.protocol,'media');
       assert.equal(req.url,resource);
       assert.equal(req.extra.format,'best');
@@ -138,6 +139,6 @@ for (const [mime,kind] of [['image/webp','image'],['audio/mpeg','audio']]) {
     assert.equal(item.mediaRequired,false);
     assert.equal((await list(b,scope())).length,0);
     assert.equal((await b.request({type:'CREATE',tabId:1,id,options:{}})).ok,true);
-    assert.equal(b.messages.find(x => x.params?.path === '/api/v1/tasks').params.data.req.protocol,undefined);
+    assert.equal(taskPayload(b.messages.find(isTaskCreation)).req.protocol,undefined);
   });
 }

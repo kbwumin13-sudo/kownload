@@ -34,6 +34,30 @@ export function mergeCandidate(old, next) {
     contextUrls:[...new Set([...(old.contextUrls || []),...(next.contextUrls || [])])].slice(0,64),
     header:{...old.header,...next.header}};
 }
+export function newOperationId() {
+  return globalThis.crypto?.randomUUID?.() || `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+export function bridgeFailure(kind = 'request_failed') {
+  const kinds = new Set(['invalid_request','unknown_method','wakeup_failed','ipc_unavailable','request_failed','invalid_response','http_error','business_error']);
+  const category = kinds.has(kind) ? kind : 'request_failed';
+  return Object.assign(new Error(`下载请求未完成（${category}），请重试或查看 kownload`),{category});
+}
+export function nativeSubmission(outer, operationId) {
+  if (!outer || outer.code !== 0) throw bridgeFailure(outer?.error);
+  if (!Number.isInteger(outer.httpStatus)) throw bridgeFailure('invalid_response');
+  if (outer.httpStatus < 200 || outer.httpStatus >= 300) throw bridgeFailure('http_error');
+  const envelope = outer.data, submission = envelope?.submission;
+  if (!Number.isInteger(outer.businessCode)) throw bridgeFailure('invalid_response');
+  if (outer.businessCode !== 0) throw bridgeFailure('business_error');
+  if (!envelope || envelope.code !== 0) throw bridgeFailure('business_error');
+  if (outer.operationId !== operationId || envelope.operationId !== operationId || !submission || !Array.isArray(submission.taskIds)) throw bridgeFailure('invalid_response');
+  const ids = submission.taskIds;
+  if (submission.state === 'accepted' && ids.length === 0) return {state:'accepted',taskIds:[],operationId};
+  if (submission.state !== 'created' || !ids.length || ids.some(id => typeof id !== 'string' || !id.trim())) throw bridgeFailure('invalid_response');
+  const dataIds = Array.isArray(envelope.data) ? envelope.data : [envelope.data];
+  if (dataIds.length !== ids.length || dataIds.some((id,index) => id !== ids[index])) throw bridgeFailure('invalid_response');
+  return {state:'created',taskIds:[...ids],taskId:ids[0],operationId};
+}
 export function nativeData(outer) {
   if (!outer || outer.code !== 0) throw new Error(outer?.msg || outer?.message || 'Native Messaging 请求失败');
   const rest = outer.data;
@@ -132,9 +156,9 @@ export function recoverableTasks(tasks,sourcePage,protocol) {
 export function nativeCookies(cookies) {
   return cookies.map(c => ({name:c.name,value:c.value,domain:c.domain,path:c.path,secure:c.secure,hostOnly:c.hostOnly,httpOnly:c.httpOnly,expirationDate:c.expirationDate}));
 }
-export function nativeForwardMessage(method,path,data) {
+export function nativeForwardMessage(method,path,data,operationId) {
   if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('无效的 Gopeed 接口路径');
-  return {method:'forward',params:{method,path:path.startsWith('/api/v1/') ? path : `/api/v1${path}`,...(data === undefined ? {} : {data})}};
+  return {method:'forward',...(operationId ? {operationId} : {}),params:{method,path:path.startsWith('/api/v1/') ? path : `/api/v1${path}`,...(data === undefined ? {} : {data})}};
 }
 const routeKey = (tabId,frameId) => `${tabId}:${frameId}`;
 const candidateIndexes = new WeakMap();
@@ -169,6 +193,7 @@ export function applyNavigation(state,event) {
   resetCandidateIndex(state);
   state.items ||= {};
   state.submitted ||= {};
+  state.operations ||= {};
   state.routes ||= {};
   state.topCommit ||= {};
   const {tabId,frameId,timeStamp:at,url,documentId = '',kind} = event;
@@ -187,7 +212,7 @@ export function applyNavigation(state,event) {
       (item.frameId === frameId && !!documentId && !!item.documentId && item.documentId !== documentId);
     if (old) {
       delete state.items[id];
-      for (const mark of Object.keys(state.submitted)) if (mark.startsWith(`${tabId}\u001f${id}\u001f`)) delete state.submitted[mark];
+      for (const records of [state.submitted,state.operations || {}]) for (const mark of Object.keys(records)) if (mark.startsWith(`${tabId}\u001f${id}\u001f`)) delete records[mark];
     } else if (item.network && item.frameId === frameId) item.sourcePage = url;
   }
   return state;
@@ -200,7 +225,7 @@ export function createSessionStore(storage,{onCommit = () => {},delay = 150,maxI
   const prefix = 'mediaTabV2:',dirty = new Set();
   let loaded,flushing,timer,legacy = false;
   const read = () => loaded ||= storage.get(null).then(raw => {
-    const state = {items:{},submitted:{},routes:{},topCommit:{},searches:{}};
+    const state = {items:{},submitted:{},operations:{},routes:{},topCommit:{},searches:{}};
     const parts = Object.entries(raw || {}).filter(([key]) => key.startsWith(prefix));
     if (parts.length) for (const [,part] of parts) for (const key of Object.keys(state)) Object.assign(state[key],part?.[key] || {});
     else if (raw?.mediaStateV1) { Object.assign(state,raw.mediaStateV1); legacy = true; for (const item of Object.values(state.items)) dirty.add(item.tabId); for (const key of Object.keys(state.routes)) dirty.add(Number(key.split(':')[0])); }
@@ -209,7 +234,7 @@ export function createSessionStore(storage,{onCommit = () => {},delay = 150,maxI
   function trim(state) {
     const byTab = new Map(),entries = Object.entries(state.items);
     for (const [id,item] of entries) { const list = byTab.get(item.tabId) || []; list.push([id,item]); byTab.set(item.tabId,list); }
-    const erase = ([id,item]) => { delete state.items[id]; for (const mark of Object.keys(state.submitted)) if (mark.startsWith(`${item.tabId}\u001f${id}\u001f`)) delete state.submitted[mark]; dirty.add(item.tabId); };
+    const erase = ([id,item]) => { delete state.items[id]; for (const records of [state.submitted,state.operations || {}]) for (const mark of Object.keys(records)) if (mark.startsWith(`${item.tabId}\u001f${id}\u001f`)) delete records[mark]; dirty.add(item.tabId); };
     const oldest = list => list.sort((a,b) => (a[1].kind === 'video') - (b[1].kind === 'video') || (a[1].capturedAt || 0) - (b[1].capturedAt || 0));
     for (const list of byTab.values()) if (list.length > maxPerTab) for (const entry of oldest(list).slice(0,list.length-maxPerTab)) erase(entry);
     let remaining = Object.entries(state.items);
@@ -237,6 +262,7 @@ export function createSessionStore(storage,{onCommit = () => {},delay = 150,maxI
         for (const tabId of tabs) payload[prefix+tabId] = {
           items:Object.fromEntries(Object.entries(state.items).filter(([,x]) => x.tabId === tabId)),
           submitted:Object.fromEntries(Object.entries(state.submitted).filter(([key]) => key.startsWith(`${tabId}\u001f`))),
+          operations:Object.fromEntries(Object.entries(state.operations).filter(([key]) => key.startsWith(`${tabId}\u001f`))),
           routes:Object.fromEntries(Object.entries(state.routes).filter(([key]) => key.startsWith(`${tabId}:`))),
           topCommit:state.topCommit[tabId] === undefined ? {} : {[tabId]:state.topCommit[tabId]},
           searches:Object.fromEntries(Object.entries(state.searches || {}).filter(([key]) => key.startsWith(`${tabId}:`) && key && state.searches[key].until > Date.now()))

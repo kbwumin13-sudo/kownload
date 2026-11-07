@@ -1,4 +1,5 @@
 import {readNetdiskPage} from './netdisk-page.js';
+import {newOperationId} from './lib.js';
 
 const entry = (id,name,hosts,apiHosts,roots) => ({id,name,hosts,apiHosts,roots});
 export const NETDISK_PROVIDERS = [
@@ -224,7 +225,15 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
       await live(context);
       const port=job.port=taskPort(chrome,timeoutMs);
       const check=async()=>{port.ensureOpen();await live(context);port.ensureOpen();};
-      const forward=async(path,data)=>restData(await port.send({method:'forward',params:{method:'POST',path:'/api/v1'+path,data}}));
+      const forward=async(path,data)=>{
+        const operationId=newOperationId(),started=Date.now(),domain=new URL(context.url).hostname;
+        const trace=(stage,errorCategory='')=>console.info('kownload submission',{operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
+        trace('assistant_netdisk_forward');
+        try {
+          const result=restData(await port.send({method:'forward',operationId,params:{method:'POST',path:'/api/v1'+path,data}}));
+          trace('assistant_netdisk_forwarded');return result;
+        } catch(error) {trace('assistant_netdisk_failed','request_failed');throw error;}
+      };
       let claim;
       if(type==='NETDISK_PROBE') {
         let ping;

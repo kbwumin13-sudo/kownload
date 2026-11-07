@@ -22,7 +22,6 @@ import '../../../../api/model/create_task.dart';
 import '../../../../api/model/downloader_config.dart';
 import '../../../../api/model/install_extension.dart';
 import '../../../../api/model/request.dart';
-import '../../../../api/model/result.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../core/libgopeed_boot.dart';
 import '../../../../database/database.dart';
@@ -37,6 +36,7 @@ import '../../../../util/package_info.dart';
 import '../../../../util/updater.dart';
 import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
+import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
@@ -361,44 +361,28 @@ class AppController extends GetxController with WindowListener, TrayListener {
       return;
     }
     try {
+      final browserRpc = BrowserSubmissionRpc(
+        send: (body, operationId, budget) => forwardBrowserRequest(
+          body,
+          operationId: operationId,
+          receiveTimeout: budget,
+          preserveStatus: true,
+        ),
+        showCreate: (params) async {
+          final task = CreateTask.fromJson(params);
+          await windowManager.show();
+          _handleToCreate0(task);
+        },
+        log: (event) => logger.i(jsonEncode(event)),
+      );
       await startRpcServer({
-        "/create": (ctx) async {
-          final meta =
-              ctx.request.headers["X-Gopeed-Host-Meta"]?.firstOrNull ?? "{}";
-          final jsonMeta = jsonDecode(meta);
-          final silent = jsonMeta['silent'] as bool? ?? false;
-          final params = await ctx.readText();
-          final createTaskParams = CreateTask.fromJson(_decodeParams(params));
-          if (!silent ||
-              pendingUpdateTask.value != null ||
-              (Util.isMacos() && !MacOnboarding.completed)) {
-            await windowManager.show();
-            _handleToCreate0(createTaskParams);
-          } else {
-            try {
-              await createTask(createTaskParams);
-            } catch (e) {
-              logger.w(
-                  "create task from extension fail", e, StackTrace.current);
-            }
-          }
-        },
-        "/forward": (ctx) async {
-          try {
-            final body = await ctx.readJSON();
-            final response = await forwardBrowserRequest(body);
-
-            // Return raw response
-            await ctx.writeJSON(response.data);
-          } catch (e) {
-            if (e is DioException && e.response != null) {
-              // Return API error response
-              await ctx.writeJSON(e.response!.data);
-            } else {
-              await ctx.writeJSON(Result(code: 1, msg: e.toString()).toJson());
-            }
-          }
-        },
+        "/create": (ctx) => browserRpc.handle(
+              ctx,
+              create: true,
+              forceConfirmation: pendingUpdateTask.value != null ||
+                  (Util.isMacos() && !MacOnboarding.completed),
+            ),
+        "/forward": (ctx) => browserRpc.handle(ctx, create: false),
       });
     } catch (e) {
       logger.w("start rpc server fail", e, StackTrace.current);
@@ -407,7 +391,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
   /// The native host has a 60-second deadline. Do not leave a task submission
   /// pending while the user reads the tutorial, then create it after a timeout.
-  Future<Response> forwardBrowserRequest(Map<String, dynamic> body) async {
+  Future<Response> forwardBrowserRequest(Map<String, dynamic> body,
+      {String? operationId, Duration? receiveTimeout, bool preserveStatus = false}) async {
     final method = (body['method'] as String?)?.toUpperCase() ?? 'GET';
     final target = (body['path'] as String?) ?? '/';
     final endpoint = Uri.tryParse(target)?.path.replaceAll(RegExp(r'/+$'), '');
@@ -422,7 +407,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
     return forward(target,
         method: method,
         data: body['data'],
-        queryParameters: body['query'] as Map<String, dynamic>?);
+        queryParameters: body['query'] as Map<String, dynamic>?,
+        operationId: operationId, receiveTimeout: receiveTimeout, preserveStatus: preserveStatus);
   }
 
   Future<void> _showIncomingDownloadSetup() async {

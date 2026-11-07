@@ -1,4 +1,4 @@
-import {classify,nativeData,inspectData,taskId,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
+import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
 
 installNetdiskBridge(chrome);
@@ -67,7 +67,7 @@ async function clear(tabId, frameId = null,removed = false) {
     for (const key of Object.keys(state.searches || {})) if (key.startsWith(`${tabId}:`) && (frameId === null || key.startsWith(`${tabId}:${frameId}:`))) delete state.searches[key];
     for (const [key,saved] of requestVault) if (saved.tabId === tabId && (frameId === null || saved.frameId === frameId)) requestVault.delete(key);
     for (const [key,item] of Object.entries(state.items)) if (item.tabId === tabId && (frameId === null || item.frameId === frameId)) delete state.items[key];
-    for (const key of Object.keys(state.submitted)) if (key.startsWith(`${tabId}\u001f`)) delete state.submitted[key];
+    for (const records of [state.submitted,state.operations || {}]) for (const key of Object.keys(records)) if (key.startsWith(`${tabId}\u001f`)) delete records[key];
     if (removed) {
       for (const key of Object.keys(state.routes || {})) if (key.startsWith(`${tabId}:`)) delete state.routes[key];
       delete state.topCommit?.[tabId];
@@ -124,18 +124,28 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(d => { void navigate(d,'s
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(d => { void navigate(d,'spa'); });
 chrome.tabs.onRemoved.addListener(tabId => { void clear(tabId,null,true); });
 
-function native(message,rest = false) {
+function native(message,rest = false,raw = false) {
   return new Promise((resolve,reject) => chrome.runtime.sendNativeMessage('com.gopeed.gopeed',message,response => {
     const err = chrome.runtime.lastError;
-    if (err) reject(new Error(err.message)); else { try {
-      if (!response || response.code !== 0) throw new Error(response?.msg || response?.message || 'kownload 唤起失败');
-      resolve(rest ? nativeData(response) : response.data);
-    } catch(e) { reject(e); } }
+    if (err) reject(bridgeFailure('ipc_unavailable')); else { try {
+      if (!response || response.code !== 0) throw bridgeFailure(response?.error);
+      resolve(raw ? response : rest ? nativeData(response) : response.data);
+    } catch(e) { reject(e.category ? e : bridgeFailure('business_error')); } }
   }));
 }
 async function forward(method,path,data) {
-  await native({method:'wakeup',meta:{silent:true}});
-  return native(nativeForwardMessage(method,path,data),true);
+  const operationId = newOperationId(),started = Date.now(),domain = siteOf(data?.req?.url || data?.sourcePage || '');
+  const trace = (stage,errorCategory = '') => {
+    if (typeof console !== 'undefined') console.info('kownload submission',{operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
+  };
+  trace('assistant_forward_received');
+  try {
+    await native({method:'wakeup',meta:{silent:true}});
+    trace('assistant_forward_submit');
+    const result = await native(nativeForwardMessage(method,path,data,operationId),true);
+    trace('assistant_forwarded');
+    return result;
+  } catch (error) { trace('assistant_forward_failed',error.category || 'request_failed'); throw error; }
 }
 function cookieHeader(cookies) {
   return cookies.filter(c => c.name && c.value != null).map(c => `${c.name}=${c.value}`).join('; ');
@@ -220,17 +230,32 @@ async function create(item,options = {}) {
   if (createJobs.has(mark)) return createJobs.get(mark);
   const job = (async () => {
     const state = await read();
-    if (state.submitted[mark]) return {taskId:state.submitted[mark],duplicate:true};
-    const imageUrl = options.imageUrl;
-    if (imageUrl && (item.kind !== 'image' || ![item.url,...(item.variants || [])].includes(imageUrl))) throw new Error('图片地址已失效，请重新捕获');
-    const req = await selectedRequest(imageUrl ? {...item,url:imageUrl} : item);
-    if (!(await read()).items[item.id]) throw new Error('资源已失效，请重新捕获');
-    const media = usesMedia(item);
-    const extra = media ? mediaExtra(req,{format,mediaKind,container:options.container || '',subtitleLanguages:options.subtitleLanguages || [],writeAutomaticSubtitles:!!options.writeAutomaticSubtitles,embedSubtitles:!!options.embedSubtitles}) : {header:req.header,sourcePage:req.sourcePage};
-    const payload = {req:{url:req.url,...(media ? {protocol:'media'} : {}),extra},opts:{name:options.name || '',path:options.path || ''}};
-    const id = taskId(await forward('POST','/tasks',payload));
-    await serial(async () => { const latest = await read(); if (latest.items[item.id]) { latest.submitted[mark] = id; await write(latest,item.tabId,true); } });
-    return {taskId:id,duplicate:false};
+    if (state.submitted[mark]) return {state:'created',taskId:state.submitted[mark],taskIds:[state.submitted[mark]],operationId:state.operations?.[mark],duplicate:true};
+    const operationId = await serial(async () => {
+      const latest = await read();
+      latest.operations ||= {};
+      if (!latest.operations[mark]) { latest.operations[mark] = newOperationId(); await write(latest,item.tabId,true); }
+      return latest.operations[mark];
+    });
+    const started = Date.now(),domain = siteOf(options.imageUrl || item.url);
+    const trace = (stage,errorCategory = '') => {
+      if (typeof console !== 'undefined') console.info('kownload submission', {operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
+    };
+    trace('assistant_received');
+    try {
+      const imageUrl = options.imageUrl;
+      if (imageUrl && (item.kind !== 'image' || ![item.url,...(item.variants || [])].includes(imageUrl))) throw new Error('图片地址已失效，请重新捕获');
+      const req = await selectedRequest(imageUrl ? {...item,url:imageUrl} : item);
+      if (!(await read()).items[item.id]) throw new Error('资源已失效，请重新捕获');
+      const media = usesMedia(item);
+      const extra = media ? mediaExtra(req,{format,mediaKind,container:options.container || '',subtitleLanguages:options.subtitleLanguages || [],writeAutomaticSubtitles:!!options.writeAutomaticSubtitles,embedSubtitles:!!options.embedSubtitles}) : {header:req.header,sourcePage:req.sourcePage};
+      const payload = {req:{url:req.url,...(media ? {protocol:'media'} : {}),extra},opts:{name:options.name || '',path:options.path || ''}};
+      trace('assistant_submit');
+      const result = nativeSubmission(await native({method:'create',operationId,meta:{silent:true},params:payload},false,true),operationId);
+      trace(result.state === 'created' ? 'assistant_created' : 'assistant_accepted');
+      if (result.state === 'created') await serial(async () => { const latest = await read(); if (latest.items[item.id]) { latest.submitted[mark] = result.taskId; await write(latest,item.tabId,true); } });
+      return {...result,duplicate:false};
+    } catch (error) { trace('assistant_failed',error.category || 'request_failed'); throw error; }
   })().finally(() => createJobs.delete(mark));
   createJobs.set(mark,job);
   return job;

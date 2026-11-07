@@ -308,11 +308,21 @@ Future<Response> forward(
   dynamic data,
   Map<String, dynamic>? queryParameters,
   Duration? receiveTimeout,
+  String? operationId,
+  bool preserveStatus = false,
 }) async {
   return _client.dio.request(
     path,
     data: data,
     queryParameters: queryParameters,
-    options: Options(method: method, receiveTimeout: receiveTimeout),
+    options: Options(
+      method: method,
+      receiveTimeout: receiveTimeout,
+      headers: operationId == null
+          ? null
+          : {'X-Kownload-Operation-Id': operationId},
+      followRedirects: preserveStatus ? false : null,
+      validateStatus: preserveStatus ? (_) => true : null,
+    ),
   );
 }

@@ -1,3 +1,4 @@
+import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,7 +13,7 @@ class Element {
   replaceChildren(...items){this.children=items;}
   addEventListener(event,fn){this.listeners[event]=fn;}
 }
-async function popup({formats,kind='video',realBackground=false}={}){
+async function popup({formats,kind='video',realBackground=false,accepted=false}={}){
   const elements=new Map(), requests=[];const get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
   const info={supported:true,title:'属于这个播放器的标题',duration:65,thumbnail:'https://cdn.test/poster.jpg',formats:[{id:'v',height:720,ext:'mp4',vcodec:'h264',acodec:'none'},{id:'en',ext:'m4a',vcodec:'none',acodec:'aac',language:'en'},{id:'es',ext:'m4a',vcodec:'none',acodec:'aac',language:'es'}],subtitles:[{language:'en',name:'English',automatic:false},{language:'zh-Hans',name:'中文',automatic:true}]};
   if(formats)info.formats=formats;
@@ -33,8 +34,9 @@ async function popup({formats,kind='video',realBackground=false}={}){
     chrome.runtime.sendMessage=async m=>{requests.push(m);return m.type==='CHANGED'?undefined:new Promise(resolve=>handler(m,{},resolve));};
     chrome.runtime.sendNativeMessage=(_,m,cb)=>{
       nativeRequests.push(m);
+      if(m.method==='create'&&accepted){cb(contractReply(m,{code:0,httpStatus:202,data:{code:0,data:null,submission:{state:'accepted',taskIds:[]}}}));return;}
       const data=m.params?.path==='/api/v1/media/inspect'?info:m.params?.method==='GET'&&m.params.path.startsWith('/api/v1/tasks?')?[{id:'paused-task',status:'pause',protocol:'media',meta:{req:{extra:{sourcePage:'https://page.test/watch'}}}}]:m.params?.path==='/api/v1/config'?{}:'one-task';
-      cb(m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data}});
+      cb(contractReply(m,m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data}}));
     };
     vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
     // The popup has its own runtime listener; do not replace the worker's handler.
@@ -59,7 +61,7 @@ test('selected language track and explicit automatic subtitle reach exactly the 
 const unknown={id:'0',ext:'mp4',vcodec:'',acodec:'',height:0,width:0};
 const audio={id:'aac',ext:'m4a',vcodec:'none',acodec:'aac'};
 function choose(get,id){const select=get('formats').children[0].children[1];select.value=id;select.listeners.change();}
-const taskRequests = (nativeRequests,method='POST') => nativeRequests.filter(x=>x.params?.method===method&&x.params.path.startsWith('/api/v1/tasks')).map(x=>x.params.data.req);
+const taskRequests = (nativeRequests,method='POST') => nativeRequests.filter(x=>method==='POST'&&isTaskCreation(x)||x.params?.method===method&&x.params.path.startsWith('/api/v1/tasks')).map(x=>taskPayload(x).req);
 
 test('raw audio HLS with unknown codecs requires a manual format and submits video intent for a video candidate',async()=>{
   const {get,requests,nativeRequests}=await popup({formats:[unknown],realBackground:true});
@@ -137,4 +139,11 @@ test('submission deduplication distinguishes video and audio intent for the same
 test('subtitle metadata never enables unwanted subtitle downloading by default',async()=>{
   const {get,requests}=await popup();await get('download').listeners.click();await settle();
   const create=requests.find(x=>x.type==='CREATE');assert.equal(create.options.subtitleLanguages.length,0);assert.equal(create.options.writeAutomaticSubtitles,false);assert.equal(create.options.embedSubtitles,false);
+});
+
+test('accepted native create is visibly waiting for confirmation',async()=>{
+ const {get}=await popup({realBackground:true,accepted:true});
+ await get('download').listeners.click();await settle();await settle();
+ assert.match(get('status').textContent,/等待确认/);
+ assert.doesNotMatch(get('status').textContent,/已交给/);
 });

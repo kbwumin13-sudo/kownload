@@ -1,3 +1,4 @@
+import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,7 +20,7 @@ function browser(seed = {}) {
     webNavigation:{onCommitted:event('commit'),onHistoryStateUpdated:event('spa'),onReferenceFragmentUpdated:event('hash'),getFrame:async()=>({url:pageURL,documentId:'doc-1'})},
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k=>[k,event(k)])),
     scripting:{executeScript:async s=>{scripts.push(s);return [];}},
-    runtime:{onMessage:{addListener(fn){handler=fn;}},getURL:p=>'chrome-extension://test/'+p,sendMessage:async()=>{},sendNativeMessage:(_,m,callback)=>{messages.push(m);callback(m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data:m.params.path.endsWith('/media/inspect')?inspectData:m.params.method==='POST'?'one-task':[]}});}}
+    runtime:{onMessage:{addListener(fn){handler=fn;}},getURL:p=>'chrome-extension://test/'+p,sendMessage:async()=>{},sendNativeMessage:(_,m,callback)=>{messages.push(m);callback(contractReply(m,m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data:m.params?.path?.endsWith('/media/inspect')?inspectData:isTaskCreation(m)?'one-task':[]}}));}}
   };
   vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
   return {memory,events,messages,starts,scripts,queries,chrome,setInspection:x=>{inspectData=x;},request:(m,s={})=>new Promise(r=>handler(m,s,r))};
@@ -39,7 +40,7 @@ test('enhanced search admits only this new capture session and requires an expli
   assert.equal(choices.length,1);assert.equal(choices[0].url,'https://cdn.test/current.m3u8');assert.equal(choices[0].manualFor,'clicked');
   assert.equal((await b.request({type:'CREATE',...scope,playerId:'different',target:choices[0].id,id:choices[0].id,options:{format:'v+a'}})).ok,false);
   assert.equal((await b.request({type:'CREATE',...scope,target:choices[0].id,id:choices[0].id,options:{format:'v+a'}})).ok,true);
-  const tasks=b.messages.filter(x=>x.params?.path==='/api/v1/tasks');assert.equal(tasks.length,1);assert.equal(tasks[0].params.data.req.url,choices[0].url);
+  const tasks=b.messages.filter(isTaskCreation);assert.equal(tasks.length,1);assert.equal(taskPayload(tasks[0]).req.url,choices[0].url);
 });
 
 test('a worker restart restores only the still-valid enhanced capture scope',async()=>{
@@ -54,7 +55,7 @@ test('opaque manifest intent remains a media task and keys are context only',asy
   const b=browser();const id=(await add(b,[{url:'https://cdn.test/opaque?sig=keep',kind:'video',manifest:true,protocolHint:'manifest',contextUrls:['https://keys.test/keys/session'],relatedUrls:[]}])).data[0];
   const item=(await b.request({type:'LIST',tabId:1,target:id})).data[0];assert.equal(item.manifest,true);
   const result=await b.request({type:'CREATE',tabId:1,target:id,id,options:{format:'v+a'}});assert.equal(result.ok,true);
-  const request=b.messages.find(x=>x.params?.path==='/api/v1/tasks').params.data.req;assert.equal(request.protocol,'media');
+  const request=taskPayload(b.messages.find(isTaskCreation)).req;assert.equal(request.protocol,'media');
   assert.ok(b.queries.some(x=>x.domain==='keys.test'&&x.storeId==='store-1'));
   assert.equal((await b.request({type:'LIST',tabId:1})).data.length,1);
 });
@@ -68,7 +69,7 @@ test('downstream key cookies include their own domain/path without joining the r
   };
   const id=(await add(b,[{url:'https://cdn.test/master.m3u8',kind:'video',contextUrls:['https://keys.test/keys/session']}])).data[0];
   await b.request({type:'CREATE',tabId:1,id,options:{format:'v+a'}});
-  const extra=b.messages.find(x=>x.params?.path==='/api/v1/tasks').params.data.req.extra;
+  const extra=taskPayload(b.messages.find(isTaskCreation)).req.extra;
   assert.equal(extra.header.Cookie,undefined);assert.ok(extra.cookies.some(x=>x.name==='root'&&x.domain==='cdn.test'));assert.ok(extra.cookies.some(x=>x.domain==='keys.test'&&x.path==='/keys/'));
 });
 

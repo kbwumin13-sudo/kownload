@@ -14,10 +14,17 @@ const (
 	CodeTaskNotFound RespCode = 2001
 )
 
+type Submission struct {
+	State   string   `json:"state"`
+	TaskIDs []string `json:"taskIds"`
+}
+
 type Result[T any] struct {
-	Code RespCode `json:"code"`
-	Msg  string   `json:"msg"`
-	Data T        `json:"data"`
+	OperationID string      `json:"operationId,omitempty"`
+	Submission  *Submission `json:"submission,omitempty"`
+	Code        RespCode    `json:"code"`
+	Msg         string      `json:"msg"`
+	Data        T           `json:"data"`
 }
 
 func NewOkResult[T any](data T) *Result[T] {

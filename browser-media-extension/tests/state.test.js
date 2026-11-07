@@ -1,3 +1,4 @@
+import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,7 +19,7 @@ function browser(seed = {}) {
     cookies:{getAllCookieStores:async () => [{id:'store-private',tabIds:[1]}],getPartitionKey:async () => ({partitionKey:{topLevelSite:'https://example.test',hasCrossSiteAncestor:true}}),getAll:async query => {cookiesQuery = query;return [];}},
     action:{setBadgeText:async () => {},setBadgeBackgroundColor:async () => {}},webNavigation:{getAllFrames:async () => [],onCommitted:{addListener:fn => {navigation.commit = fn;}},onHistoryStateUpdated:{addListener:fn => {navigation.spa = fn;}},onReferenceFragmentUpdated:event},
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k => [k,event])),
-    runtime:{onMessage:{addListener:fn => {handler = fn;}},sendMessage:async () => {counts.notifications++;},getURL:path => 'chrome-extension://test/'+path,sendNativeMessage:(host,msg,cb) => {counts.native++;nativeReply(msg).then(cb);}}};
+    runtime:{onMessage:{addListener:fn => {handler = fn;}},sendMessage:async () => {counts.notifications++;},getURL:path => 'chrome-extension://test/'+path,sendNativeMessage:(host,msg,cb) => {counts.native++;nativeReply(msg).then(reply => cb(contractReply(msg,reply)));}}};
   vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
   return {chrome,memory,counts,navigate:async data => {navigation.spa(data);await new Promise(resolve => setImmediate(resolve));},setNative:fn => {nativeReply = fn;},cookieQuery:() => cookiesQuery,request:(msg,sender = {}) => new Promise(resolve => handler(msg,sender,resolve))};
 }
@@ -54,7 +55,7 @@ test('slow task creation never blocks candidate discovery and concurrent submiss
   release();
   assert.equal((await first).data.taskId,'task-one');
   assert.equal((await second).data.taskId,'task-one');
-  assert.equal(bg.counts.native,2); // wakeup + one create
+  assert.equal(bg.counts.native,1); // one create; the host owns wakeup
 });
 test('Cookie queries use the clicked tab store and frame partition',async () => {
   const bg = browser();const id = (await add(bg)).data[0];

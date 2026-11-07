@@ -157,7 +157,7 @@ async function perform(type) {
         const mediaKind = mediaKindFor(x,format);
         const subtitle = choice?.subtitleChoice && !format?.audioOnly ? choice.subtitleChoice.split('|') : [];
         const result = await call(type,{id:x.id,options:{format:format?.id,mediaKind,container:format?.container || '',subtitleLanguages:subtitle[0]?[subtitle[0]]:[],writeAutomaticSubtitles:subtitle[1]==='auto',embedSubtitles:!!subtitle[0],imageUrl:x.kind==='image'?imageChoices.get(x.id)||'':undefined,name:$('name').value.trim(),path:$('path').value.trim(),taskId:$('recoverTask').value}});
-        ids.push(`${label(x)}：${type === 'UPDATE' ? '已更新并继续' : result.duplicate ? '已在 kownload 中' : '已交给 kownload 下载'}`);
+        ids.push(`${label(x)}：${type === 'UPDATE' ? '已更新并继续' : result.state === 'accepted' ? '等待确认，请在 kownload 中完成操作' : result.duplicate ? '已在 kownload 中' : '已交给 kownload 下载'}`);
       } catch(e) { errors.push(`${label(x)}：${e.message}`); }
     }
     status([...ids,...errors].join('\n'),errors.length === 0);

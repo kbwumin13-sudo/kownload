@@ -55,6 +55,9 @@ func InspectMedia(w http.ResponseWriter, r *http.Request) {
 func CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req model.CreateTask
 	if ReadJson(r, w, &req) {
+		if req.Req != nil {
+			submissionDomain(r, req.Req.URL)
+		}
 		var (
 			taskId string
 			err    error
@@ -71,7 +74,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 			WriteJson(w, model.NewErrorResult(err.Error()))
 			return
 		}
-		WriteJson(w, model.NewOkResult(taskId))
+		writeCreated(w, r, taskId, []string{taskId})
 	}
 }
 
@@ -82,12 +85,15 @@ func CreateTaskBatch(w http.ResponseWriter, r *http.Request) {
 			WriteJson(w, model.NewErrorResult("param invalid: reqs", model.CodeInvalidParam))
 			return
 		}
+		if req.Reqs[0].Req != nil {
+			submissionDomain(r, req.Reqs[0].Req.URL)
+		}
 		taskIds, err := Downloader.CreateDirectBatch(&req)
 		if err != nil {
 			WriteJson(w, model.NewErrorResult(err.Error()))
 			return
 		}
-		WriteJson(w, model.NewOkResult(taskIds))
+		writeCreated(w, r, taskIds, taskIds)
 	}
 }
 

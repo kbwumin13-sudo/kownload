@@ -15,7 +15,10 @@ class RpcContext {
 
   /// Read and parse JSON request body
   Future<Map<String, dynamic>> readJSON() async {
-    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
+    _bodyCache ??= await request
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .join();
 
     if (_bodyCache!.isEmpty) {
       return {};
@@ -25,13 +28,17 @@ class RpcContext {
   }
 
   Future<String> readText() async {
-    _bodyCache ??= await request.cast<List<int>>().transform(utf8.decoder).join();
+    _bodyCache ??= await request
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .join();
 
     return _bodyCache ?? '';
   }
 
   /// Write JSON response
-  Future<void> writeJSON(Map<String, dynamic> data) async {
+  Future<void> writeJSON(Map<String, dynamic> data, {int? statusCode}) async {
+    if (statusCode != null) response.statusCode = statusCode;
     response.headers.contentType = ContentType.json;
     response.write(jsonEncode(data));
     await response.close();
@@ -40,7 +47,12 @@ class RpcContext {
   /// Write error response
   Future<void> writeError(String message, [int statusCode = 500]) async {
     response.statusCode = statusCode;
-    await writeJSON({'error': message});
+    await writeJSON({
+      'code': 1000,
+      'msg': message,
+      'data': null,
+      'error': 'request_failed',
+    });
   }
 }
 
@@ -109,10 +121,10 @@ Future<void> startRpcServer([Map<String, RouteHandler>? routes]) async {
         await handler(ctx);
       } else {
         // 404 Route not found
-        await ctx.writeError('Route not found: $requestPath', 404);
+        await ctx.writeError('请求未完成（invalid_request）', 404);
       }
     } catch (e) {
-      await ctx.writeError('Internal server error: $e', 500);
+      await ctx.writeError('请求未完成（request_failed）', 500);
     } finally {
       await request.response.close();
     }
