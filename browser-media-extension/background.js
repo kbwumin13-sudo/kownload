@@ -1,4 +1,4 @@
-import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
+import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,SUBMIT_RESEND_DELAYS,delay,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
 
 installNetdiskBridge(chrome);
@@ -128,7 +128,7 @@ function native(message,rest = false,raw = false) {
   return new Promise((resolve,reject) => chrome.runtime.sendNativeMessage('com.gopeed.gopeed',message,response => {
     const err = chrome.runtime.lastError;
     if (err) reject(bridgeFailure('ipc_unavailable')); else { try {
-      if (!response || response.code !== 0) throw bridgeFailure(response?.error);
+      if (!response || response.code !== 0) throw Object.assign(bridgeFailure(response?.error),{httpStatus:Number.isInteger(response?.httpStatus) ? response.httpStatus : null});
       resolve(raw ? response : rest ? nativeData(response) : response.data);
     } catch(e) { reject(e.category ? e : bridgeFailure('business_error')); } }
   }));
@@ -230,17 +230,22 @@ async function create(item,options = {}) {
   if (createJobs.has(mark)) return createJobs.get(mark);
   const job = (async () => {
     const state = await read();
-    if (state.submitted[mark]) return {state:'created',taskId:state.submitted[mark],taskIds:[state.submitted[mark]],operationId:state.operations?.[mark],duplicate:true};
-    const operationId = await serial(async () => {
-      const latest = await read();
-      latest.operations ||= {};
-      if (!latest.operations[mark]) { latest.operations[mark] = newOperationId(); await write(latest,item.tabId,true); }
-      return latest.operations[mark];
-    });
+    if (state.submitted[mark]) return {state:'created',taskId:state.submitted[mark],taskIds:[state.submitted[mark]],duplicate:true};
+    // One explicit click owns one operation ID. An ID still recorded here
+    // belongs to an earlier click that ended without a definitive answer (lost
+    // reply, worker restart); it is finished first so it cannot be duplicated.
+    let operationId = state.operations?.[mark] || '';
     const started = Date.now(),domain = siteOf(options.imageUrl || item.url);
     const trace = (stage,errorCategory = '') => {
       if (typeof console !== 'undefined') console.info('kownload submission', {operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
     };
+    const remember = id => serial(async () => {
+      const latest = await read();
+      latest.operations ||= {};
+      if (id) latest.operations[mark] = id; else if (latest.operations[mark] === operationId) delete latest.operations[mark];
+      await write(latest,item.tabId,true);
+    });
+    let sent = false;
     trace('assistant_received');
     try {
       const imageUrl = options.imageUrl;
@@ -250,12 +255,44 @@ async function create(item,options = {}) {
       const media = usesMedia(item);
       const extra = media ? mediaExtra(req,{format,mediaKind,container:options.container || '',subtitleLanguages:options.subtitleLanguages || [],writeAutomaticSubtitles:!!options.writeAutomaticSubtitles,embedSubtitles:!!options.embedSubtitles}) : {header:req.header,sourcePage:req.sourcePage};
       const payload = {req:{url:req.url,...(media ? {protocol:'media'} : {}),extra},opts:{name:options.name || '',path:options.path || ''}};
-      trace('assistant_submit');
-      const result = nativeSubmission(await native({method:'create',operationId,meta:{silent:true},params:payload},false,true),operationId);
+      const submit = async resends => {
+        for (let attempt = 0;;attempt++) {
+          trace('assistant_submit');
+          sent = true;
+          try {
+            return nativeSubmission(await native({method:'create',operationId,meta:{silent:true},params:payload},false,true),operationId);
+          } catch (error) {
+            if (submissionOutcome(error) !== 'resend' || attempt >= resends) throw error;
+            trace('assistant_resend',error.category);
+            await delay(SUBMIT_RESEND_DELAYS[attempt]);
+          }
+        }
+      };
+      let result;
+      if (operationId) {
+        try { result = await submit(0); } catch (error) { if (submissionOutcome(error) !== 'final') throw error; }
+        if (result?.state !== 'created') { await remember(''); result = undefined; }
+      }
+      if (!result) {
+        operationId = newOperationId();
+        await remember(operationId);
+        result = await submit(SUBMIT_RESEND_DELAYS.length);
+      }
       trace(result.state === 'created' ? 'assistant_created' : 'assistant_accepted');
-      if (result.state === 'created') await serial(async () => { const latest = await read(); if (latest.items[item.id]) { latest.submitted[mark] = result.taskId; await write(latest,item.tabId,true); } });
+      await serial(async () => {
+        const latest = await read();
+        latest.operations ||= {};
+        if (latest.operations[mark] === operationId) delete latest.operations[mark];
+        if (result.state === 'created' && latest.items[item.id]) latest.submitted[mark] = result.taskId;
+        await write(latest,item.tabId,true);
+      });
       return {...result,duplicate:false};
-    } catch (error) { trace('assistant_failed',error.category || 'request_failed'); throw error; }
+    } catch (error) {
+      // A definitive answer ends this click; the next click starts a new ID.
+      if (sent && submissionOutcome(error) === 'final') await remember('').catch(() => {});
+      trace('assistant_failed',error.category || 'request_failed');
+      throw error;
+    }
   })().finally(() => createJobs.delete(mark));
   createJobs.set(mark,job);
   return job;

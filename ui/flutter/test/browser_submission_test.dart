@@ -42,6 +42,44 @@ void main() {
     expect(events.first['domain'], 'fixture.test');
     expect(jsonEncode(events), isNot(contains('signature')));
   });
+  test('a new operation reopens confirmation after an accepted one', () async {
+    var opens = 0;
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {
+          opens++;
+        },
+        log: (_) {});
+    await rpc.create(body, operationId: 'click-one', confirm: true);
+    await rpc.create(body, operationId: 'click-one', confirm: true);
+    expect(opens, 1, reason: 'a resend of one click must not reopen the panel');
+    final again =
+        await rpc.create(body, operationId: 'click-two', confirm: true);
+    expect(opens, 2);
+    expect(again.status, 202);
+    expect(again.body['submission'], {'state': 'accepted', 'taskIds': []});
+  });
+  test('a new operation runs again after a definitive failure', () async {
+    final calls = <String?>[];
+    var fixed = false;
+    final rpc = BrowserSubmissionRpc(
+        send: (_, id, __) async {
+          calls.add(id);
+          return fixed
+              ? response(created(id!))
+              : response({'code': 1000, 'msg': 'not allowed', 'data': null});
+        },
+        showCreate: (_) async => fail('unexpected'),
+        log: (_) {});
+    final failed =
+        await rpc.create(body, operationId: 'click-one', confirm: false);
+    expect(failed.body['error'], 'business_error');
+    fixed = true;
+    final done =
+        await rpc.create(body, operationId: 'click-two', confirm: false);
+    expect(done.body['submission']['state'], 'created');
+    expect(calls, ['click-one', 'click-two']);
+  });
   test('silent created retains data and uses ten seconds', () async {
     final rpc = BrowserSubmissionRpc(
         send: (value, id, budget) async {

@@ -17,7 +17,7 @@
 | `meta` | 可省略的对象；`silent` 可省略，默认 false；其余产品元数据透传给 Flutter |
 | `params` | ping/wakeup 可省略；create/forward 必须是对象，保持既有产品参数结构 |
 
-同一次用户提交及其查询/重试必须沿用 operationId，新的显式提交使用新 ID。ID 不从 URL、文件名或 Cookie 推导。去重与持久化由 Flutter/REST 权威实现；host 不做去重，不保存请求，不在超时或应答丢失后重发 POST。没有 ID 的旧请求不能承诺跨请求幂等。
+同一次用户提交及其查询/重试必须沿用 operationId，新的显式提交使用新 ID。ID 不从 URL、文件名或 Cookie 推导。助手的做法：每次点击生成新 ID；同一次点击只在结果未知时（`request_failed`、`ipc_unavailable`、5xx 的 `http_error`）用原 ID 自动重发，最多两次；`invalid_response` 不重发，因为旧版 host 也这样应答，而它会把每次重发都建成新任务。仍未得到确定答复的 ID 留在会话里，下一次点击先用它收尾：已创建就直接返回原任务，否则清除后再用新 ID 提交。accepted、业务失败、4xx 都是确定答复，所以关闭确认面板或修正条件后再点会重新打开或重新执行。去重与持久化由 Flutter/REST 权威实现；host 不做去重，不保存请求，不在超时或应答丢失后重发 POST。没有 ID 的旧请求不能承诺跨请求幂等。
 
 | 方法 | 参数与行为 | 成功条件 |
 | --- | --- | --- |

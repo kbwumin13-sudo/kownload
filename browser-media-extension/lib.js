@@ -42,10 +42,24 @@ export function bridgeFailure(kind = 'request_failed') {
   const category = kinds.has(kind) ? kind : 'request_failed';
   return Object.assign(new Error(`下载请求未完成（${category}），请重试或查看 kownload`),{category});
 }
+// One explicit click owns one operation ID. Only a failure whose effect is
+// unknown is resent with that ID: the current host, Flutter and REST
+// deduplicate by ID. invalid_response is not resent, because a legacy host
+// answers that way and would create one task per resend. Everything else is
+// a definitive answer, so the next click starts a new operation.
+export const SUBMIT_RESEND_DELAYS = [300,1200];
+export const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
+export function submissionOutcome(error) {
+  const category = error?.category;
+  if (category === 'request_failed' || category === 'ipc_unavailable') return 'resend';
+  if (category === 'http_error') return error.httpStatus >= 400 && error.httpStatus < 500 ? 'final' : 'resend';
+  return category === 'invalid_response' ? 'unknown' : 'final';
+}
+const withStatus = (error, status) => Object.assign(error,{httpStatus:Number.isInteger(status) ? status : null});
 export function nativeSubmission(outer, operationId) {
-  if (!outer || outer.code !== 0) throw bridgeFailure(outer?.error);
+  if (!outer || outer.code !== 0) throw withStatus(bridgeFailure(outer?.error),outer?.httpStatus);
   if (!Number.isInteger(outer.httpStatus)) throw bridgeFailure('invalid_response');
-  if (outer.httpStatus < 200 || outer.httpStatus >= 300) throw bridgeFailure('http_error');
+  if (outer.httpStatus < 200 || outer.httpStatus >= 300) throw withStatus(bridgeFailure('http_error'),outer.httpStatus);
   const envelope = outer.data, submission = envelope?.submission;
   if (!Number.isInteger(outer.businessCode)) throw bridgeFailure('invalid_response');
   if (outer.businessCode !== 0) throw bridgeFailure('business_error');

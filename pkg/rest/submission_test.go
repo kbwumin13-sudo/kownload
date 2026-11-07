@@ -180,3 +180,34 @@ func TestSubmissionConcurrentWaitCanCancel(t *testing.T) {
 	wrapped(replay, request)
 	_, _ = io.Copy(io.Discard, replay.Result().Body)
 }
+
+// An operation ID belongs to one explicit click: a known ID replays its stored
+// result, failures included; the next click carries a new ID and runs again
+// (review finding P2-2 concerned the helper reusing IDs across clicks).
+func TestSubmissionNewOperationRunsAgainAfterFailure(t *testing.T) {
+	ledger := newSubmissionLedger()
+	calls := 0
+	handler := ledger.wrap(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			WriteJson(w, model.NewErrorResult("download directory is not in white list"))
+			return
+		}
+		writeCreated(w, r, "task-1", []string{"task-1"})
+	})
+	send := func(id string) string {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(`{}`))
+		req.Header.Set(operationHeader, id)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		return rec.Body.String()
+	}
+	first, replay := send("click-one"), send("click-one")
+	if calls != 1 || first != replay || !strings.Contains(replay, "business_error") {
+		t.Fatalf("calls=%d first=%s replay=%s", calls, first, replay)
+	}
+	next := send("click-two")
+	if calls != 2 || !strings.Contains(next, `"state":"created"`) || !strings.Contains(next, "task-1") {
+		t.Fatalf("calls=%d next=%s", calls, next)
+	}
+}
