@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"net"
 	gohttp "net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -292,20 +290,13 @@ func TestFetcher_DownloadNormal(t *testing.T) {
 }
 
 func TestFetcher_DownloadContinue(t *testing.T) {
-	// Immutable fixture content supplies a real strong validator; the generated
-	// file's recent Last-Modified alone is not a strong If-Range date.
 	listener := test.StartTestFileServer()
 	defer listener.Close()
-	etag := fmt.Sprintf("\"%s\"", test.FileMd5(test.BuildFile))
-	files := gohttp.FileServer(gohttp.Dir(test.Dir))
-	server := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		w.Header().Set("ETag", etag)
-		files.ServeHTTP(w, r)
-	}))
-	defer server.Close()
-	for _, connections := range []int{1, 5, 8, 16} {
-		downloadContinue(server.Listener, connections, t)
-	}
+
+	downloadContinue(listener, 1, t)
+	downloadContinue(listener, 5, t)
+	downloadContinue(listener, 8, t)
+	downloadContinue(listener, 16, t)
 }
 
 func TestFetcher_DownloadContinue_NoRangeRestart(t *testing.T) {
@@ -1532,27 +1523,10 @@ func TestFetcher_Patch_NilData(t *testing.T) {
 // 3. User patches the task with a new valid cookie
 // 4. Download resumes and completes successfully
 func TestFetcher_Patch_CookieExpired(t *testing.T) {
-	listener := test.StartTestFileServer()
+	listener := test.StartTestCookieExpiringServer()
 	defer listener.Close()
-	etag := fmt.Sprintf("\"%s\"", test.FileMd5(test.BuildFile))
-	files := gohttp.FileServer(gohttp.Dir(test.Dir))
-	var requests atomic.Int32
-	server := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
-		cookie := r.Header.Get("Cookie")
-		valid := strings.Contains(cookie, "session=new_token")
-		if requests.Add(1) == 1 {
-			valid = strings.Contains(cookie, "session=old_token")
-		}
-		if !valid {
-			w.WriteHeader(401)
-			return
-		}
-		w.Header().Set("ETag", etag)
-		files.ServeHTTP(w, r)
-	}))
-	defer server.Close()
 
-	downloadURL := server.URL + "/" + test.BuildName
+	downloadURL := "http://" + listener.Addr().String() + "/" + test.BuildName
 	opts := &base.Options{
 		Name:  test.DownloadName,
 		Path:  test.Dir,

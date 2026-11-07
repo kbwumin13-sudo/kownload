@@ -216,7 +216,7 @@ func (f *Fetcher) checkResumeIdentity() error {
 	if expectedKey == "" {
 		expectedKey = requestResourceKey(f.meta.Req)
 	}
-	if r.ResourceKey != "" && r.ResourceKey != expectedKey && !(r.Hash != "" && r.Hash == external) {
+	if r.ResourceKey != "" && r.ResourceKey != expectedKey && f.hasResumeValidator() && !(r.Hash != "" && r.Hash == external) {
 		return fmt.Errorf("%w: source resource changed", ErrUnsafeResume)
 	}
 	if r.Size > 0 && r.Size != f.meta.Res.Size {
@@ -225,5 +225,13 @@ func (f *Fetcher) checkResumeIdentity() error {
 	if r.ETag != "" || r.LastModified != "" || f.rangeResumeValidator != "" || r.Hash != "" && r.Hash == external {
 		return nil
 	}
-	return fmt.Errorf("%w: checkpoint has no usable validator; restart as a new download", ErrUnsafeResume)
+	return f.verifySavedOverlaps()
+}
+
+func (f *Fetcher) hasResumeValidator() bool {
+	r := f.representationSnapshot()
+	f.identityMu.RLock()
+	external := f.resumeHash
+	f.identityMu.RUnlock()
+	return r.ETag != "" || r.LastModified != "" || f.rangeResumeValidator != "" || r.Hash != "" && r.Hash == external
 }

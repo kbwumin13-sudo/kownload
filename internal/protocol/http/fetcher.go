@@ -1547,14 +1547,6 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	if conn.ctx.Err() != nil {
 		return conn.ctx.Err()
 	}
-	if conn.lastErr != nil {
-		if err := f.checkResumeIdentity(); err != nil {
-			if re := extractRequestError(conn.lastErr); re != nil {
-				return errors.Join(err, re)
-			}
-			return err
-		}
-	}
 
 	// Read chunk boundaries under lock to get a consistent snapshot
 	// This protects against concurrent modification by helpOtherConnection
@@ -2387,10 +2379,9 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 			<-f.downloadLoopDone
 		}
 		f.stopPrefetch()
-		if err := f.checkResumeIdentity(); err != nil {
-			return err
-		}
-		if req.URL != "" && f.usesRanges() && f.hasResumeData() {
+		// The stopped Start verifies saved bytes using the patched URL and
+		// credentials. Probing here would still use the expired request.
+		if req.URL != "" && f.usesRanges() && f.hasResumeData() && f.hasResumeValidator() {
 			candidate := *f.meta.Req
 			candidate.URL = req.URL
 			r := f.representationSnapshot()
