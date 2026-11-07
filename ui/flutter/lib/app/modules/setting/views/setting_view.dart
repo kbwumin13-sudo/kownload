@@ -424,39 +424,14 @@ class SettingView extends GetView<SettingController> {
     }
 
     buildBrowserExtension() {
-      if (Util.isMacos()) {
-        return const ListTile(
-          title: Text('网页助手'),
-          subtitle: OpenInNew(
-              text: 'Chrome / Edge · 安装与使用',
-              url:
-                  'https://github.com/kbwumin13-sudo/kownload/tree/main/browser-media-extension'),
-        );
-      }
       return ListTile(
-          title: Text('browserExtension'.tr),
-          subtitle: const Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              OpenInNew(
-                text: "Chrome",
-                url:
-                    "https://chromewebstore.google.com/detail/gopeed/mijpgljlfcapndmchhjffkpckknofcnd",
-              ),
-              SizedBox(width: 10),
-              OpenInNew(
-                text: "Edge",
-                url:
-                    "https://microsoftedge.microsoft.com/addons/detail/dkajnckekendchdleoaenoophcobooce",
-              ),
-              SizedBox(width: 10),
-              OpenInNew(
-                text: "Firefox",
-                url:
-                    "https://addons.mozilla.org/zh-CN/firefox/addon/gopeed-extension",
-              ),
-            ],
-          ).paddingOnly(top: 5));
+        title: Text('browserExtension'.tr),
+        subtitle: const OpenInNew(
+          text: 'Chrome / Edge · kownload',
+          url:
+              'https://github.com/kbwumin13-sudo/kownload/tree/main/browser-media-extension',
+        ),
+      );
     }
 
     // Currently auto startup only support Windows and Linux
