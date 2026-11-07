@@ -6,6 +6,8 @@
 
 `config/release.json` 是 App 版本、内核/Release 修订、构建号和 SDK 版本的唯一输入。例如 appVersion `1.9.3`、revision `15`、buildNumber `26` 对应内核/Release `1.9.3-kownload.15`、应用 `1.9.3 (26)`。build25 为 `.14`，公开 build19 为 `.8`；应用逐段比较版本，只提示严格更新的最终版本。
 
+构建需 Xcode 26+（原生面板使用其 SDK）；macOS CI 显式选择镜像提供的 Xcode 26.3。实际版本写入构建清单。
+
 先提交源码，然后设置 `GO_BIN` 和 `FLUTTER_BIN` 指向文件中指定版本，运行：
 
 ```sh

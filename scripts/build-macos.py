@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -71,6 +72,10 @@ def main():
     flutter = pathlib.Path(flutter_bin).resolve().parents[1]
     if not go or not pathlib.Path(flutter_bin).is_file():
         raise RuntimeError('Set GO_BIN and FLUTTER_BIN to the pinned toolchains')
+    xcode_version = output('xcodebuild', '-version')
+    xcode_major = re.match(r'Xcode (\d+)', xcode_version)
+    if not xcode_major or int(xcode_major[1]) < config['minimumXcodeMajor']:
+        raise RuntimeError('Xcode 26 or newer SDK is required by the native panel')
     go_version = output(go, 'version').split()[2].removeprefix('go')
     flutter_meta = json.loads(output(flutter_bin, '--version', '--machine'))
     if go_version != config['goVersion'] or (flutter_meta['frameworkVersion'] != config['flutterVersion'] or flutter_meta['frameworkRevision'] != config['flutterRevision']):
@@ -153,6 +158,7 @@ def main():
     manifest = {'sourceCommit': commit, 'releaseVersion': release, 'appVersion': version,
                 'buildNumber': build, 'architecture': 'arm64', 'preview': a.preview,
                 'goVersion': go_version, 'flutterVersion': config['flutterVersion'],
+                'xcodeVersion': xcode_version,
                 'flutterRevision': flutter_meta['frameworkRevision'], 'helperVersion': helper_version,
                 'projectComponentsFromSourceCommit': ['Go engine', 'Native host', 'Flutter app'],
                 'nativePlugins': 'rebuilt from locked third-party source',

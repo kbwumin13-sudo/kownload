@@ -16,7 +16,6 @@ import 'package:gopeed/macos/mac_panel.dart';
 
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/downloader_config.dart';
-import '../../../../database/database.dart';
 import '../../../../i18n/message.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/locale_manager.dart';
