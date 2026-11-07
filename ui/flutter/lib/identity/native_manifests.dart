@@ -26,8 +26,9 @@ Future<void> writeNativeManifests(
     bool firefox = false}) async {
   if (!path.isAbsolute(directory) ||
       !path.isAbsolute(executable) ||
-      !path.isAbsolute(backupDirectory))
+      !path.isAbsolute(backupDirectory)) {
     throw ArgumentError('absolute paths required');
+  }
   await Directory(directory).create(recursive: true);
   await Directory(backupDirectory).create(recursive: true);
   await Process.run('/bin/chmod', ['700', backupDirectory]);

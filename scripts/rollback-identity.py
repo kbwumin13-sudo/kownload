@@ -25,9 +25,11 @@ def store_locks(roots):
                     continue
                 f = file.open('r+b')
                 files.append(f)
-                # bbolt and Dart use different OS locking APIs on some hosts.
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Use each component's lock API, not both on the same inode.
+                if name == 'gopeed.db':
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
     finally:
         for f in reversed(files):

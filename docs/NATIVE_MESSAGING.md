@@ -1,4 +1,4 @@
-# kownload Native Messaging 契约（v1）
+# kownload Native Messaging 契约（v2）
 
 本契约是浏览器助手、独立 Native host、Flutter RPC 和 REST 的共同边界。帧格式依据 [Chrome Native Messaging 公开协议](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)：UTF-8 JSON，前置 4 字节 native byte order 无符号长度；host 输出最多 1 MiB，输入最多 64 MiB；stdout 只写协议帧。每个输入帧对应一个输出帧，EOF 正常退出。
 
@@ -67,6 +67,13 @@ Flutter `/create` 返回标准业务 envelope；`/forward` 保留 REST envelope 
 
 ## 预算与最低回归
 
-唤醒最多 10 秒，create HTTP 最多 10 秒，forward HTTP 最多 60 秒；外部取消应传给 IPC。等待 IPC 的探测可重试连接，已提交 POST 不能重试。超过 1 MiB 的应答返回固定 invalid_response，不把部分帧交给浏览器。
+唤醒最多 10 秒，create HTTP 最多 10 秒；forward 按以下**精确 URL path**（不含查询字符串）查表，不用前缀或包含关系猜测。外部取消应传给 IPC。等待 IPC 的探测可重试连接，已提交 POST 不能重试。超过 1 MiB 的应答返回固定 invalid_response，不把部分帧交给浏览器。
+
+| forward path | 预算 | 依据 |
+| --- | --- | --- |
+| `/api/v1/netdisk/prepare` | 310 秒 | 后端 prepare 300 秒，既有 Flutter 直接 API 等待 310 秒；`ui/flutter/lib/api/netdisk.dart` 的精确 prepare 配置及 `test/netdisk_api_test.dart`；编排者采纳已有行为，不改为轮询 |
+| 未列出的路径 | 60 秒 | 默认预算；有新增长操作须先更新共同契约与测试 |
+
+`/api/v1/netdisk/prepare/child` 和带尾斜线的不同 path 不自动继承 310 秒。此表也适用于未来经 Native forward 发起的 prepare，不因当前助手没有调用而缩短既有能力。
 
 最低夹具包括拆帧/多帧/截断/长度上限/坏 JSON、来源白名单、未知方法、IPC 不可达、唤醒失败、B02（**create 的 Flutter HTTP 500 必须外层 code 1/httpStatus 500**）、HTTP 200 业务错误、空 body、accepted/created、旧成功 data、同一 ID 多次提交的 host 不去重不重试，以及新旧清单名解析到同一可执行文件。Flutter/REST/助手的幂等与交互回归由对应模块测试覆盖。

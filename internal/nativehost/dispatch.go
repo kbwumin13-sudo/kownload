@@ -78,6 +78,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "invalid_request", nil, nil)
 		}
 		creation := req.Method == "create"
+		budget := 10 * time.Second
 		if req.Method == "forward" {
 			var forward struct {
 				Method string `json:"method"`
@@ -87,6 +88,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 				return failure(req.OperationID, "invalid_request", nil, nil)
 			}
 			creation = forward.Method == "POST" && (strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks" || strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks/batch")
+			budget = ForwardBudget(forward.Path)
 		}
 		if req.Method == "create" {
 			wake, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -95,10 +97,6 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			if err != nil {
 				return failure(req.OperationID, "wakeup_failed", nil, nil)
 			}
-		}
-		budget := 60 * time.Second
-		if req.Method == "create" {
-			budget = 10 * time.Second
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, budget)
 		defer cancel()
@@ -110,6 +108,16 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 	default:
 		return failure(req.OperationID, "unknown_method", nil, nil)
 	}
+}
+
+// ForwardBudget follows the exact-path table in contract v2. Query parameters
+// do not change a route; prefixes and trailing slashes are different paths.
+func ForwardBudget(path string) time.Duration {
+	u, err := url.Parse(path)
+	if err == nil && u.Path == "/api/v1/netdisk/prepare" {
+		return 310 * time.Second
+	}
+	return 60 * time.Second
 }
 
 func validForward(method, path string) bool {

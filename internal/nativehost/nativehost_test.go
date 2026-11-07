@@ -23,13 +23,39 @@ type fixture struct {
 	available bool
 	wakeError error
 	last      Request
+	budget    time.Duration
 }
 
 func (f *fixture) Available(context.Context) bool { return f.available }
-func (f *fixture) Post(_ context.Context, _ string, r Request) (int, []byte, error) {
+func (f *fixture) Post(ctx context.Context, _ string, r Request) (int, []byte, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		f.budget = time.Until(deadline)
+	}
 	f.calls++
 	f.last = r
 	return f.status, []byte(f.body), nil
+}
+
+func TestForwardExactPathBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want time.Duration
+	}{
+		{"/api/v1/netdisk/prepare", 310 * time.Second},
+		{"/api/v1/netdisk/prepare?fixture=1", 310 * time.Second},
+		{"/api/v1/netdisk/prepare/child", 60 * time.Second},
+		{"/api/v1/netdisk/prepare/", 60 * time.Second},
+		{"/api/v1/info", 60 * time.Second},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			f := &fixture{status: 200, body: `{"code":0,"operationId":"op-budget","data":[]}`}
+			body, _ := json.Marshal(Request{Method: "forward", OperationID: "op-budget", Params: json.RawMessage(`{"method":"GET","path":"` + tc.path + `"}`)})
+			r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), body)
+			if r.Code != 0 || f.budget > tc.want || f.budget < tc.want-time.Second {
+				t.Fatalf("wrong budget: %s %v", tc.path, f.budget)
+			}
+		})
+	}
 }
 func (f *fixture) Ensure(context.Context, bool) error { return f.wakeError }
 func runFixture(f *fixture, method string) Response {

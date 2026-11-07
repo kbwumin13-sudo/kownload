@@ -416,23 +416,20 @@ class MainFlutterWindow: NSWindow {
       if let bookmark = (defaults.dictionary(forKey: key) as? [String: Data])?[path] {
         if let resolved = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
                                    relativeTo: nil, bookmarkDataIsStale: &stale),
-           resolved.standardizedFileURL == currentURL.standardizedFileURL {
+           !stale, resolved.standardizedFileURL == currentURL.standardizedFileURL {
           scopeURL = resolved
         } else {
-          // A browser can atomically replace Local State. An obsolete bookmark
-          // must not prevent a read the OS already permits at the current path.
-          stale = true
+          var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
+          bookmarks.removeValue(forKey: path)
+          defaults.set(bookmarks, forKey: key)
+          result(FlutterError(code: "profile_permission_denied",
+            message: "原资料文件授权已失效，请点“选择资料文件”重新允许读取。", details: nil))
+          return
         }
       }
       let scoped = scopeURL.startAccessingSecurityScopedResource()
       defer { if scoped { scopeURL.stopAccessingSecurityScopedResource() } }
       let metadata = try Self.browserProfileMetadata(Data(contentsOf: currentURL))
-      if stale, let renewed = try? currentURL.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-                                                          includingResourceValuesForKeys: nil, relativeTo: nil) {
-        var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
-        bookmarks[path] = renewed
-        defaults.set(bookmarks, forKey: key)
-      }
       result(metadata)
     } catch {
       let ns = error as NSError

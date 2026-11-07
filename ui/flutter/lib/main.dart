@@ -171,6 +171,13 @@ Future<void> init(StartupArgs args) async {
   }
 
   () async {
+    if (Util.isDesktop()) {
+      try {
+        await installHost();
+      } catch (e) {
+        logger.e("browser extension host binary install fail", e);
+      }
+    }
     if (Util.isDesktop() && !Util.isIsolatedPreview) {
       try {
         registerUrlScheme(AppIdentity.scheme);
@@ -182,11 +189,6 @@ Future<void> init(StartupArgs args) async {
         logger.e("register scheme fail", e);
       }
 
-      try {
-        await installHost();
-      } catch (e) {
-        logger.e("browser extension host binary install fail", e);
-      }
       // Browser manifests are switched only by an explicit installation action.
     }
   }();

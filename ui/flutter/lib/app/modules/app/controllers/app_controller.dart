@@ -108,16 +108,16 @@ class AppController extends GetxController with WindowListener, TrayListener {
     _initTray().onError(
         (error, stackTrace) => logger.w("initTray error", error, stackTrace));
 
-    if (!Util.isIsolatedPreview) {
-      _initRpcServer().onError((error, stackTrace) =>
-          logger.w("initRpcServer error", error, stackTrace));
-    }
+    _initRpcServer().onError((error, stackTrace) =>
+        logger.w("initRpcServer error", error, stackTrace));
 
     _initForegroundTask().onError((error, stackTrace) =>
         logger.w("initForegroundTask error", error, stackTrace));
 
-    _initTrackerUpdate().onError((error, stackTrace) =>
-        logger.w("initTrackerUpdate error", error, stackTrace));
+    if (!Util.isIsolatedPreview) {
+      _initTrackerUpdate().onError((error, stackTrace) =>
+          logger.w("initTrackerUpdate error", error, stackTrace));
+    }
 
     if (!Util.isIsolatedPreview) {
       _initLaunchAtStartup().onError((error, stackTrace) =>
@@ -222,7 +222,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
     if (initialLink != null &&
         [AppIdentity.scheme, AppIdentity.legacyScheme]
             .contains(initialLink.scheme)) {
-      shouldHide = initialLink!.queryParameters["hidden"] == "true";
+      shouldHide = initialLink.queryParameters["hidden"] == "true";
     }
 
     // Show window if not hidden (desktop only)
