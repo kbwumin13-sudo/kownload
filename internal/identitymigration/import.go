@@ -103,20 +103,45 @@ func Import(o Options) (Summary, error) {
 	stage := target + ".importing"
 	identity := sha256.Sum256([]byte(source + "\x00" + target))
 	token := hex.EncodeToString(identity[:])
-	if _, err := os.Lstat(stage); err == nil {
-		data, readErr := os.ReadFile(filepath.Join(stage, owner))
-		if readErr != nil || string(data) != token {
+	// Scratch names are created only by this importer while it holds the
+	// migration lock, so any that exist belong to an interrupted run.
+	sweepScratch(target)
+	if info, err := os.Lstat(stage); err == nil {
+		if !info.IsDir() {
 			return zero, errors.New("unknown_staging_directory")
 		}
-		if err = os.RemoveAll(stage); err != nil {
+		// Only this importer creates the staging name, and the checks above
+		// established that nothing was published: no marker, no pending
+		// manifest, and the target is missing or empty. The importer never
+		// writes the source, so the staging copy is disposable even when its
+		// owner token is missing or different (older versions created the
+		// directory before writing the token; a crash could also interrupt a
+		// cleanup). The migration lock excludes a concurrent import.
+		if err = discardStage(stage, target); err != nil {
 			return zero, errors.New("staging_cleanup_failed")
 		}
+	} else if !os.IsNotExist(err) {
+		return zero, errors.New("staging_unavailable")
 	}
-	if err = os.Mkdir(stage, 0700); err != nil {
+	// Write the owner token under a scratch name first, then rename: the
+	// staging path never exists without its token.
+	scratch, err := os.MkdirTemp(filepath.Dir(target), filepath.Base(target)+scratchNew)
+	if err != nil {
 		return zero, errors.New("staging_create_failed")
 	}
-	if err = os.WriteFile(filepath.Join(stage, owner), []byte(token), 0600); err != nil {
+	if err = writeSync(filepath.Join(scratch, owner), []byte(token)); err != nil {
+		os.RemoveAll(scratch)
 		return zero, errors.New("staging_owner_failed")
+	}
+	if err = call(o, "staging-scratch"); err != nil {
+		return zero, err
+	}
+	if err = os.Rename(scratch, stage); err != nil {
+		os.RemoveAll(scratch)
+		return zero, errors.New("staging_create_failed")
+	}
+	if err = syncDir(filepath.Dir(target)); err != nil {
+		return zero, err
 	}
 	if err = call(o, "staging"); err != nil {
 		return zero, err
@@ -194,6 +219,51 @@ func Import(o Options) (Summary, error) {
 	}
 	return summary, nil
 }
+
+// Scratch suffixes appended to the target name. ".importing-new-" holds an
+// owner token before it becomes the staging directory; ".importing-old-" is a
+// staging directory renamed aside so that deleting it can never leave a
+// half-removed staging path behind.
+const (
+	scratchNew = ".importing-new-"
+	scratchOld = ".importing-old-"
+)
+
+func sweepScratch(target string) {
+	parent, base := filepath.Dir(target), filepath.Base(target)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, base+scratchNew) && !strings.HasPrefix(name, base+scratchOld) {
+			continue
+		}
+		// Best effort: a leftover never blocks an import, it only uses space.
+		if info, err := os.Lstat(filepath.Join(parent, name)); err == nil && info.IsDir() {
+			os.RemoveAll(filepath.Join(parent, name))
+		}
+	}
+}
+
+func discardStage(stage, target string) error {
+	aside, err := os.MkdirTemp(filepath.Dir(target), filepath.Base(target)+scratchOld)
+	if err != nil {
+		return err
+	}
+	if err = os.Remove(aside); err != nil {
+		return err
+	}
+	if err = os.Rename(stage, aside); err != nil {
+		return err
+	}
+	if err = syncDir(filepath.Dir(target)); err != nil {
+		return err
+	}
+	return os.RemoveAll(aside)
+}
+
 func publishMarker(root string) error {
 	if err := os.Remove(filepath.Join(root, owner)); err != nil && !os.IsNotExist(err) {
 		return errors.New("staging_owner_cleanup_failed")
