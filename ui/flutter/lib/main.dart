@@ -1,3 +1,4 @@
+import 'dart:io' show exit;
 import 'package:args/args.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -24,6 +25,7 @@ import 'util/startup_tasks.dart';
 import 'macos/mac_appearance.dart';
 import 'macos/mac_panel.dart';
 import 'identity/bootstrap.dart';
+import 'identity/bootstrap_error_page.dart';
 import 'identity/app_identity.dart';
 import 'app/modules/task/controllers/task_controller.dart';
 
@@ -61,12 +63,8 @@ void main(List<String> arguments) async {
   try {
     await init(args);
   } on IdentityBootstrapException catch (e) {
-    // Selectable and scrollable: some messages carry commands to copy.
-    runApp(MaterialApp(
-        home: Scaffold(
-            body: SingleChildScrollView(
-                padding: const EdgeInsets.all(24),
-                child: SelectableText(e.message)))));
+    runApp(
+        MaterialApp(home: BootstrapErrorPage(error: e, onQuit: () => exit(0))));
     await windowManager.ensureInitialized();
     await windowManager.setSize(const Size(720, 480));
     await windowManager.center();

@@ -89,8 +89,8 @@ void main() {
       await runIdentityImport(
           source: '/fixture/legacy root',
           target: '/fixture/new root',
-          run: (_) async => ProcessResult(1, 1,
-              '{"ok":false,"error":"legacy_changed_after_import"}', ''));
+          run: (_) async => ProcessResult(
+              1, 1, '{"ok":false,"error":"legacy_changed_after_import"}', ''));
       fail('bootstrap should stop');
     } on IdentityBootstrapException catch (e) {
       expect(e.message, contains('没有继续任何任务'));
@@ -102,6 +102,31 @@ void main() {
           e.message,
           contains(
               'mv "/fixture/legacy root" "/fixture/legacy root.kept-\$(date +%Y%m%d-%H%M%S)"'));
+      expect(e.message, contains('关闭“打开应用时继续未完成的下载”'));
+      expect(e.ignoreLegacyChanges, isNotNull);
     }
+  });
+  test('keeping the new data for good runs the importer with the choice',
+      () async {
+    final calls = <List<String>>[];
+    var reply = '{"ok":true}';
+    Future<ProcessResult> run(List<String> args) async {
+      calls.add(args);
+      return ProcessResult(1, reply.contains('true') ? 0 : 1, reply, '');
+    }
+
+    expect(await ignoreLegacyChanges(source: '/old', target: '/new', run: run),
+        true);
+    expect(calls.single,
+        ['--source', '/old', '--target', '/new', '--ignore-legacy-changes']);
+    reply = '{"ok":false,"error":"invalid_marker"}';
+    expect(await ignoreLegacyChanges(source: '/old', target: '/new', run: run),
+        false);
+    expect(
+        await ignoreLegacyChanges(
+            source: '/old',
+            target: '/new',
+            run: (_) async => throw const FileSystemException('missing tool')),
+        false);
   });
 }

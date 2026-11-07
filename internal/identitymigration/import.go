@@ -20,6 +20,7 @@ import (
 )
 
 const Marker = ".kownload-identity.json"
+const markerTemporary = Marker + ".tmp"
 const pending = ".kownload-import-pending.json"
 const owner = ".kownload-import-owner"
 
@@ -43,9 +44,13 @@ type Fingerprint struct {
 
 // record is the marker and pending-manifest format. Markers written before
 // fingerprints existed decode with a nil SourceDatabase and are not compared.
+// IgnoreLegacyChanges is the user's persistent choice to keep this root and
+// stop checking the legacy root (for example while also using upstream
+// Gopeed, which shares that root).
 type record struct {
 	Summary
-	SourceDatabase *Fingerprint `json:"sourceDatabase,omitempty"`
+	SourceDatabase      *Fingerprint `json:"sourceDatabase,omitempty"`
+	IgnoreLegacyChanges bool         `json:"ignoreLegacyChanges,omitempty"`
 }
 
 // ErrLegacyChanged reports that the legacy root changed after the import, so
@@ -55,6 +60,8 @@ var ErrLegacyChanged = errors.New("legacy_changed_after_import")
 type Options struct {
 	Source string
 	Target string
+	// IgnoreLegacyChanges records the persistent choice above in the marker.
+	IgnoreLegacyChanges bool
 	// Hook is only for deterministic interruption fixtures, never a CLI option.
 	Hook func(string) error
 }
@@ -99,8 +106,16 @@ func Import(o Options) (Summary, error) {
 		if json.Unmarshal(data, &done) != nil || done.Version != 1 {
 			return zero, errors.New("invalid_marker")
 		}
-		if err = sourceUnchanged(source, done.SourceDatabase); err != nil {
-			return zero, err
+		if o.IgnoreLegacyChanges && !done.IgnoreLegacyChanges {
+			done.IgnoreLegacyChanges = true
+			if err = rewriteMarker(target, done); err != nil {
+				return zero, err
+			}
+		}
+		if !done.IgnoreLegacyChanges {
+			if err = sourceUnchanged(source, done.SourceDatabase); err != nil {
+				return zero, err
+			}
 		}
 		return done.Summary, nil
 	}
@@ -115,11 +130,19 @@ func Import(o Options) (Summary, error) {
 		if err != nil || actual != s.Summary {
 			return zero, errors.New("pending_verification_failed")
 		}
-		if err = sourceUnchanged(source, s.SourceDatabase); err != nil {
-			return zero, err
+		if !s.IgnoreLegacyChanges && !o.IgnoreLegacyChanges {
+			if err = sourceUnchanged(source, s.SourceDatabase); err != nil {
+				return zero, err
+			}
 		}
 		if err = publishMarker(target); err != nil {
 			return zero, err
+		}
+		if o.IgnoreLegacyChanges && !s.IgnoreLegacyChanges {
+			s.IgnoreLegacyChanges = true
+			if err = rewriteMarker(target, s); err != nil {
+				return zero, err
+			}
 		}
 		return s.Summary, nil
 	}
@@ -224,7 +247,7 @@ func Import(o Options) (Summary, error) {
 	if err != nil {
 		return zero, err
 	}
-	data, _ := json.Marshal(record{Summary: summary, SourceDatabase: &fingerprint})
+	data, _ := json.Marshal(record{Summary: summary, SourceDatabase: &fingerprint, IgnoreLegacyChanges: o.IgnoreLegacyChanges})
 	if err = writeSync(filepath.Join(stage, pending), data); err != nil {
 		return zero, err
 	}
@@ -273,9 +296,12 @@ func fingerprintOpen(f *os.File) (Fingerprint, error) {
 
 // sourceUnchanged refuses to reopen an import whose legacy root was used
 // afterwards, for example by build 25 after a rollback. It never changes
-// either root; the caller shows how to keep one side.
+// either root; the caller shows how to keep one side. The legacy root is also
+// upstream Gopeed's data root, so only an import that actually copied a
+// legacy database is checked: a legacy root that appears after a fresh setup
+// belongs to another app and is left alone.
 func sourceUnchanged(source string, recorded *Fingerprint) error {
-	if recorded == nil {
+	if recorded == nil || !recorded.Present {
 		return nil
 	}
 	f, err := os.Open(filepath.Join(source, "gopeed.db"))
@@ -293,9 +319,6 @@ func sourceUnchanged(source string, recorded *Fingerprint) error {
 		return nil
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	if !recorded.Present {
-		return ErrLegacyChanged
-	}
 	actual, err := fingerprintOpen(f)
 	if err != nil {
 		return nil
@@ -350,6 +373,23 @@ func discardStage(stage, target string) error {
 	return os.RemoveAll(aside)
 }
 
+// rewriteMarker replaces the marker atomically: a crash leaves either the old
+// or the new marker, never a partial one.
+func rewriteMarker(root string, r record) error {
+	data, _ := json.Marshal(r)
+	temporary := filepath.Join(root, markerTemporary)
+	if err := os.Remove(temporary); err != nil && !os.IsNotExist(err) {
+		return errors.New("marker_write_failed")
+	}
+	if err := writeSync(temporary, data); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, filepath.Join(root, Marker)); err != nil {
+		return errors.New("marker_write_failed")
+	}
+	return syncDir(root)
+}
+
 func publishMarker(root string) error {
 	if err := os.Remove(filepath.Join(root, owner)); err != nil && !os.IsNotExist(err) {
 		return errors.New("staging_owner_cleanup_failed")
@@ -386,7 +426,7 @@ func syncDir(path string) error {
 }
 func skipped(rel string) bool {
 	base := filepath.Base(rel)
-	return rel == Marker || rel == pending || rel == owner || rel == "ipc" || rel == "logs" || rel == "host" || rel == "kownload-native-host" || base == ".DS_Store" || strings.HasSuffix(base, ".sock") || strings.HasSuffix(base, ".lock") || strings.HasSuffix(base, ".log")
+	return rel == Marker || rel == markerTemporary || rel == pending || rel == owner || rel == "ipc" || rel == "logs" || rel == "host" || rel == "kownload-native-host" || base == ".DS_Store" || strings.HasSuffix(base, ".sock") || strings.HasSuffix(base, ".lock") || strings.HasSuffix(base, ".log")
 }
 func copyTree(source, target string) error {
 	return filepath.WalkDir(source, func(path string, e os.DirEntry, err error) error {

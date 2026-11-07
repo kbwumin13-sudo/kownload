@@ -57,9 +57,12 @@ Future<void> runIdentityImport(
     }
     final result = await run(['--source', source, '--target', target]);
     final reply = jsonDecode(result.stdout.toString()) as Map<String, dynamic>;
-    if (reply['ok'] != true && reply['error'] == 'legacy_changed_after_import') {
+    if (reply['ok'] != true &&
+        reply['error'] == 'legacy_changed_after_import') {
       throw IdentityBootstrapException(
-          legacyChangedMessage(source: source, target: target));
+          legacyChangedMessage(source: source, target: target),
+          ignoreLegacyChanges: () =>
+              ignoreLegacyChanges(source: source, target: target, run: run));
     }
     if (result.exitCode != 0 || reply['ok'] != true) {
       throw const IdentityBootstrapException(
@@ -80,12 +83,34 @@ Future<void> runIdentityImport(
   }
 }
 
+/// Stores the persistent choice to keep this root and stop checking the
+/// legacy root. Returns whether the importer confirmed it.
+Future<bool> ignoreLegacyChanges(
+    {required String source,
+    required String target,
+    required ImportRunner run}) async {
+  try {
+    final result = await run(
+        ['--source', source, '--target', target, '--ignore-legacy-changes']);
+    final reply = jsonDecode(result.stdout.toString());
+    return result.exitCode == 0 && reply is Map && reply['ok'] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Shared with the persistent choice on the error page: the legacy root is
+/// also upstream Gopeed's data directory.
+const keepBothNote = '如果旧目录属于仍在使用的 Gopeed，或你想同时保留两个应用，可以点下面的按钮：'
+    '保留本应用的数据，今后不再检查旧目录。两边如果是同一批任务，请在其中一个应用里关闭'
+    '“打开应用时继续未完成的下载”（旧版中叫“自动开始任务”），避免两个应用同时写同一个文件。';
+
 /// The old version used its data directory after the import (for example
 /// after a rollback). Nothing is opened, resumed, moved or deleted; the user
-/// keeps one side by renaming the other directory.
+/// keeps one side by renaming the other directory, or keeps this one for good.
 String legacyChangedMessage({required String source, required String target}) {
   const stamp = r'$(date +%Y%m%d-%H%M%S)';
-  return '旧版 kownload 在迁移之后又使用过原来的数据目录，两边的下载记录已经不同。'
+  return '旧版 kownload（或使用同一数据目录的 Gopeed）在迁移之后又使用过原来的数据目录，两边的下载记录已经不同。'
       '为避免沿用过期的记录，本次没有打开下载数据，也没有继续任何任务；两个目录都没有改动。\n\n'
       '请先退出所有版本的 kownload，在“终端”里执行下面任意一条命令，再重新打开本应用。\n\n'
       '以旧版现在的数据为准（回退后又在旧版里下载过，选这一条）：\n'
@@ -93,12 +118,17 @@ String legacyChangedMessage({required String source, required String target}) {
       '重新打开后会从旧目录重新导入。\n\n'
       '继续使用本应用迁移后的数据：\n'
       'mv "$source" "$source.kept-$stamp"\n\n'
-      '两条命令都只给目录改名，改名后的目录可以随时改回原名。';
+      '两条命令都只给目录改名，改名后的目录可以随时改回原名。\n\n'
+      '$keepBothNote';
 }
 
 class IdentityBootstrapException implements Exception {
   final String message;
-  const IdentityBootstrapException(this.message);
+
+  /// Offered on the error page when keeping this root for good is safe to
+  /// choose: it records the choice in the import marker.
+  final Future<bool> Function()? ignoreLegacyChanges;
+  const IdentityBootstrapException(this.message, {this.ignoreLegacyChanges});
   @override
   String toString() => message;
 }

@@ -16,7 +16,7 @@ IDENTITY = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'config/ide
 # Browser profile directories under ~/Library/Application Support whose
 # NativeMessagingHosts the installed app switches (identity/native_manifests.dart).
 BROWSERS = {'chrome': ('Google', 'Chrome'), 'edge': ('Microsoft Edge',)}
-SKIP = {'.kownload-identity.json', '.kownload-import-pending.json', '.kownload-import-owner',
+SKIP = {'.kownload-identity.json', '.kownload-identity.json.tmp', '.kownload-import-pending.json', '.kownload-import-owner',
         'ipc', 'native-manifest-backups', IDENTITY['hostExecutable'], 'logs'}
 
 def sha256(path):

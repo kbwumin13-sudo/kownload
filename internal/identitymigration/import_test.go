@@ -342,20 +342,99 @@ func TestRunningLegacyAppIsNotCompared(t *testing.T) {
 	}
 }
 
-func TestLegacyDatabaseCreatedAfterFreshSetupIsRefused(t *testing.T) {
-	dir := t.TempDir()
-	source, target := filepath.Join(dir, "legacy"), filepath.Join(dir, "current")
-	if s, err := Import(Options{Source: source, Target: target}); err != nil || s.Imported {
-		t.Fatal(s, err)
-	}
-	os.Mkdir(source, 0700)
+// upstreamWrite stands in for upstream Gopeed, which uses the same data root
+// and database file name as the legacy kownload.
+func upstreamWrite(t *testing.T, source, value string) {
+	t.Helper()
+	os.MkdirAll(source, 0700)
 	db, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	defer db.Close()
+	if err = db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("task"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("upstream"), []byte(value))
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review finding R2-1 (reviewer reproduction E1): after a fresh setup the
+// legacy root that appears later belongs to upstream Gopeed, not to a
+// migrated kownload, so its changes never block startup.
+func TestUpstreamGopeedRootAfterFreshSetupIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	source, target := filepath.Join(dir, "com.gopeed.gopeed"), filepath.Join(dir, "current")
+	if s, err := Import(Options{Source: source, Target: target}); err != nil || s.Imported {
+		t.Fatal(s, err)
+	}
+	upstreamWrite(t, source, "gopeed-upstream-task")
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("upstream Gopeed starting must not block kownload", err)
+	}
+	upstreamWrite(t, source, "gopeed-again")
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("upstream Gopeed running again must not block kownload", err)
+	}
+}
+
+// Review finding R2-1: a user who imported from the legacy root and keeps
+// using upstream Gopeed there can choose once to keep this root and stop the
+// check; the choice is stored in the marker and survives later changes.
+func TestIgnoreLegacyChangesIsPersistent(t *testing.T) {
+	source, target := fixture(t)
+	first, err := Import(Options{Source: source, Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamWrite(t, source, "after-import")
 	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
 		t.Fatal(err)
+	}
+	kept, err := Import(Options{Source: source, Target: target, IgnoreLegacyChanges: true})
+	if err != nil || kept != first {
+		t.Fatal("the persistent choice must keep the imported data", kept, err)
+	}
+	data, _ := os.ReadFile(filepath.Join(target, Marker))
+	var m record
+	if json.Unmarshal(data, &m) != nil || !m.IgnoreLegacyChanges || m.Summary != first || m.SourceDatabase == nil {
+		t.Fatal("marker did not keep the choice and the import record", string(data))
+	}
+	if _, err = os.Stat(filepath.Join(target, markerTemporary)); !os.IsNotExist(err) {
+		t.Fatal("marker rewrite left its temporary file")
+	}
+	upstreamWrite(t, source, "later-change")
+	if _, err = Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("later changes must be ignored after the choice", err)
+	}
+	if current, _ := summarize(target, true); current != first {
+		t.Fatal("the choice changed the imported data")
+	}
+}
+
+func TestIgnoreChoiceCompletesPendingImport(t *testing.T) {
+	source, target := fixture(t)
+	Import(Options{Source: source, Target: target, Hook: func(phase string) error {
+		if phase == "published" {
+			return errors.New("fixture_interrupt")
+		}
+		return nil
+	}})
+	upstreamWrite(t, source, "after-import")
+	if _, err := Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+		t.Fatal(err)
+	}
+	if _, err := Import(Options{Source: source, Target: target, IgnoreLegacyChanges: true}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(target, Marker))
+	var m record
+	if json.Unmarshal(data, &m) != nil || !m.IgnoreLegacyChanges {
+		t.Fatal("pending import published without the choice", string(data))
 	}
 }
 
