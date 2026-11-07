@@ -2402,6 +2402,15 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 				return fmt.Errorf("%w: new URL is outside the saved resource", ErrUnsafeResume)
 			}
 		}
+		if req.URL != "" {
+			// A checkpoint saved without a query key keeps the one of the link
+			// its bytes came from, so that a changed query is noticed.
+			f.identityMu.Lock()
+			if f.identity.QueryKey == "" {
+				f.identity.QueryKey = requestQueryKey(f.meta.Req)
+			}
+			f.identityMu.Unlock()
+		}
 		f.linkPatched = true
 		f.resolveRespLock.Lock()
 		if f.resolveResp != nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ var ErrUnsafeResume = errors.New("cannot verify HTTP resource identity; partial 
 
 type representation struct {
 	ResourceKey  string `json:"resourceKey,omitempty"`
+	QueryKey     string `json:"queryKey,omitempty"`
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"lastModified,omitempty"`
 	Size         int64  `json:"size,omitempty"`
@@ -62,17 +64,13 @@ func (f *Fetcher) rememberRepresentation(resp *http.Response, size int64) {
 	f.identityMu.Lock()
 	f.identity = responseRepresentation(resp, size)
 	f.identity.ResourceKey = requestResourceKey(f.meta.Req)
+	f.identity.QueryKey = requestQueryKey(f.meta.Req)
 	f.identityMu.Unlock()
 }
 
-// requestResourceKey scopes saved validators to one resource: the scheme,
-// host and path of the URL, or a Mail.ru link's public share page. It is only
-// compared when a validator was saved. The query may change, as it does for
-// renewed signed links of the same file (token, e, st/se, q-sign-time, hdnts,
-// Policy...); If-Range and the validator check on every response decide
-// whether the saved bytes still match. Without a validator the saved-overlap
-// comparison decides instead.
-func requestResourceKey(req *base.Request) string {
+// resourceURL is the URL that names the resource: the request URL, or the
+// public share page of a Mail.ru link.
+func resourceURL(req *base.Request) string {
 	raw := req.URL
 	if extra, ok := req.Extra.(*fhttp.ReqExtra); ok && extra != nil {
 		header := http.Header{}
@@ -85,10 +83,70 @@ func requestResourceKey(req *base.Request) string {
 	} else if source, ok := mailru.Match(raw, ""); ok {
 		raw = source.Page()
 	}
+	return raw
+}
+
+// requestResourceKey scopes saved validators to one resource: the scheme,
+// host and path of the URL, or a Mail.ru link's public share page. It is only
+// compared when a validator was saved. The query may change, as it does for
+// renewed signed links of the same file; If-Range and the validator check on
+// every response decide whether the saved bytes still match, together with a
+// comparison of saved bytes when more than signatures changed (see
+// requestQueryKey). Without a validator the saved-overlap comparison decides.
+func requestResourceKey(req *base.Request) string {
+	raw := resourceURL(req)
 	if u, err := url.Parse(raw); err == nil {
 		raw = u.Scheme + "://" + strings.ToLower(u.Host) + u.EscapedPath()
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
+}
+
+// signatureParams sign or expire a link without choosing the file: generic
+// names, Qiniu, Azure SAS, CloudFront, Alibaba Cloud OSS and CDN, Akamai and
+// Google Cloud V2. Amazon S3 (x-amz-*), Google Cloud V4 (x-goog-*) and Tencent
+// Cloud COS (q-*) use prefixes. A parameter missing here only costs one
+// comparison of saved bytes on resume, never a refusal.
+var signatureParams = map[string]bool{
+	"sig": true, "signature": true, "expires": true, "expire": true,
+	"e": true, "token": true,
+	"sv": true, "ss": true, "srt": true, "sp": true, "se": true, "st": true, "spr": true, "sip": true,
+	"sr": true, "si": true, "sdd": true, "skoid": true, "sktid": true, "skt": true, "ske": true,
+	"sks": true, "skv": true, "saoid": true, "suoid": true, "scid": true, "ses": true,
+	"rscc": true, "rscd": true, "rsce": true, "rscl": true, "rsct": true,
+	"policy": true, "key-pair-id": true,
+	"ossaccesskeyid": true, "security-token": true, "auth_key": true,
+	"x-oss-signature-version": true, "x-oss-credential": true, "x-oss-date": true, "x-oss-expires": true,
+	"x-oss-signature": true, "x-oss-security-token": true, "x-oss-additional-headers": true,
+	"hdnts": true, "hdnea": true, "__token__": true,
+	"googleaccessid": true, "x-cos-security-token": true,
+}
+
+func signatureParam(name string) bool {
+	name = strings.ToLower(name)
+	return signatureParams[name] || strings.HasPrefix(name, "x-amz-") ||
+		strings.HasPrefix(name, "x-goog-") || strings.HasPrefix(name, "q-")
+}
+
+// requestQueryKey identifies the query of the resource URL without its
+// signature and expiry parameters. Renewed signed links of one file share it.
+// When it changed since the saved bytes were confirmed, such as
+// download?id=2 patched into the task of id=1, a resume with a saved
+// validator compares saved bytes as well: another file can share a validator.
+func requestQueryKey(req *base.Request) string {
+	var kept []string
+	if u, err := url.Parse(resourceURL(req)); err == nil {
+		for _, part := range strings.Split(u.RawQuery, "&") {
+			name, _, _ := strings.Cut(part, "=")
+			if decoded, err := url.QueryUnescape(name); err == nil {
+				name = decoded
+			}
+			if part != "" && !signatureParam(name) {
+				kept = append(kept, part)
+			}
+		}
+	}
+	sort.Strings(kept)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(kept, "&"))))
 }
 
 // SetResourceKey binds a child to a file whose provider/source/ID the wrapper
@@ -203,8 +261,9 @@ func (f *Fetcher) completedLocalCheckpoint() bool {
 
 // checkResumeIdentity checks what the checkpoint itself can prove, without a
 // request. overlap reports saved ranges that only a comparison with the
-// server can confirm, because no validator or trusted digest was saved; the
-// download loop runs it before any stream starts (verifySavedOverlaps).
+// server can confirm: no validator or trusted digest was saved, or the link
+// changed in more than its signatures. The download loop runs it before any
+// stream starts (verifySavedOverlaps).
 func (f *Fetcher) checkResumeIdentity() (overlap bool, err error) {
 	if !f.usesRanges() || !f.hasResumeData() {
 		return false, nil // Full GET restarts from zero; it cannot reuse an old prefix.
@@ -225,7 +284,10 @@ func (f *Fetcher) checkResumeIdentity() (overlap bool, err error) {
 		return false, fmt.Errorf("%w: saved total length changed", ErrUnsafeResume)
 	}
 	if r.ETag != "" || r.LastModified != "" || f.rangeResumeValidator != "" || r.Hash != "" && r.Hash == external {
-		return false, nil
+		// A link changed in more than its signatures may name another file
+		// that shares the validator. A provider key already names the file.
+		queryChanged := f.resourceKey == "" && r.QueryKey != "" && r.QueryKey != requestQueryKey(f.meta.Req)
+		return queryChanged, nil
 	}
 	return true, nil
 }

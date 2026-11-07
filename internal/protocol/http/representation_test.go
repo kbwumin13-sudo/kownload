@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -263,5 +264,147 @@ func TestRepresentationRenewedSignatureResumes(t *testing.T) {
 				t.Fatalf("renewed link: %v bytes=%d", err, len(got))
 			}
 		})
+	}
+}
+
+// storeAndRestore saves f as the Downloader does and restores it, as after a
+// restart.
+func storeAndRestore(t *testing.T, f *Fetcher) *Fetcher {
+	t.Helper()
+	fm := &FetcherManager{}
+	data, err := fm.Store(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(data)
+	metaJSON, _ := json.Marshal(f.Meta())
+	var meta fetcher.FetcherMeta
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		t.Fatal(err)
+	}
+	value, restore := fm.Restore()
+	if err := json.Unmarshal(encoded, value); err != nil {
+		t.Fatal(err)
+	}
+	ctl := f.ctl
+	f.Close()
+	restored := restore(&meta, value).(*Fetcher)
+	restored.Setup(ctl)
+	t.Cleanup(func() { restored.Close() })
+	return restored
+}
+
+// One download path serves two files chosen by a query parameter, with the
+// same ETag and length (split archives a script made in the same second, for
+// one). Patching the task of id=1 to id=2 keeps scheme, host and path, so the
+// link is accepted, but a parameter other than a signature changed: the
+// resume compares saved bytes too and refuses the other file, keeping the
+// saved bytes. Renewing only signatures still resumes on the validator alone;
+// a parameter the list does not know costs one comparison, not a refusal.
+func TestPatchedQueryComparesSavedBytes(t *testing.T) {
+	const size = 4 << 20
+	files := map[string][]byte{"1": bytes.Repeat([]byte("A"), size), "2": bytes.Repeat([]byte("B"), size)}
+	for _, tc := range []struct {
+		name, from, to string
+		checks         int32
+		refused        bool
+	}{
+		{"signature renewed", "?id=1&token=a&e=1&Signature=x", "?id=1&token=b&e=2&Signature=y", 0, false},
+		{"unknown parameter", "?id=1&mirror=a", "?id=1&mirror=b", 1, false},
+		{"other file", "?id=1", "?id=2", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var checks atomic.Int32
+			var withoutValidator atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data := files[r.URL.Query().Get("id")]
+				if data == nil {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if isOverlapCheck(r) {
+					checks.Add(1)
+				} else if r.Header.Get("Range") != "" && r.Header.Get("If-Range") != `"same"` {
+					withoutValidator.Store(true)
+				}
+				w.Header().Set("ETag", `"same"`)
+				serveUnvalidatedRange(t, w, r, data, 0, true)
+			}))
+			defer srv.Close()
+			f := buildFetcher()
+			defer f.Close()
+			if err := f.Resolve(&base.Request{URL: srv.URL + "/download" + tc.from}, &base.Options{Path: t.TempDir(), Name: "part.bin", Extra: &fhttp.OptsExtra{Connections: 1}}); err != nil {
+				t.Fatal(err)
+			}
+			if !f.hasResumeValidator() {
+				t.Fatal("fixture has no validator")
+			}
+			if err := f.Start(); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for f.Progress().TotalDownloaded() < 256<<10 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if err := f.Pause(); err != nil {
+				t.Fatal(err)
+			}
+			if paused := f.Progress().TotalDownloaded(); paused <= 0 || paused >= size {
+				t.Fatalf("fixture did not pause mid-transfer: %d", paused)
+			}
+			if err := f.Patch(&base.Request{URL: srv.URL + "/download" + tc.to}, nil); err != nil {
+				t.Fatal(err)
+			}
+			f = storeAndRestore(t, f)
+			before, _ := os.ReadFile(f.Meta().SingleFilepath())
+			err := f.Start()
+			if err == nil {
+				err = waitDone(t, f, 20*time.Second)
+			}
+			after, _ := os.ReadFile(f.Meta().SingleFilepath())
+			if tc.refused {
+				if !errors.Is(err, ErrUnsafeResume) || !bytes.Equal(before, after) {
+					t.Fatalf("other file behind the same path: %v unchanged=%t", err, bytes.Equal(before, after))
+				}
+			} else if err != nil || !bytes.Equal(after, files["1"]) {
+				t.Fatalf("same file: %v equal=%t", err, bytes.Equal(after, files["1"]))
+			}
+			if n := checks.Load(); n != tc.checks {
+				t.Fatalf("saved-overlap requests=%d, want %d", n, tc.checks)
+			}
+			if withoutValidator.Load() {
+				t.Fatal("a resumed range was sent without the saved validator")
+			}
+		})
+	}
+}
+
+// Renewing only signature or expiry parameters keeps the query key; changing
+// anything else, or adding a parameter, gives another one.
+func TestQueryKeyIgnoresSignatureParameters(t *testing.T) {
+	key := func(raw string) string { return requestQueryKey(&base.Request{URL: raw}) }
+	for _, pair := range [][2]string{
+		{"https://x.example/f.bin?e=1&token=ak:a", "https://x.example/f.bin?e=2&token=ak:b"},                                          // Qiniu
+		{"https://a.blob.core.windows.net/c/f.bin?sv=1&st=1&se=1&sp=r&sr=b&sig=a", "https://a.blob.core.windows.net/c/f.bin?sv=2&st=2&se=2&sp=rw&sr=c&sig=b"}, // Azure SAS
+		{"https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=1&q-key-time=1&q-signature=a", "https://b.cos.example/f.bin?q-sign-algorithm=sha1&q-ak=a&q-sign-time=2&q-key-time=2&q-signature=b"}, // Tencent Cloud
+		{"https://d.cloudfront.net/f.bin?Expires=1&Signature=a&Key-Pair-Id=K1", "https://d.cloudfront.net/f.bin?Policy=p&Signature=b&Key-Pair-Id=K2"}, // CloudFront
+		{"https://b.oss.example/f.bin?OSSAccessKeyId=a&Expires=1&Signature=a", "https://b.oss.example/f.bin?OSSAccessKeyId=b&Expires=2&Signature=b&security-token=t"}, // Alibaba Cloud OSS
+		{"https://cdn.example/f.bin?auth_key=1-0-0-a", "https://cdn.example/f.bin?auth_key=2-0-0-b"},                                     // Alibaba Cloud CDN
+		{"https://ak.example/f.bin?hdnts=exp=1~hmac=a", "https://ak.example/f.bin?__token__=exp=2~hmac=b"},                               // Akamai
+		{"https://s3.example/f.bin?X-Amz-Expires=1&X-Amz-Signature=a", "https://s3.example/f.bin?X-Amz-Expires=2&X-Amz-Signature=b"},   // Amazon S3
+		{"https://x.example/f.bin?id=7&token=a", "https://x.example/f.bin?token=b&id=7"},                                                 // order
+	} {
+		if key(pair[0]) != key(pair[1]) {
+			t.Errorf("signature renewal changed the query key: %s -> %s", pair[0], pair[1])
+		}
+	}
+	for _, pair := range [][2]string{
+		{"https://x.example/download?id=1", "https://x.example/download?id=2"},
+		{"https://x.example/download?file=a.bin&token=a", "https://x.example/download?file=b.bin&token=a"},
+		{"https://x.example/f.bin?token=a", "https://x.example/f.bin?token=a&part=2"},
+	} {
+		if key(pair[0]) == key(pair[1]) {
+			t.Errorf("query key ignored a resource parameter: %s -> %s", pair[0], pair[1])
+		}
 	}
 }
