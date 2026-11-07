@@ -101,19 +101,14 @@ func requestResourceKey(req *base.Request) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
 }
 
-// signatureParams sign or expire a link without choosing the file: generic
-// names, Qiniu, Azure SAS, CloudFront, Alibaba Cloud OSS and CDN, Akamai and
-// Google Cloud V2. Amazon S3 (x-amz-*), Google Cloud V4 (x-goog-*) and Tencent
-// Cloud COS (q-*) use prefixes. A parameter missing here only costs one
-// comparison of saved bytes on resume, never a refusal.
+// signatureParams sign or expire a link without choosing the file wherever
+// they appear: generic names, CloudFront's key pair, Alibaba Cloud OSS and
+// CDN, Akamai, Google Cloud V2 and Tencent Cloud's session token, besides the
+// x-amz-* (Amazon S3) and x-goog-* (Google Cloud V4) prefixes. A parameter
+// missing here only costs one comparison of saved bytes on resume, never a
+// refusal.
 var signatureParams = map[string]bool{
-	"sig": true, "signature": true, "expires": true, "expire": true,
-	"e": true, "token": true,
-	"sv": true, "ss": true, "srt": true, "sp": true, "se": true, "st": true, "spr": true, "sip": true,
-	"sr": true, "si": true, "sdd": true, "skoid": true, "sktid": true, "skt": true, "ske": true,
-	"sks": true, "skv": true, "saoid": true, "suoid": true, "scid": true, "ses": true,
-	"rscc": true, "rscd": true, "rsce": true, "rscl": true, "rsct": true,
-	"policy": true, "key-pair-id": true,
+	"sig": true, "signature": true, "expires": true, "expire": true, "key-pair-id": true,
 	"ossaccesskeyid": true, "security-token": true, "auth_key": true,
 	"x-oss-signature-version": true, "x-oss-credential": true, "x-oss-date": true, "x-oss-expires": true,
 	"x-oss-signature": true, "x-oss-security-token": true, "x-oss-additional-headers": true,
@@ -121,10 +116,45 @@ var signatureParams = map[string]bool{
 	"googleaccessid": true, "x-cos-security-token": true,
 }
 
-func signatureParam(name string) bool {
-	name = strings.ToLower(name)
-	return signatureParams[name] || strings.HasPrefix(name, "x-amz-") ||
-		strings.HasPrefix(name, "x-goog-") || strings.HasPrefix(name, "q-")
+var azureSASParams = map[string]bool{
+	"sv": true, "ss": true, "srt": true, "sp": true, "se": true, "st": true, "spr": true, "sip": true,
+	"sr": true, "si": true, "sdd": true, "skoid": true, "sktid": true, "skt": true, "ske": true,
+	"sks": true, "skv": true, "saoid": true, "suoid": true, "scid": true, "ses": true,
+	"rscc": true, "rscd": true, "rsce": true, "rscl": true, "rsct": true,
+}
+
+// providerSignatures are short names that sign a link only beside all of
+// their provider's markers in the same query. Elsewhere a site may use them
+// to choose the file, as ?e=2 for episode 2.
+var providerSignatures = []struct {
+	markers []string
+	signs   func(name string) bool
+}{
+	{[]string{"e", "token"}, func(name string) bool { return name == "e" || name == "token" }}, // Qiniu
+	{[]string{"sig"}, func(name string) bool { return azureSASParams[name] }},                  // Azure SAS
+	{[]string{"q-signature"}, func(name string) bool { return strings.HasPrefix(name, "q-") }}, // Tencent Cloud COS
+	{[]string{"signature", "key-pair-id"}, func(name string) bool { return name == "policy" }}, // CloudFront
+}
+
+// signatureParam reports whether the lower-case parameter name signs or
+// expires the link, given the names present in its query.
+func signatureParam(name string, present map[string]bool) bool {
+	if signatureParams[name] || strings.HasPrefix(name, "x-amz-") || strings.HasPrefix(name, "x-goog-") {
+		return true
+	}
+	for _, provider := range providerSignatures {
+		if !provider.signs(name) {
+			continue
+		}
+		signed := true
+		for _, marker := range provider.markers {
+			signed = signed && present[marker]
+		}
+		if signed {
+			return true
+		}
+	}
+	return false
 }
 
 // requestQueryKey identifies the query of the resource URL without its
@@ -133,16 +163,26 @@ func signatureParam(name string) bool {
 // download?id=2 patched into the task of id=1, a resume with a saved
 // validator compares saved bytes as well: another file can share a validator.
 func requestQueryKey(req *base.Request) string {
-	var kept []string
+	var parts, names []string
+	present := map[string]bool{}
 	if u, err := url.Parse(resourceURL(req)); err == nil {
 		for _, part := range strings.Split(u.RawQuery, "&") {
+			if part == "" {
+				continue
+			}
 			name, _, _ := strings.Cut(part, "=")
 			if decoded, err := url.QueryUnescape(name); err == nil {
 				name = decoded
 			}
-			if part != "" && !signatureParam(name) {
-				kept = append(kept, part)
-			}
+			name = strings.ToLower(name)
+			parts, names = append(parts, part), append(names, name)
+			present[name] = true
+		}
+	}
+	var kept []string
+	for i, part := range parts {
+		if !signatureParam(names[i], present) {
+			kept = append(kept, part)
 		}
 	}
 	sort.Strings(kept)

@@ -245,9 +245,9 @@ func TestRepresentationRenewedSignatureResumes(t *testing.T) {
 				w.Write(payload[8:])
 			}))
 			defer srv.Close()
-			f := representationPrefix(t, srv.URL+"/file.bin?token=old", &representation{ETag: `"v1"`, Size: 32}, payload)
+			f := representationPrefix(t, srv.URL+"/file.bin?e=1700000000&token=old", &representation{ETag: `"v1"`, Size: 32}, payload)
 			f.identity.ResourceKey = requestResourceKey(f.meta.Req)
-			if err := f.Patch(&base.Request{URL: srv.URL + "/file.bin?token=new"}, nil); err != nil {
+			if err := f.Patch(&base.Request{URL: srv.URL + "/file.bin?e=1700003600&token=new"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			err := f.Start()
@@ -299,25 +299,35 @@ func storeAndRestore(t *testing.T, f *Fetcher) *Fetcher {
 // one). Patching the task of id=1 to id=2 keeps scheme, host and path, so the
 // link is accepted, but a parameter other than a signature changed: the
 // resume compares saved bytes too and refuses the other file, keeping the
-// saved bytes. Renewing only signatures still resumes on the validator alone;
-// a parameter the list does not know costs one comparison, not a refusal.
+// saved bytes. That includes a short signature name used without its
+// provider's markers (?e=2 for episode 2). Renewing only signatures, as
+// Qiniu, Azure SAS, Tencent Cloud and CloudFront links do, still resumes on
+// the validator alone; a parameter the list does not know costs one
+// comparison, not a refusal.
 func TestPatchedQueryComparesSavedBytes(t *testing.T) {
 	const size = 4 << 20
 	files := map[string][]byte{"1": bytes.Repeat([]byte("A"), size), "2": bytes.Repeat([]byte("B"), size)}
 	for _, tc := range []struct {
-		name, from, to string
-		checks         int32
-		refused        bool
+		name, selector, from, to string
+		checks                   int32
+		refused                  bool
 	}{
-		{"signature renewed", "?id=1&token=a&e=1&Signature=x", "?id=1&token=b&e=2&Signature=y", 0, false},
-		{"unknown parameter", "?id=1&mirror=a", "?id=1&mirror=b", 1, false},
-		{"other file", "?id=1", "?id=2", 1, true},
+		{"signature renewed", "id", "?id=1&token=a&e=1&Signature=x", "?id=1&token=b&e=2&Signature=y", 0, false},
+		{"Qiniu", "id", "?id=1&e=1700000000&token=AK:sign1", "?id=1&e=1700003600&token=AK:sign2", 0, false},
+		{"Azure SAS", "id", "?id=1&sv=2022-11-02&st=2026-11-07T00%3A00Z&se=2026-11-08T00%3A00Z&sr=b&sp=r&sig=a1",
+			"?id=1&sv=2022-11-02&st=2026-11-08T00%3A00Z&se=2026-11-09T00%3A00Z&sr=b&sp=r&sig=b2", 0, false},
+		{"Tencent Cloud", "id", "?id=1&q-sign-algorithm=sha1&q-ak=AK&q-sign-time=1700000000%3B1700003600&q-key-time=1700000000%3B1700003600&q-header-list=&q-url-param-list=&q-signature=a1",
+			"?id=1&q-sign-algorithm=sha1&q-ak=AK&q-sign-time=1700003600%3B1700007200&q-key-time=1700003600%3B1700007200&q-header-list=&q-url-param-list=&q-signature=b2", 0, false},
+		{"CloudFront", "id", "?id=1&Policy=p1&Signature=s1&Key-Pair-Id=K1", "?id=1&Policy=p2&Signature=s2&Key-Pair-Id=K1", 0, false},
+		{"unknown parameter", "id", "?id=1&mirror=a", "?id=1&mirror=b", 1, false},
+		{"other file", "id", "?id=1", "?id=2", 1, true},
+		{"short name chooses the file", "e", "?e=1", "?e=2", 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var checks atomic.Int32
 			var withoutValidator atomic.Bool
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				data := files[r.URL.Query().Get("id")]
+				data := files[r.URL.Query().Get(tc.selector)]
 				if data == nil {
 					w.WriteHeader(http.StatusNotFound)
 					return
@@ -396,16 +406,23 @@ func TestQueryKeyIgnoresSignatureParameters(t *testing.T) {
 		{"Alibaba Cloud CDN", "https://cdn.example/f.bin?auth_key=1-0-0-a", "https://cdn.example/f.bin?auth_key=2-0-0-b"},
 		{"Akamai", "https://ak.example/f.bin?hdnts=exp=1~hmac=a", "https://ak.example/f.bin?__token__=exp=2~hmac=b"},
 		{"Amazon S3", "https://s3.example/f.bin?X-Amz-Expires=1&X-Amz-Signature=a", "https://s3.example/f.bin?X-Amz-Expires=2&X-Amz-Signature=b"},
-		{"parameter order", "https://x.example/f.bin?id=7&token=a", "https://x.example/f.bin?token=b&id=7"},
+		{"parameter order", "https://x.example/f.bin?id=7&Signature=a", "https://x.example/f.bin?Signature=b&id=7"},
 	} {
 		if key(tc.old) != key(tc.renewed) {
 			t.Errorf("%s: signature renewal changed the query key", tc.name)
 		}
 	}
+	// Short names choose the file unless their provider's markers are there too.
 	for _, pair := range [][2]string{
 		{"https://x.example/download?id=1", "https://x.example/download?id=2"},
 		{"https://x.example/download?file=a.bin&token=a", "https://x.example/download?file=b.bin&token=a"},
 		{"https://x.example/f.bin?token=a", "https://x.example/f.bin?token=a&part=2"},
+		{"https://x.example/show?e=1", "https://x.example/show?e=2"},
+		{"https://x.example/show?e=1&sig=a", "https://x.example/show?e=2&sig=a"},
+		{"https://x.example/f.bin?token=a", "https://x.example/f.bin?token=b"},
+		{"https://x.example/f.bin?st=1&sp=a", "https://x.example/f.bin?st=2&sp=b"},
+		{"https://x.example/f.bin?q-ak=a&q-sign-time=1", "https://x.example/f.bin?q-ak=b&q-sign-time=2"},
+		{"https://x.example/f.bin?Policy=a&Signature=x", "https://x.example/f.bin?Policy=b&Signature=y"},
 	} {
 		if key(pair[0]) == key(pair[1]) {
 			t.Errorf("query key ignored a resource parameter: %s -> %s", pair[0], pair[1])
