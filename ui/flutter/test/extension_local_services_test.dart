@@ -6,7 +6,7 @@ import 'package:gopeed/api/model/extension.dart';
 import 'package:gopeed/app/modules/extension/controllers/extension_controller.dart';
 
 void main() {
-  test('manual install, settings and update never call the old market proxy',
+  test('manual install and extension update never call the old market proxy',
       () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final requests = <String>[];

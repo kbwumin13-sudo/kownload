@@ -141,7 +141,8 @@ def main():
         f'Commit archive after publication: https://github.com/kbwumin13-sudo/kownload/archive/{commit}.tar.gz\n'
         'This local candidate is unpublished. Publication must include its source archive,\n'
         'build instructions, dependency source locations and license notices.\n'
-        'Exact Go dependency source archives: legal/go-modules.json.\n'
+        'Exact Go dependency source archives: go-modules.json in Corresponding Source\n'
+        '(also App Contents/Resources/legal/go-modules.json).\n'
         'Flutter dependencies: ui/flutter/pubspec.lock in Corresponding Source;\n'
         'Flutter/Dart source: official versions identified in build-manifest.json.\n')
     (legal / 'SOURCE.txt').write_text(source_notice)
@@ -166,6 +167,9 @@ def main():
     for file in mach:
         run('xcrun', 'strip', '-S', '-x', file)
         run('codesign', '--force', '--sign', '-', file)
+    for framework in sorted(app.rglob('*.framework'), key=lambda x: len(x.parts), reverse=True):
+        if not framework.is_symlink():
+            run('codesign', '--force', '--sign', '-', framework)
     run('codesign', '--force', '--sign', '-', '--entitlements', ui / 'macos/Runner/Release.entitlements', app)
     run('codesign', '--verify', '--deep', '--strict', app)
     scanner = load('kownload_path_scan', source / 'scripts/scan-package-paths.py')
@@ -186,7 +190,7 @@ def main():
     mount.mkdir()
     try:
         run('hdiutil', 'attach', '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', mount, dmg)
-        final_scan = scanner.scan(mount / 'kownload.app')
+        final_scan = scanner.scan(mount)
         (destination / 'dmg-path-scan.json').write_text(json.dumps(final_scan, indent=2) + '\n')
         if final_scan['personalPaths']:
             raise RuntimeError('Personal paths in final DMG')
@@ -204,9 +208,14 @@ def main():
         with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
             for member in tree.getmembers():
                 bundle.addfile(member, tree.extractfile(member) if member.isfile() else None)
+        module_data = (json.dumps(modules, indent=2) + '\n').encode()
+        member = tarfile.TarInfo('go-modules.json')
+        member.size = len(module_data)
+        bundle.addfile(member, io.BytesIO(module_data))
         for m in modules:
             meta = json.loads(output(go, 'mod', 'download', '-json', m['module'] + '@' + m['version'], cwd=source))
             bundle.add(meta['Zip'], arcname='dependency-sources/go/' + pathlib.Path(meta['Zip']).name.replace('.zip', '') + '-' + hashlib.sha256(m['module'].encode()).hexdigest()[:12] + '.zip')
+    (destination / 'go-modules.json').write_text(json.dumps(modules, indent=2) + '\n')
     (destination / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     assets = [dmg, helper_zip, destination / source_name]
     (destination / 'SHA256SUMS.txt').write_text(''.join(hashlib.file_digest(f.open('rb'), 'sha256').hexdigest() + '  ' + f.name + '\n' for f in assets))

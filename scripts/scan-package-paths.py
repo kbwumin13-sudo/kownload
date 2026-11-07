@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Scan all ordinary package files; report locations, never personal path values."""
 import argparse
+import gzip
 import json
 import pathlib
 import re
@@ -13,9 +14,11 @@ def scan(root):
         if not file.is_file() or file.is_symlink():
             continue
         data = file.read_bytes()
+        if data[:2] == b'\x1f\x8b' and file.suffix in ['.Z', '.gz']:
+            data = gzip.decompress(data)
         count += 1
         # UTF-8 strings as well as Windows and Unix home-path forms.
-        patterns = [rb'/Users/[^/\s\x00"<>]+/', rb'/home/[^/\s\x00"<>]+/',
+        patterns = [rb'(?<![A-Za-z0-9_.-])/Users/[^/\s\x00"<>]+/', rb'(?<![A-Za-z0-9_.-])/home/[^/\s\x00"<>]+/',
                     rb'[A-Za-z]:\\Users\\[^\\\s\x00"<>]+\\']
         offsets = []
         for pattern in patterns:

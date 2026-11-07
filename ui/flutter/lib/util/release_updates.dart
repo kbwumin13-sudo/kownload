@@ -9,18 +9,22 @@ import 'release_version.dart';
 
 export 'release_version.dart' show VersionInfo;
 
-// Set from config/release.json by the macOS build. The fallback identifies the
-// build25 development baseline; it never treats public build19 as an upgrade.
-const bundledReleaseVersion = String.fromEnvironment('KOWNLOAD_RELEASE_VERSION',
-    defaultValue: '1.9.3-kownload.14');
+// Release builds set this from config/release.json. Direct development builds
+// read the running core's actual version; an unknown version never offers an update.
+const bundledReleaseVersion =
+    String.fromEnvironment('KOWNLOAD_RELEASE_VERSION');
 
 Future<VersionInfo?> checkUpdate() async {
   try {
+    final current = bundledReleaseVersion.isEmpty
+        ? await getCoreVersion()
+        : bundledReleaseVersion;
+    if (current == null) return null;
     final response = await proxyRequest(
         'https://api.github.com/repos/kbwumin13-sudo/kownload/releases/latest');
     final data = jsonDecode(response.data ?? '');
     if (data is! Map<String, dynamic>) return null;
-    return newerRelease(data, bundledReleaseVersion);
+    return newerRelease(data, current);
   } catch (_) {
     return null;
   }
