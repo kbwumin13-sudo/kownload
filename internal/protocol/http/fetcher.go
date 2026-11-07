@@ -921,6 +921,11 @@ func (f *Fetcher) doStart() error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](f.meta.Req); err != nil {
 		return err
 	}
+	// The resume checks below are this run's first requests: a public link
+	// that expired while paused may use this run's refresh.
+	f.publicMu.Lock()
+	f.publicRefreshes = 0
+	f.publicMu.Unlock()
 	if err := f.upgradeRangeResume(); err != nil {
 		return err
 	}
@@ -1005,10 +1010,6 @@ func (f *Fetcher) doStart() error {
 	maxConns := f.meta.Opts.Extra.(*fhttp.OptsExtra).Connections
 	f.configuredStreams.Store(int32(maxConns))
 	f.slowStart = newSlowStartController(maxConns)
-
-	f.publicMu.Lock()
-	f.publicRefreshes = 0
-	f.publicMu.Unlock()
 
 	// Create main context
 	f.ctx, f.cancel = context.WithCancel(context.Background())

@@ -221,3 +221,88 @@ func TestPublicLinkRefreshPreservesRepresentation(t *testing.T) {
 		})
 	}
 }
+
+// A public link refreshed during one run expires while the task is paused.
+// Without a validator, continuing compares saved bytes with the server first;
+// that request belongs to the new run, which may refresh the link once more.
+func TestPublicLinkContinueRefreshesWithoutValidator(t *testing.T) {
+	payload := rangeProbePayload(4 << 20)
+	var dispatches, validGen atomic.Int32
+	validGen.Store(1)
+	proxy := publicLinkProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/dispatcher" {
+			dispatches.Add(1)
+			fmt.Fprint(w, `{"body":{"weblink_get":[{"url":"https://cloclo1.cloud.mail.ru/public/synthetic/g/no"}]}}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/public/synthetic/g/no/") {
+			w.Header().Set("Location", fmt.Sprintf("https://cloclo2.datacloudmail.ru/public/get/synthetic/%d/file", dispatches.Load()))
+			w.WriteHeader(301)
+			return
+		}
+		var gen int32
+		if _, err := fmt.Sscanf(r.URL.Path, "/public/get/synthetic/%d/file", &gen); err != nil {
+			w.WriteHeader(404)
+			return
+		}
+		// An open transfer keeps going; a new request to an old link is refused.
+		if gen < validGen.Load() {
+			w.WriteHeader(403)
+			return
+		}
+		begin, end := 0, len(payload)-1
+		if v := r.Header.Get("Range"); v != "" {
+			fmt.Sscanf(v, "bytes=%d-%d", &begin, &end)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, len(payload)))
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprint(end-begin+1))
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(206)
+		}
+		for off := begin; off <= end; {
+			last := min(off+4096, end+1)
+			if _, err := w.Write(payload[off:last]); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			off = last
+			time.Sleep(time.Millisecond)
+		}
+	}))
+	f := buildFetcher()
+	f.ctl.GetProxy = func(*base.RequestProxy) func(*http.Request) (*url.URL, error) { return http.ProxyURL(proxy) }
+	defer func() { f.Close() }()
+	if err := f.Resolve(&base.Request{URL: "https://cloud.mail.ru/public/aaaa/bbbb", SkipVerifyCert: true}, &base.Options{Path: t.TempDir(), Name: "synthetic.bin", Extra: &fhttp.OptsExtra{Connections: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if f.hasResumeValidator() {
+		t.Fatal("fixture unexpectedly has a validator")
+	}
+	validGen.Store(2) // the resolved link refuses new requests: run 1 refreshes it
+	if err := f.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.Progress().TotalDownloaded() < 512<<10 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := f.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	if paused := f.Progress().TotalDownloaded(); paused <= 0 || paused >= int64(len(payload)) || dispatches.Load() != 2 {
+		t.Fatalf("fixture did not pause after one refresh: progress=%d dispatches=%d", paused, dispatches.Load())
+	}
+	validGen.Store(3) // the refreshed link expired while paused
+	err := f.Start()
+	if err == nil {
+		err = waitDone(t, f, 20*time.Second)
+	}
+	if err != nil {
+		t.Fatalf("same-process continue could not refresh the expired link: %v (dispatches=%d)", err, dispatches.Load())
+	}
+	got, _ := os.ReadFile(f.Meta().SingleFilepath())
+	if !bytes.Equal(got, payload) || dispatches.Load() != 3 {
+		t.Fatalf("continued download: equal=%t dispatches=%d", bytes.Equal(got, payload), dispatches.Load())
+	}
+}
