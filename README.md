@@ -12,7 +12,7 @@
 
 A keyboard-first download manager for macOS.
 
-[**下载 macOS · Apple Silicon**](https://github.com/kbwumin13-sudo/kownload/releases/latest/download/kownload-build19-macos-arm64.dmg) · [更新说明](https://github.com/kbwumin13-sudo/kownload/releases/latest) · [安装与使用](#安装)
+[**下载 macOS · Apple Silicon**](https://github.com/kbwumin13-sudo/kownload/releases/latest) · [更新说明](https://github.com/kbwumin13-sudo/kownload/releases/latest) · [安装与使用](#安装)
 
 <img alt="macOS 12+" src="https://img.shields.io/badge/macOS-12%2B-171717?logo=apple&logoColor=white">
 <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple_Silicon-arm64-2f6f50">
@@ -43,7 +43,7 @@ A keyboard-first download manager for macOS.
 
 **macOS 12 或更新版本，Apple Silicon（M 系列芯片）。**
 
-1. [下载安装包](https://github.com/kbwumin13-sudo/kownload/releases/latest/download/kownload-build19-macos-arm64.dmg)。
+1. [下载安装包](https://github.com/kbwumin13-sudo/kownload/releases/latest)。
 2. 打开 DMG，将 **kownload.app** 拖入 **Applications**。
 3. 打开应用，按引导完成设置。升级时先退出正在运行的应用，再替换。
 
@@ -78,7 +78,7 @@ pipx install yt-dlp
 
 登录凭据保留在内存中，任务保存文件身份。暂停或重启后，按提示打开对应网页并同步登录状态，再继续下载。
 
-## 本次更新 · build 19
+## 已发布版本 · build 19
 
 - 重做轻面板、任务列表、设置与首次使用引导。
 - 改善 Range 识别、分段恢复、小文件连接复用与下载调度。
@@ -128,3 +128,12 @@ node --test browser-media-extension/tests/*.test.js
 [设计约定](DESIGN.md) · [媒体引擎](MEDIA_SNIFFER.md) · [网盘接口](NETDISK.md) · [网盘验证](NETDISK_PROVIDERS.md) · [品牌资源](docs/BRAND.md)
 
 本项目以 [GPL-3.0](LICENSE) 发布。[第三方许可与版权声明](THIRD_PARTY_NOTICES.md)。
+
+
+## 源码构建与后续版本
+
+当前主分支的独立化改动尚未发布。正式版本以 [Release](https://github.com/kbwumin13-sudo/kownload/releases) 为准。应用仅提示更新并打开对应 Release 页面，不自动下载安装；手动升级前请先退出应用。
+
+在线扩展市场、安装统计和分析上报已关闭。已安装扩展、配置、更新及手动 Git URL 安装继续保留。浏览器助手与旧数据接口本阶段仍使用兼容标识。
+
+构建版本由 `config/release.json` 统一管理；[macOS 构建、候选隔离及发行步骤](docs/RELEASING.md)。历史平台介绍与上游资料只用于 [来源记录](docs/GOPEED_UPSTREAM.md)。

@@ -1,33 +1,9 @@
-# Gopeed コントリビューターガイド
+# kownload への貢献
 
-まず最初に、Gopeed への貢献に興味を持っていただきありがとうございます。このガイドは、あなたが Gopeed の
-開発に参加するための手助けとなるでしょう。
+現在の配布対象は macOS 12+ / Apple Silicon です。互換 ID、タスク、拡張設定、第三者の権利表示を維持してください。
 
-## ブランチの説明
+`ui/flutter` で `flutter test` と `flutter analyze --no-fatal-infos --no-fatal-warnings`、関連する Go テストを実行します。[ビルド手順](docs/RELEASING.md)。
 
-このプロジェクトのメインブランチは `main` ブランチのみです。Gopeed の開発に参加したい場合は、
-まずこのプロジェクトをフォークし、フォークしたプロジェクトで開発を行ってください。開発が完了したら、
-このプロジェクトに PR を提出し、`main` ブランチにマージしてください。
+[Issues](https://github.com/kbwumin13-sudo/kownload/issues) · [Pull requests](https://github.com/kbwumin13-sudo/kownload/pulls) · [License and source](THIRD_PARTY_NOTICES.md)
 
-## ローカル開発
-
-開発およびデバッグはウェブ上で行うことを推奨する。まずバックエンドのサービスを起動し、
-コマンドライン `go run cmd/api/main.go` で起動する。サービスのデフォルトポートは `9999` で、
-次にフロントエンドの flutter プロジェクトを `debug` モードで起動して実行します。
-
-## 翻訳
-
-Gopeed の国際化ファイルは `ui/flutter/lib/i18n/langs` ディレクトリにあります。
-このディレクトリに対応する言語ファイルを追加するだけでよいです。
-
-翻訳については `en_us.dart` を参照してください。
-
-## flutter での開発
-
-コミットする前に `dart format ./ui/flutter` を実行し、コードを標準の dart フォーマットにしておくことを忘れないでください
-
-api/models を編集したい場合は build_runner watcher をオンにします:
-
-```
-flutter pub run build_runner watch
-```
+[Historical upstream text](docs/upstream/CONTRIBUTING_ja-JP.md) is retained for provenance.

@@ -1,34 +1,9 @@
-# Gopeed contributors guide
+# Contributing to kownload
 
-Firstly, thank you for your interest in contributing to Gopeed. This guide will help you better
-participate in the development of Gopeed.
+Current delivery targets macOS 12+ on Apple Silicon. Keep compatibility identifiers, user tasks, extension settings and third-party notices intact.
 
-## Branch description
+Run `flutter test` and `flutter analyze --no-fatal-infos --no-fatal-warnings` in `ui/flutter`, plus the relevant Go tests. See [macOS build and release](docs/RELEASING.md).
 
-This project only has one main branch, namely the `main` branch. If you want to participate in the
-development of Gopeed, please fork this project first, and then develop in your fork project. After
-development is completed, submit a PR to this project and merge it into the `main` branch.
+[Issues](https://github.com/kbwumin13-sudo/kownload/issues) · [Pull requests](https://github.com/kbwumin13-sudo/kownload/pulls) · [License and source](THIRD_PARTY_NOTICES.md)
 
-## Local development
-
-It is recommended to develop and debug through the web. First, start the backend service, and start
-it by the command line `go run cmd/api/main.go`, the default port of the service is `9999`, and then
-start the front-end flutter project in `debug` mode to run.
-
-## Translation
-
-The internationalization files of Gopeed are located in the `ui/flutter/lib/i18n/langs` directory.
-You only need to add the corresponding language file in this directory.
-
-Please refer to `en_us.dart` for translation.
-words prefixed with `@` are not meant to be translated.
-
-## flutter development
-
-Don't forget to run`dart format ./ui/flutter`before you commit to keep your code in standard dart format
-
-Turn on build_runner watcher if you want to edit api/models:
-
-```
-flutter pub run build_runner watch
-```
+[Historical upstream text](docs/upstream/CONTRIBUTING.md) is retained for provenance.
