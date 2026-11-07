@@ -4,12 +4,15 @@ import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../i18n/message.dart';
+import '../../../../identity/browser_connection.dart';
+import '../../../../identity/native_manifests.dart';
 import '../../../../macos/mac_onboarding.dart';
 import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_widgets.dart';
 import '../../../../util/locale_manager.dart';
 import '../../../../util/package_info.dart';
 import '../../../../util/release_updates.dart';
+import '../../../../util/util.dart';
 import '../../../views/directory_selector.dart';
 import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
@@ -34,12 +37,84 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   bool _saving = false;
   bool _saveRequested = false;
   bool _saved = false;
+  Map<String, ManifestRoute?>? _routes;
+  bool _connecting = false;
+  String? _browserNotice;
 
   @override
   void initState() {
     super.initState();
     _directory =
         TextEditingController(text: _app.downloaderConfig.value.downloadDir);
+    _loadRoutes();
+  }
+
+  Future<void> _loadRoutes() async {
+    try {
+      final routes = await BrowserConnection.routes();
+      if (mounted) setState(() => _routes = routes);
+    } catch (_) {}
+  }
+
+  String _routeText() {
+    if (Util.isIsolatedPreview) return '预览版只在临时目录生成清单，不连接浏览器。';
+    final routes = _routes;
+    if (routes == null) return '正在检查连接…';
+    const names = {'chrome': 'Chrome', 'edge': 'Edge'};
+    return [
+      for (final entry in routes.entries)
+        '${names[entry.key] ?? entry.key}：${switch (entry.value) {
+          null => '未检测到',
+          ManifestRoute.thisApp => '已连接本应用',
+          ManifestRoute.elsewhere => '指向其他程序（如旧版）',
+          ManifestRoute.none => '未连接',
+        }}',
+    ].join(' · ');
+  }
+
+  // Explicit and reversible: originals are backed up before the first change
+  // and scripts/rollback-identity.py restores them.
+  Future<void> _connectBrowsers() async {
+    final confirmed = await MacPanel.transient(() => showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('连接浏览器助手'),
+            content: const SizedBox(
+              width: 440,
+              child: Text('将在 Chrome 和 Edge 的 NativeMessagingHosts 目录写入 kownload 的连接清单，'
+                  '并把旧名称 com.gopeed.gopeed 改为指向本应用。原文件会先私密备份到数据目录，'
+                  '回退脚本可以恢复。已加载的下载助手不需要重新安装。'),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('取消')),
+              TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('连接')),
+            ],
+          ),
+        ));
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _connecting = true;
+      _browserNotice = null;
+    });
+    String notice;
+    try {
+      final switched = await BrowserConnection.connect();
+      notice = switched.isEmpty ? '没有检测到 Chrome 或 Edge。' : '已连接，下次在网页上点击下载时生效。';
+    } on StateError catch (e) {
+      notice = '没有连接：${e.message}';
+    } catch (_) {
+      notice = '没有连接：请检查浏览器目录的权限后重试。';
+    }
+    if (!mounted) return;
+    setState(() {
+      _connecting = false;
+      _browserNotice = notice;
+    });
+    await _loadRoutes();
   }
 
   @override
@@ -233,6 +308,15 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                   _change(() => cfg.extra.locale = value);
                   Get.updateLocale(toLocale(value));
                 })),
+      ]),
+      _group(context, '浏览器助手', [
+        _row(context, '浏览器连接',
+            detail: _browserNotice == null
+                ? _routeText()
+                : '${_routeText()}\n$_browserNotice',
+            control: MacButton(
+                onPressed: _connecting ? null : _connectBrowsers,
+                child: const Text('连接…'))),
       ]),
       Obx(() {
         final latest = _settings.latestVersion.value;

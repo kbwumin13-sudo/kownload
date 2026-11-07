@@ -14,6 +14,8 @@ import 'package:gopeed/app/modules/setting/controllers/setting_controller.dart';
 import 'package:gopeed/app/modules/setting/views/setting_view.dart';
 import 'package:gopeed/app/routes/app_pages.dart';
 import 'package:gopeed/database/database.dart';
+import 'package:gopeed/identity/browser_connection.dart';
+import 'package:gopeed/identity/native_manifests.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
@@ -105,10 +107,16 @@ Future<void> _reveal(WidgetTester tester, String text) async {
 void main() {
   setUp(() {
     Get.testMode = true;
+    // Settings must never read or write the real browser directories.
+    BrowserConnection.routes =
+        () async => {'chrome': ManifestRoute.none, 'edge': null};
+    BrowserConnection.connect = () async => throw StateError('unexpected');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, (call) async => null);
   });
   tearDown(() {
+    BrowserConnection.routes = browserRoutes;
+    BrowserConnection.connect = connectBrowsers;
     Get.reset();
     Get.routerDelegate = null;
     Get.routeInformationParser = null;
@@ -129,6 +137,39 @@ void main() {
     await _reveal(tester, '重新打开…');
     expect(find.text('版本 test（1）'), findsOneWidget);
     expect(find.byType(ExtensionView), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('browser connection asks first, then switches and refreshes',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    var calls = 0;
+    var connected = false;
+    BrowserConnection.routes = () async => {
+          'chrome': connected ? ManifestRoute.thisApp : ManifestRoute.elsewhere,
+          'edge': null,
+        };
+    BrowserConnection.connect = () async {
+      calls++;
+      connected = true;
+      return ['chrome'];
+    };
+    await _mountSettings(tester, 'general');
+    await _reveal(tester, '浏览器连接');
+    expect(find.text('Chrome：指向其他程序（如旧版） · Edge：未检测到'), findsOneWidget);
+    await tester.tap(find.text('连接…'));
+    await tester.pumpAndSettle();
+    expect(find.text('连接浏览器助手'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(calls, 0);
+    await tester.tap(find.text('连接…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '连接'));
+    await tester.pumpAndSettle();
+    expect(calls, 1);
+    expect(find.text('Chrome：已连接本应用 · Edge：未检测到\n已连接，下次在网页上点击下载时生效。'),
+        findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

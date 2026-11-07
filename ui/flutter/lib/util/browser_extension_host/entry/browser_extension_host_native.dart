@@ -70,6 +70,16 @@ Future<bool> doCheckBrowserInstalled(Browser browser) async {
 
 /// Check if browser extension manifest is properly installed
 Future<bool> doCheckManifestInstalled(Browser browser) async {
+  if (Platform.isMacOS) {
+    final home = Platform.environment['HOME'] ?? '';
+    final directory = macNativeHostsDirectory(browser.name, home: home);
+    if (directory == null || home.isEmpty || Util.isIsolatedPreview) {
+      return false;
+    }
+    return await manifestRoute(
+            directory, await Util.homePathJoin(_hostExecName)) ==
+        ManifestRoute.thisApp;
+  }
   if (await checkBrowserInstalled(browser) == false) return false;
 
   final manifestPath = await _getManifestPath(browser);
@@ -94,15 +104,12 @@ Future<bool> doCheckManifestInstalled(Browser browser) async {
 /// Install browser extension manifest
 Future<void> doInstallManifest(Browser browser) async {
   if (Platform.isMacOS) {
-    // Candidates may generate fixtures only. A future confirmed installer may
-    // use writeNativeManifests with explicit production destinations.
-    final directory = Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR'];
-    if (directory == null ||
-        !(path.isWithin('/tmp', path.canonicalize(directory)) ||
-            path.isWithin(
-                Directory.systemTemp.path, path.canonicalize(directory)))) {
-      throw StateError('请选择临时清单目录；正式连接在确认安装时切换');
-    }
+    // Called only by the explicit connect action; startup never switches a
+    // browser. Previews accept only a temporary directory.
+    final directory = macManifestDirectory(browser.name,
+        preview: Util.isIsolatedPreview,
+        home: Platform.environment['HOME'] ?? '',
+        override: Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR']);
     await writeNativeManifests(
         directory: directory,
         executable: await Util.homePathJoin(_hostExecName),

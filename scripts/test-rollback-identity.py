@@ -85,5 +85,36 @@ class Rollback(unittest.TestCase):
         self.check_applied(self.run_script('--apply', python='/usr/bin/python3'))
 
 
+class BrowserManifests(Rollback):
+    def test_restore_browser_manifests_from_the_new_root(self):
+        home = self.dir / 'home'
+        chrome = home / 'Library/Application Support/Google/Chrome/NativeMessagingHosts'
+        legacy, new_name = IDENTITY['legacyHostName'] + '.json', IDENTITY['hostName'] + '.json'
+        original = b'{"name":"com.gopeed.gopeed","path":"/old/root/host"}'
+        backups = self.new / 'native-manifest-backups/chrome'
+        shutil.rmtree(backups)
+        write(backups / legacy, original)
+        write(backups / (IDENTITY['hostName'] + '.absent'), b'')
+        for name in [legacy, new_name]:
+            write(chrome / name, b'{"path":"new host"}')
+        write(chrome / 'com.example.other.json', b'other')
+        self.new_tree = tree(self.new)
+        result = self.run_script('--restore-browser-manifests', '--home', str(home), '--apply')
+        self.check_applied(result)
+        self.assertEqual(json.loads(result.stdout.strip().splitlines()[-1])['manifestDirectoriesRestored'], 1)
+        self.assertEqual((chrome / legacy).read_bytes(), original)
+        self.assertFalse((chrome / new_name).exists())
+        self.assertEqual((chrome / 'com.example.other.json').read_bytes(), b'other')
+        self.assertFalse((home / 'Library/Application Support/Microsoft Edge').exists())
+
+    def test_incomplete_backup_is_refused_before_any_change(self):
+        home = self.dir / 'home'
+        result = self.run_script('--restore-browser-manifests', '--home', str(home), '--apply')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(tree(self.new), self.new_tree)
+        self.assertEqual(tree(self.old), self.old_tree)
+        self.assertFalse(self.backup.exists())
+
+
 if __name__ == '__main__':
     unittest.main()

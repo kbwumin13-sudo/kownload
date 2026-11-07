@@ -13,6 +13,9 @@ import tempfile
 import time
 
 IDENTITY = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'config/identity.json').read_text())
+# Browser profile directories under ~/Library/Application Support whose
+# NativeMessagingHosts the installed app switches (identity/native_manifests.dart).
+BROWSERS = {'chrome': ('Google', 'Chrome'), 'edge': ('Microsoft Edge',)}
 SKIP = {'.kownload-identity.json', '.kownload-import-pending.json', '.kownload-import-owner',
         'ipc', 'native-manifest-backups', IDENTITY['hostExecutable'], 'logs'}
 
@@ -52,10 +55,20 @@ def main():
     p.add_argument('--backup-root', required=True, type=pathlib.Path)
     p.add_argument('--manifest-pair', action='append', nargs=2, default=[], metavar=('BACKUP_DIR', 'DESTINATION'))
     p.add_argument('--apply', action='store_true')
+    p.add_argument('--restore-browser-manifests', action='store_true',
+                   help='Also restore Chrome/Edge from <new root>/native-manifest-backups/<browser>')
+    p.add_argument('--home', type=pathlib.Path, default=pathlib.Path.home(),
+                   help='Home holding the browser profiles (fixtures use a temporary one)')
     p.add_argument('--fixture', action='store_true', help='Only temporary roots; skip installed-app process check')
     a = p.parse_args()
     new, old, backup = [x.absolute() for x in [a.new_root, a.old_root, a.backup_root]]
-    all_paths = [new, old, backup] + [pathlib.Path(x).absolute() for pair in a.manifest_pair for x in pair]
+    pairs = [(pathlib.Path(x).absolute(), pathlib.Path(y).absolute()) for x, y in a.manifest_pair]
+    if a.restore_browser_manifests:
+        for browser, parts in BROWSERS.items():
+            saved = new / 'native-manifest-backups' / browser
+            if saved.is_dir():
+                pairs.append((saved, a.home.absolute().joinpath('Library', 'Application Support', *parts, 'NativeMessagingHosts')))
+    all_paths = [new, old, backup] + [x for pair in pairs for x in pair]
     if any(x.is_symlink() or x.resolve() != x for x in all_paths):
         p.error('Use canonical paths without symlinks')
     if len(set([new, old, backup])) != 3 or any(x in y.parents for x in [new, old, backup] for y in [new, old, backup] if x != y):
@@ -73,8 +86,7 @@ def main():
     kept = new.with_name(new.name + '.rolled-back-' + time.strftime('%Y%m%d-%H%M%S'))
     if kept.exists():
         p.error('Retry in a second: the kept-root name already exists')
-    for saved, _ in a.manifest_pair:
-        saved = pathlib.Path(saved)
+    for saved, _ in pairs:
         for name in [IDENTITY['hostName'], IDENTITY['legacyHostName']]:
             if (saved / (name + '.json')).is_file() == (saved / (name + '.absent')).is_file():
                 p.error('Require exactly one original/absent backup for each host name')
@@ -121,8 +133,7 @@ def main():
                 shutil.rmtree(stage)
     # Keep backups intact. Missing-original markers remove only the two known
     # alias manifests, never arbitrary files in a browser directory.
-    for saved, destination in a.manifest_pair:
-        saved, destination = pathlib.Path(saved), pathlib.Path(destination)
+    for saved, destination in pairs:
         destination.mkdir(parents=True, exist_ok=True)
         for name in [IDENTITY['hostName'], IDENTITY['legacyHostName']]:
             original = saved / (name + '.json')
@@ -135,7 +146,7 @@ def main():
                 dest.unlink()
     new.rename(kept)
     print(json.dumps({'applied': True, 'formatConversion': False, 'oldRootBackedUp': True, 'copyHashesMatch': True,
-                      'newRootKeptAt': str(kept)}))
+                      'manifestDirectoriesRestored': len(pairs), 'newRootKeptAt': str(kept)}))
 
 if __name__ == '__main__':
     main()

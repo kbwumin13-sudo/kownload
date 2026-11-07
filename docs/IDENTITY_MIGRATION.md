@@ -18,7 +18,7 @@ Flutter 在 Hive.init、内核 Start、快捷键/浏览器初始化及自动继�
 
 host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名 `io.github.kbwumin13_sudo.kownload` 与旧名 `com.gopeed.gopeed` 两份 manifest 指向同一个 `kownload-native-host`。清单生成器保留原文件的私密逐字节备份；原本不存在的清单记为 absent，供回退恢复。启动流程不写正式浏览器清单。
 
-本轮只在临时目录生成/验证清单。正式切换须在用户确认安装时执行显式安装动作，原清单备份按浏览器分目录保存到新根。旧版重新启动可能重装旧清单；安装后应显示当前连接归属，不能静默反复争抢。此处不声称已切换用户的正式浏览器。
+切换是显式动作：设置 › 通用 › 浏览器助手 › “连接…”，确认后对已有配置目录的 Chrome、Edge 写入新名清单，并把旧名清单改为指向新 host；没有安装的浏览器不创建目录，Firefox 不处理。每个文件第一次被改写前，原字节私密备份到 `<新根>/native-manifest-backups/<chrome|edge>/`（原本不存在的记为 `.absent`），以后重复连接不会覆盖这份备份。设置页同时显示每个浏览器当前的连接归属（本应用、其他程序或未连接）：旧版再次启动可能把旧名清单改回去，这时页面会显示“指向其他程序”，需要时再点一次连接。预览变体只允许 `KOWNLOAD_NATIVE_MANIFEST_DIR` 指定的临时目录，从不写浏览器目录。连接后浏览器下次启动 host 时就用新 host，已加载的助手不必重新安装。
 
 ## 预览隔离
 
@@ -33,10 +33,10 @@ host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名 `
 ```sh
 python3 scripts/rollback-identity.py --new-root '<新根>' --old-root '<旧根>' \
   --backup-root '<尚不存在的私密备份目录>'
-# 核对参数后显式执行；每个浏览器可附加一个 --manifest-pair：
+# 核对参数后显式执行；--restore-browser-manifests 按新根里的备份恢复 Chrome/Edge，
+# 其他目录可用 --manifest-pair '<原清单备份目录>' '<NativeMessagingHosts 目录>' 逐个指定：
 python3 scripts/rollback-identity.py --new-root '<新根>' --old-root '<旧根>' \
-  --backup-root '<尚不存在的私密备份目录>' \
-  --manifest-pair '<该浏览器原清单备份目录>' '<该浏览器 NativeMessagingHosts 目录>' --apply
+  --backup-root '<尚不存在的私密备份目录>' --restore-browser-manifests --apply
 ```
 
 脚本默认不复制；执行时先检查进程/数据库与 Hive 锁，复制并校验到短期 staging，再把旧根原子移至私密备份并发布副本。staging 只是同格式复制的临时位置，不是兼容运行根。原 host 从旧根保留，别名清单按原文件或 absent 恢复；脚本不安装或启动 App。安装旧包后首次下载目录权限可能需要重新授权。若曾显式更改本机后端设置，请在旧版重新检查默认 IPC；远程/自定义端点保留其原有语义。
