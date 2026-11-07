@@ -128,28 +128,63 @@ func (f *Fetcher) compareRangeOverlap(file *os.File, request *http.Request, begi
 	return nil
 }
 
-func (f *Fetcher) verifySavedOverlaps() error {
-	type span struct{ begin, end int64 }
-	spans := map[span]bool{}
-	add := func(begin, end int64) {
-		if end > begin {
-			spans[span{max(begin, end-64*1024), end - 1}] = true
-		}
-	}
+const overlapSpanSize = 64 << 10
+
+// savedSpan is the byte range [begin, end) of saved data compared with the
+// server; run is the length of the saved bytes that end at end.
+type savedSpan struct{ begin, end, run int64 }
+
+// overlapSpans takes up to 64 KiB just before each saved download position:
+// where every connection stands (chunk start plus bytes downloaded) and the
+// end of the resolve-phase prefix as recorded for this run. A span stops at
+// the end of any range that a connection has not downloaded yet, so it only
+// covers bytes already written. A stolen chunk's start, for one, is preceded
+// by the unfinished tail of the stream it was taken from.
+func (f *Fetcher) overlapSpans() []savedSpan {
 	f.connMu.Lock()
-	add(0, f.resolveDataPos.Load())
-	add(0, f.prefetchSize.Load())
+	defer f.connMu.Unlock()
+	type gap struct{ begin, end int64 } // not downloaded yet, end exclusive
+	var gaps []gap
+	// A prefix not yet adopted is read from the prefetch file, which only
+	// exists before the target does.
+	ends := []int64{f.resolveDataPos.Load(), f.prefetchSize.Load()}
 	for _, conn := range f.connections {
 		if conn.Chunk == nil {
 			continue
 		}
-		add(conn.Chunk.Begin, conn.Chunk.Begin+conn.Chunk.Downloaded)
-		// The primary connection counts the adopted prefetch prefix as well.
-		if conn.Role == rolePrimary && conn.Downloaded > conn.Chunk.Downloaded {
-			add(0, conn.Chunk.Begin)
+		pos := conn.Chunk.Begin + conn.Chunk.Downloaded
+		ends = append(ends, pos)
+		if pos <= conn.Chunk.End {
+			gaps = append(gaps, gap{pos, conn.Chunk.End + 1})
 		}
 	}
-	f.connMu.Unlock()
+	var spans []savedSpan
+	seen := map[int64]bool{}
+	for _, end := range ends {
+		end = min(end, f.meta.Res.Size)
+		if end <= 0 || seen[end] {
+			continue
+		}
+		seen[end] = true
+		floor := int64(0)
+		for _, g := range gaps {
+			if g.begin < end && end < g.end {
+				floor = end // inside an unfinished range: nothing before it is known
+				break
+			}
+			if g.end <= end {
+				floor = max(floor, g.end)
+			}
+		}
+		if floor < end {
+			spans = append(spans, savedSpan{begin: max(floor, end-overlapSpanSize), end: end, run: end - floor})
+		}
+	}
+	return spans
+}
+
+func (f *Fetcher) verifySavedOverlaps() error {
+	spans := f.overlapSpans()
 	if len(spans) == 0 {
 		return fmt.Errorf("%w: no saved overlap available", ErrUnsafeResume)
 	}
@@ -163,12 +198,12 @@ func (f *Fetcher) verifySavedOverlaps() error {
 	defer file.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), rangeProbeTimeout)
 	defer cancel()
-	for saved := range spans {
+	for _, saved := range spans {
 		request, err := f.buildRequest(ctx, f.meta.Req)
 		if err != nil {
 			return fmt.Errorf("%w: invalid resume request", ErrUnsafeResume)
 		}
-		if err := f.compareRangeOverlap(file, request, saved.begin, saved.end, nil); err != nil {
+		if err := f.compareRangeOverlap(file, request, saved.begin, saved.end-1, nil); err != nil {
 			return err
 		}
 	}
