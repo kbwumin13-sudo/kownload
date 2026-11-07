@@ -61,7 +61,10 @@ class Util {
   }
 
   static Future<void> initStorageDir({String? previewStorage}) async {
-    _previewStorage = previewStorage;
+    const bundledPreviewStorage =
+        String.fromEnvironment('KOWNLOAD_PREVIEW_STORAGE');
+    _previewStorage = previewStorage ??
+        (bundledPreviewStorage.isEmpty ? null : bundledPreviewStorage);
     var storageDir = "";
     if (isIsolatedPreview) {
       storageDir =

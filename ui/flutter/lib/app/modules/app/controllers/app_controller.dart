@@ -14,7 +14,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_handler/share_handler.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:uri_to_file/uri_to_file.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../../api/api.dart';
@@ -34,7 +33,7 @@ import '../../../../util/locale_manager.dart';
 import '../../../../util/local_server_config.dart';
 import '../../../../util/log_util.dart';
 import '../../../../util/package_info.dart';
-import '../../../../util/updater.dart';
+import '../../../../util/release_updates.dart';
 import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
 import '../../../rpc/rpc.dart';
@@ -325,13 +324,6 @@ class AppController extends GetxController with WindowListener, TrayListener {
         },
       ),
       MenuItem.separator(),
-      MenuItem(
-        label: 'donate'.tr,
-        onClick: (menuItem) => {
-          launchUrl(Uri.parse("https://gopeed.com/docs/donate"),
-              mode: LaunchMode.externalApplication)
-        },
-      ),
       MenuItem(
         label: '${"version".tr}（${packageInfo.version}）',
       ),

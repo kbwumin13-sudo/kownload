@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:get/get.dart';
-import 'package:gopeed/util/analytics.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -20,7 +19,6 @@ import 'util/locale_manager.dart';
 import 'util/log_util.dart';
 import 'util/package_info.dart';
 import 'util/scheme_register/scheme_register.dart';
-import 'util/updater.dart';
 import 'util/util.dart';
 import 'util/startup_tasks.dart';
 import 'macos/mac_appearance.dart';
@@ -180,12 +178,6 @@ Future<void> init(StartupArgs args) async {
               "browser [${browser.name}] extension host integration fail", e);
         }
       }
-
-      try {
-        await installUpdater();
-      } catch (e) {
-        logger.e("updater install fail", e);
-      }
     }
   }();
 }
@@ -207,14 +199,5 @@ Future<void> onStart() async {
         logger.w("missing language: $lang, keys: $missingKeys");
       }
     });
-  }
-
-  if (Config.isConfigured && Database.instance.getAnalyticsEnabled()) {
-    try {
-      await Analytics.instance.init();
-      await Analytics.instance.logAppOpen();
-    } catch (e) {
-      logger.w("GA4 init failed: $e");
-    }
   }
 }

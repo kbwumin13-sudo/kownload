@@ -17,7 +17,6 @@ import 'package:gopeed/macos/mac_panel.dart';
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/downloader_config.dart';
 import '../../../../database/database.dart';
-import '../../../../util/analytics.dart';
 import '../../../../i18n/message.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/locale_manager.dart';
@@ -25,7 +24,7 @@ import '../../../../util/log_util.dart';
 import '../../../../util/message.dart';
 import '../../../../util/package_info.dart';
 import '../../../../util/scheme_register/scheme_register.dart';
-import '../../../../util/updater.dart';
+import '../../../../util/release_updates.dart';
 import '../../../../util/util.dart';
 import '../../../views/check_list_view.dart';
 import '../../../views/directory_selector.dart';
@@ -1053,7 +1052,7 @@ class SettingView extends GetView<SettingController> {
                 position: badges.BadgePosition.topStart(start: 36),
                 child: Text('version'.tr))
             : Text('version'.tr),
-        subtitle: Text(packageInfo.version),
+        subtitle: Text('${packageInfo.version} (${packageInfo.buildNumber})'),
         onTap: () {
           if (hasNewVersion) {
             showUpdateDialog(context, controller.latestVersion.value!);
@@ -1080,25 +1079,6 @@ class SettingView extends GetView<SettingController> {
         ),
       );
     });
-
-    final analyticsEnabled = Database.instance.getAnalyticsEnabled().obs;
-    buildAnalyticsEnabled() {
-      return ListTile(
-        title: Text('analyticsEnabled'.tr),
-        subtitle: Text('analyticsEnabledDesc'.tr),
-        trailing: Obx(() {
-          void onChanged(bool value) {
-            analyticsEnabled.value = value;
-            Database.instance.saveAnalyticsEnabled(value);
-          }
-
-          return Util.isMacos()
-              ? Switch.adaptive(
-                  value: analyticsEnabled.value, onChanged: onChanged)
-              : Switch(value: analyticsEnabled.value, onChanged: onChanged);
-        }),
-      );
-    }
 
     buildThanks() {
       const thankPage =
@@ -1886,7 +1866,6 @@ class SettingView extends GetView<SettingController> {
                             buildHomepage(),
                             buildVersion(),
                             buildAutoCheckUpdate(),
-                            if (Config.isConfigured) buildAnalyticsEnabled(),
                             buildThanks(),
                           ]),
                         )),

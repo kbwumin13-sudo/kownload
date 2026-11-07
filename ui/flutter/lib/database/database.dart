@@ -126,7 +126,7 @@ class Database {
   }
 
   bool getAnalyticsEnabled() {
-    return box.get(_analyticsEnabled, defaultValue: true) as bool;
+    return box.get(_analyticsEnabled, defaultValue: false) as bool;
   }
 
   void saveAnalyticsClientId(String clientId) {
