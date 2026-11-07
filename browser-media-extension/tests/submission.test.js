@@ -23,7 +23,7 @@ test('lost reply across a worker restart: the next click finishes that operation
  const tasks=new Map();let lost=1+lib.SUBMIT_RESEND_DELAYS.length;
  const host=async message=>{
   if(!tasks.has(message.operationId))tasks.set(message.operationId,'task-'+(tasks.size+1));
-  if(lost>0){lost--;return {code:1,error:'request_failed',message:'fixture-secret'};}
+  if(lost>0){lost--;return {code:1,error:'request_failed',message:'fixture-secret',httpStatus:null,businessCode:null};}
   return contractReply(message,{code:0,data:{code:0,data:tasks.get(message.operationId)}});
  };
  const first=browser(seed,host);const failed=await first.request(create);assert.equal(failed.ok,false);assert.equal(submitted(first).length,0);
@@ -78,6 +78,22 @@ test('only unknown outcomes are resent; definitive and legacy answers are not',a
  // A legacy host answer (no httpStatus) is never resent: at most one request per click.
  const legacy=browser(seed,async()=>({code:0,data:{code:0,data:'task-one'}}));
  await legacy.request(create);await legacy.request(create);assert.equal(ids(legacy).length,2);
+});
+// Review finding R2-3 (reviewer reproduction E3): after a rollback without
+// switching back the helper, the build 25 host lets the old app create the
+// task and answers {code:0} without the bridge fields.
+test('a legacy host answer ends the click as legacy_host with no retained operation',async()=>{
+ let created=0;
+ const b=browser(seed,async message=>{ if(message.method==='create') created++; return {code:0}; });
+ const r1=await b.request(create),r2=await b.request(create);
+ assert.equal(r1.ok,false);assert.equal(r2.ok,false);
+ assert.equal(r1.error,lib.LEGACY_HOST_MESSAGE);
+ assert.match(r1.error,/可能已创建任务/);assert.match(r1.error,/换回旧版助手/);
+ assert.equal(created,2,'one request per click, never resent');
+ assert.notEqual(ids(b)[0],ids(b)[1],'the next click does not reuse the operation');
+ assert.equal(submitted(b).length,0);
+ assert.deepEqual(Object.values(b.memory).flatMap(p=>Object.keys(p?.operations||{})),[]);
+ assert.equal(lib.submissionOutcome(lib.bridgeFailure('legacy_host')),'final');
 });
 test('concurrent client clicks coalesce before native create',async()=>{
  const b=browser(seed);const results=await Promise.all([b.request(create),b.request(create)]);assert.ok(results.every(x=>x.ok));assert.equal(b.messages.length,1);assert.match(b.messages[0].operationId,/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);

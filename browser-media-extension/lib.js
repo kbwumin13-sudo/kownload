@@ -37,26 +37,30 @@ export function mergeCandidate(old, next) {
 export function newOperationId() {
   return globalThis.crypto?.randomUUID?.() || `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
+export const LEGACY_HOST_MESSAGE = '下载器版本较旧，本次提交可能已创建任务，请在下载器中查看；回退旧版时请同时换回旧版助手';
 export function bridgeFailure(kind = 'request_failed') {
-  const kinds = new Set(['invalid_request','unknown_method','wakeup_failed','ipc_unavailable','request_failed','invalid_response','http_error','business_error']);
+  const kinds = new Set(['invalid_request','unknown_method','wakeup_failed','ipc_unavailable','request_failed','invalid_response','http_error','business_error','legacy_host']);
   const category = kinds.has(kind) ? kind : 'request_failed';
-  return Object.assign(new Error(`下载请求未完成（${category}），请重试或查看 kownload`),{category});
+  return Object.assign(new Error(category === 'legacy_host' ? LEGACY_HOST_MESSAGE : `下载请求未完成（${category}），请重试或查看 kownload`),{category});
 }
 // One explicit click owns one operation ID. Only a failure whose effect is
 // unknown is resent with that ID: the current host, Flutter and REST
-// deduplicate by ID. invalid_response is not resent, because a legacy host
-// answers that way and would create one task per resend. Everything else is
-// a definitive answer, so the next click starts a new operation.
+// deduplicate by ID. A legacy host (build 25 and earlier) answers without
+// the bridge fields and does not deduplicate, so its answer ends the click:
+// the old app may already have created the task. Everything else is a
+// definitive answer, so the next click starts a new operation.
 export const SUBMIT_RESEND_DELAYS = [300,1200];
 export const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
 export function submissionOutcome(error) {
   const category = error?.category;
   if (category === 'request_failed' || category === 'ipc_unavailable') return 'resend';
   if (category === 'http_error') return error.httpStatus >= 400 && error.httpStatus < 500 ? 'final' : 'resend';
-  return category === 'invalid_response' ? 'unknown' : 'final';
+  return category === 'invalid_response' ? 'unknown' : 'final'; // legacy_host and definitive answers
 }
 const withStatus = (error, status) => Object.assign(error,{httpStatus:Number.isInteger(status) ? status : null});
 export function nativeSubmission(outer, operationId) {
+  // The current host always reports httpStatus (null when no HTTP answer).
+  if (outer && typeof outer === 'object' && !('httpStatus' in outer)) throw bridgeFailure('legacy_host');
   if (!outer || outer.code !== 0) throw withStatus(bridgeFailure(outer?.error),outer?.httpStatus);
   if (!Number.isInteger(outer.httpStatus)) throw bridgeFailure('invalid_response');
   if (outer.httpStatus < 200 || outer.httpStatus >= 300) throw withStatus(bridgeFailure('http_error'),outer.httpStatus);

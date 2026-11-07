@@ -128,8 +128,10 @@ function native(message,rest = false,raw = false) {
   return new Promise((resolve,reject) => chrome.runtime.sendNativeMessage('com.gopeed.gopeed',message,response => {
     const err = chrome.runtime.lastError;
     if (err) reject(bridgeFailure('ipc_unavailable')); else { try {
+      // Submissions classify every answer themselves (nativeSubmission), including legacy hosts.
+      if (raw) { resolve(response); return; }
       if (!response || response.code !== 0) throw Object.assign(bridgeFailure(response?.error),{httpStatus:Number.isInteger(response?.httpStatus) ? response.httpStatus : null});
-      resolve(raw ? response : rest ? nativeData(response) : response.data);
+      resolve(rest ? nativeData(response) : response.data);
     } catch(e) { reject(e.category ? e : bridgeFailure('business_error')); } }
   }));
 }
