@@ -921,6 +921,11 @@ func (f *Fetcher) doStart() error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](f.meta.Req); err != nil {
 		return err
 	}
+	// The resume checks below are this run's first requests: a public link
+	// that expired while paused may use this run's refresh.
+	f.publicMu.Lock()
+	f.publicRefreshes = 0
+	f.publicMu.Unlock()
 	if err := f.upgradeRangeResume(); err != nil {
 		return err
 	}
@@ -929,6 +934,7 @@ func (f *Fetcher) doStart() error {
 	if err := f.resetUnavailableResumeData(); err != nil {
 		return err
 	}
+	verifyOverlap := false
 	if f.restored || f.linkPatched || state == statePaused || state == stateError {
 		if f.completedLocalCheckpoint() {
 			f.setState(stateDone)
@@ -938,11 +944,13 @@ func (f *Fetcher) doStart() error {
 			}
 			return nil
 		}
-		if err := f.checkResumeIdentity(); err != nil {
+		overlap, err := f.checkResumeIdentity()
+		if err != nil {
 			f.diag.failure(err)
 			f.setState(stateError)
 			return err
 		}
+		verifyOverlap = overlap
 	}
 
 	if state == stateError {
@@ -1006,10 +1014,6 @@ func (f *Fetcher) doStart() error {
 	f.configuredStreams.Store(int32(maxConns))
 	f.slowStart = newSlowStartController(maxConns)
 
-	f.publicMu.Lock()
-	f.publicRefreshes = 0
-	f.publicMu.Unlock()
-
 	// Create main context
 	f.ctx, f.cancel = context.WithCancel(context.Background())
 
@@ -1022,12 +1026,14 @@ func (f *Fetcher) doStart() error {
 
 	// Start download
 	f.setState(stateSlowStart)
-	go f.downloadLoop()
+	go f.downloadLoop(verifyOverlap)
 
 	return nil
 }
 
-func (f *Fetcher) downloadLoop() {
+// downloadLoop runs one download run. verifyOverlap compares saved bytes
+// without a validator with the server before any stream starts.
+func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 	defer func() {
 		f.leaveBudget()
 		if deferred := f.deferred.Load(); deferred != nil {
@@ -1073,6 +1079,9 @@ func (f *Fetcher) downloadLoop() {
 
 	// A run that starts inside a long source cooldown releases its slot now.
 	if f.deferIfCooling() {
+		return
+	}
+	if verifyOverlap && !f.verifySavedOverlaps() {
 		return
 	}
 

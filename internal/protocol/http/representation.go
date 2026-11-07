@@ -65,6 +65,13 @@ func (f *Fetcher) rememberRepresentation(resp *http.Response, size int64) {
 	f.identityMu.Unlock()
 }
 
+// requestResourceKey scopes saved validators to one resource: the scheme,
+// host and path of the URL, or a Mail.ru link's public share page. It is only
+// compared when a validator was saved. The query may change, as it does for
+// renewed signed links of the same file (token, e, st/se, q-sign-time, hdnts,
+// Policy...); If-Range and the validator check on every response decide
+// whether the saved bytes still match. Without a validator the saved-overlap
+// comparison decides instead.
 func requestResourceKey(req *base.Request) string {
 	raw := req.URL
 	if extra, ok := req.Extra.(*fhttp.ReqExtra); ok && extra != nil {
@@ -79,16 +86,7 @@ func requestResourceKey(req *base.Request) string {
 		raw = source.Page()
 	}
 	if u, err := url.Parse(raw); err == nil {
-		u.Fragment = ""
-		query := u.Query()
-		for key := range query {
-			lower := strings.ToLower(key)
-			if lower == "sig" || lower == "signature" || lower == "expires" || lower == "expire" || strings.HasPrefix(lower, "x-amz-") || strings.HasPrefix(lower, "x-goog-") {
-				query.Del(key)
-			}
-		}
-		u.RawQuery = query.Encode()
-		raw = u.String()
+		raw = u.Scheme + "://" + strings.ToLower(u.Host) + u.EscapedPath()
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
 }
@@ -203,12 +201,16 @@ func (f *Fetcher) completedLocalCheckpoint() bool {
 	return err == nil && info.Size() == f.meta.Res.Size
 }
 
-func (f *Fetcher) checkResumeIdentity() error {
+// checkResumeIdentity checks what the checkpoint itself can prove, without a
+// request. overlap reports saved ranges that only a comparison with the
+// server can confirm, because no validator or trusted digest was saved; the
+// download loop runs it before any stream starts (verifySavedOverlaps).
+func (f *Fetcher) checkResumeIdentity() (overlap bool, err error) {
 	if !f.usesRanges() || !f.hasResumeData() {
-		return nil // Full GET restarts from zero; it cannot reuse an old prefix.
+		return false, nil // Full GET restarts from zero; it cannot reuse an old prefix.
 	}
 	if f.completedLocalCheckpoint() {
-		return nil
+		return false, nil
 	}
 	f.identityMu.RLock()
 	r, external, expectedKey := f.identity, f.resumeHash, f.resourceKey
@@ -217,15 +219,15 @@ func (f *Fetcher) checkResumeIdentity() error {
 		expectedKey = requestResourceKey(f.meta.Req)
 	}
 	if r.ResourceKey != "" && r.ResourceKey != expectedKey && f.hasResumeValidator() && !(r.Hash != "" && r.Hash == external) {
-		return fmt.Errorf("%w: source resource changed", ErrUnsafeResume)
+		return false, fmt.Errorf("%w: source resource changed", ErrUnsafeResume)
 	}
 	if r.Size > 0 && r.Size != f.meta.Res.Size {
-		return fmt.Errorf("%w: saved total length changed", ErrUnsafeResume)
+		return false, fmt.Errorf("%w: saved total length changed", ErrUnsafeResume)
 	}
 	if r.ETag != "" || r.LastModified != "" || f.rangeResumeValidator != "" || r.Hash != "" && r.Hash == external {
-		return nil
+		return false, nil
 	}
-	return f.verifySavedOverlaps()
+	return true, nil
 }
 
 func (f *Fetcher) hasResumeValidator() bool {

@@ -2,7 +2,9 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -177,4 +179,26 @@ func TestLegacyRangeResumePauseStoreRestore(t *testing.T) {
 		t.Fatal("restore lost partial progress")
 	}
 	checkRangeProbeDownload(t, resumed, data)
+}
+
+// A comparison request that times out returns the timeout as it is. The
+// resume check retries it like a network error, never as a changed source.
+func TestOverlapCompareTimeoutIsRetryable(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	f := oneSavedRange(t, server.URL+"/file", payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	request, err := f.buildRequest(ctx, f.meta.Req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.compareRangeOverlap(request, 0, payload[:64<<10], nil)
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrUnsafeResume) ||
+		errors.Is(err, errInvalidRangeResponse) || extractRequestError(err) != nil {
+		t.Fatalf("timeout classified as %v", err)
+	}
 }
