@@ -326,3 +326,12 @@ Future<Response> forward(
     ),
   );
 }
+
+/// Version of the running core, used when a development UI has no release define.
+Future<String?> getCoreVersion() async {
+  return _parse(() => _client.dio.get('api/v1/info'), (data) {
+    if (data is! Map) return null;
+    final version = data['version'];
+    return version is String ? version : null;
+  });
+}

@@ -1,0 +1,16 @@
+{
+  "productName": "kownload",
+  "bundleId": "io.github.kbwumin13-sudo.kownload",
+  "previewBundleId": "io.github.kbwumin13-sudo.kownload.preview",
+  "legacyBundleId": "com.gopeed.gopeed",
+  "scheme": "kownload",
+  "legacyScheme": "gopeed",
+  "hostName": "io.github.kbwumin13_sudo.kownload",
+  "legacyHostName": "com.gopeed.gopeed",
+  "hostExecutable": "kownload-native-host",
+  "migrationExecutable": "kownload-migrate",
+  "apiSocket": "ipc/api.sock",
+  "hostSocket": "ipc/host.sock",
+  "chromiumExtensionIds": ["jcalkpjhhaachliihlkojhmafniepnoj", "mijpgljlfcapndmchhjffkpckknofcnd", "dkajnckekendchdleoaenoophcobooce"],
+  "firefoxExtensionIds": ["{c5d69a8f-2ed0-46a7-afa4-b3a00dc58088}"]
+}

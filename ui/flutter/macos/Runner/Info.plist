@@ -34,11 +34,17 @@
 		<array>
 			<dict>
 				<key>CFBundleURLName</key>
-				<string>gopeed</string>
+				<string>$(KOWNLOAD_SCHEME)</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
-					<string>gopeed</string>
+					<string>$(KOWNLOAD_SCHEME)</string>
 				</array>
+			</dict>
+			<dict>
+				<key>CFBundleURLName</key>
+				<string>$(KOWNLOAD_LEGACY_SCHEME)</string>
+				<key>CFBundleURLSchemes</key>
+				<array><string>$(KOWNLOAD_LEGACY_SCHEME)</string></array>
 			</dict>
 			<dict>
 				<key>CFBundleURLName</key>

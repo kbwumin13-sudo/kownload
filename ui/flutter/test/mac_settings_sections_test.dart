@@ -127,7 +127,7 @@ void main() {
     await _reveal(tester, '外观');
     expect(find.text('语言'), findsOneWidget);
     await _reveal(tester, '重新打开…');
-    expect(find.text('版本 test'), findsOneWidget);
+    expect(find.text('版本 test（1）'), findsOneWidget);
     expect(find.byType(ExtensionView), findsNothing);
     expect(tester.takeException(), isNull);
   });

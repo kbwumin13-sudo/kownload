@@ -84,6 +84,7 @@ class MainFlutterWindow: NSWindow {
   private var appearanceChannel: FlutterMethodChannel?
   private var panelChannel: FlutterMethodChannel?
   private var browserProfileChannel: FlutterMethodChannel?
+  private var identityChannel: FlutterMethodChannel?
   private var observers: [(NotificationCenter, NSObjectProtocol)] = []
   private let hotKey = PanelHotKey()
   // Also used by the native harness without starting a Flutter engine.
@@ -153,6 +154,20 @@ class MainFlutterWindow: NSWindow {
     orderOut(nil)
 
     let messenger = flutter.engine.binaryMessenger
+    let identity = FlutterMethodChannel(name: "kownload/identity", binaryMessenger: messenger)
+    identityChannel = identity
+    identity.setMethodCallHandler { call, result in
+      switch call.method {
+      case "legacyRunning":
+        result(!NSRunningApplication.runningApplications(withBundleIdentifier: AppIdentity.legacyBundleId).isEmpty)
+      case "migratePreferences":
+        // Preview must never import from a live user's preference domain.
+        guard Bundle.main.bundleIdentifier == AppIdentity.bundleId else { result(nil); return }
+        IdentityPreferences.importAllowedKeys()
+        result(nil)
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
     let panel = FlutterMethodChannel(name: "gopeed/macos_panel", binaryMessenger: messenger)
     panelChannel = panel
     sendPanelEvent = { [weak panel] method, arguments in panel?.invokeMethod(method, arguments: arguments) }
@@ -401,23 +416,20 @@ class MainFlutterWindow: NSWindow {
       if let bookmark = (defaults.dictionary(forKey: key) as? [String: Data])?[path] {
         if let resolved = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
                                    relativeTo: nil, bookmarkDataIsStale: &stale),
-           resolved.standardizedFileURL == currentURL.standardizedFileURL {
+           !stale, resolved.standardizedFileURL == currentURL.standardizedFileURL {
           scopeURL = resolved
         } else {
-          // A browser can atomically replace Local State. An obsolete bookmark
-          // must not prevent a read the OS already permits at the current path.
-          stale = true
+          var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
+          bookmarks.removeValue(forKey: path)
+          defaults.set(bookmarks, forKey: key)
+          result(FlutterError(code: "profile_permission_denied",
+            message: "原资料文件授权已失效，请点“选择资料文件”重新允许读取。", details: nil))
+          return
         }
       }
       let scoped = scopeURL.startAccessingSecurityScopedResource()
       defer { if scoped { scopeURL.stopAccessingSecurityScopedResource() } }
       let metadata = try Self.browserProfileMetadata(Data(contentsOf: currentURL))
-      if stale, let renewed = try? currentURL.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
-                                                          includingResourceValuesForKeys: nil, relativeTo: nil) {
-        var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
-        bookmarks[path] = renewed
-        defaults.set(bookmarks, forKey: key)
-      }
       result(metadata)
     } catch {
       let ns = error as NSError

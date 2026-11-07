@@ -1,0 +1,23 @@
+[
+  {
+    "package": "blob-polyfill",
+    "version": "7.0.20220408",
+    "source": "https://registry.npmjs.org/blob-polyfill/-/blob-polyfill-7.0.20220408.tgz",
+    "integrity": "sha512-oD8Ydw+5lNoqq+en24iuPt1QixdPpe/nUF8azTHnviCZYu9zUC+TwdzIp5orpblJosNlgNbVmmAb//c6d6ImUQ==",
+    "licenseFile": "blob-polyfill-LICENSE.txt"
+  },
+  {
+    "package": "whatwg-fetch",
+    "version": "3.6.20",
+    "source": "https://registry.npmjs.org/whatwg-fetch/-/whatwg-fetch-3.6.20.tgz",
+    "integrity": "sha512-EqhiFU6daOA8kpjOWTL0olhVOF3i7OrFzSYiGsEMB8GcXS+RrzauAERX65xMeNWVqxA6HXH2m69Z9LaKKdisfg==",
+    "licenseFile": "whatwg-fetch-LICENSE.txt"
+  },
+  {
+    "package": "fastestsmallesttextencoderdecoder",
+    "version": "1.0.22",
+    "source": "https://registry.npmjs.org/fastestsmallesttextencoderdecoder/-/fastestsmallesttextencoderdecoder-1.0.22.tgz",
+    "integrity": "sha512-Pb8d48e+oIuY4MaM64Cd7OW1gt4nxCHs7/ddPPZ/Ic3sg8yVGM7O9wDvZ7us6ScaUupzM+pfBolwtYhN1IxBIw==",
+    "licenseFile": "fastestsmallesttextencoderdecoder-LICENSE.txt"
+  }
+]

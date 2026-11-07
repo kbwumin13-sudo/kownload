@@ -9,7 +9,7 @@ import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_widgets.dart';
 import '../../../../util/locale_manager.dart';
 import '../../../../util/package_info.dart';
-import '../../../../util/updater.dart';
+import '../../../../util/release_updates.dart';
 import '../../../views/directory_selector.dart';
 import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
@@ -238,7 +238,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         final latest = _settings.latestVersion.value;
         return _group(context, '关于', [
           _row(context, 'kownload',
-              detail: '版本 ${packageInfo.version}',
+              detail: '版本 ${packageInfo.version}（${packageInfo.buildNumber}）',
               control: MacButton(
                   onPressed: () =>
                       _open('https://github.com/kbwumin13-sudo/kownload'),

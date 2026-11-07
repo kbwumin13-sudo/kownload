@@ -38,4 +38,16 @@ void main() {
           saved.toJson());
     }
   });
+  test('identity migration replaces known former defaults only', () {
+    const prior = '/fixture/legacy/gopeed.sock';
+    final saved =
+        StartConfigEntity(network: 'unix', address: prior, apiToken: 'fixture');
+    final got = resolveLocalServerConfig(
+        defaults: defaults,
+        saved: saved,
+        legacyUnixAddress: legacy,
+        additionalLegacyUnixAddresses: [prior]);
+    expect(got.address, defaults.address);
+    expect(got.apiToken, 'fixture');
+  });
 }

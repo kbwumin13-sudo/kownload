@@ -3,18 +3,11 @@ import 'dart:collection';
 
 import 'package:get/get.dart';
 
-import '../../../../util/util.dart';
 import '../../../../api/api.dart';
-import '../../../../api/gopeed_site_api.dart';
 import '../../../../api/model/extension.dart';
 import '../../../../api/model/install_extension.dart';
 import '../../../../api/model/store_extension.dart';
 import '../../../../api/model/switch_extension.dart';
-
-enum ExtensionListFilter {
-  market,
-  installed,
-}
 
 class ExtensionListItem {
   final Extension? installed;
@@ -63,20 +56,7 @@ class ExtensionController extends GetxController {
   final installedExtensions = <Extension>[].obs;
   final updateFlags = <String, String>{}.obs;
 
-  final storeExtensions = <StoreExtension>[].obs;
-  final storePagination = Rxn<StorePagination>();
-  final storeQuery = ''.obs;
-  final storeSort = StoreExtensionSort.stars.obs;
-
-  final listFilter = (Util.isMacos()
-          ? ExtensionListFilter.installed
-          : ExtensionListFilter.market)
-      .obs;
-
   final loadingInstalled = false.obs;
-  final loadingStore = false.obs;
-  final storeError = RxnString();
-  final loadingMoreStore = false.obs;
   final busyExtensionIds = <String>{}.obs;
   final showInstallTools = false.obs;
 
@@ -89,22 +69,9 @@ class ExtensionController extends GetxController {
       UnmodifiableMapView(
           {for (final ext in installedExtensions) ext.identity: ext});
 
-  UnmodifiableMapView<String, StoreExtension> get storeMap =>
-      UnmodifiableMapView({for (final ext in storeExtensions) ext.id: ext});
-
-  List<ExtensionListItem> get displayItems {
-    if (listFilter.value == ExtensionListFilter.installed) {
-      return installedExtensions
-          .map((ext) =>
-              ExtensionListItem(installed: ext, store: storeMap[ext.identity]))
-          .toList();
-    }
-
-    return storeExtensions
-        .map((ext) =>
-            ExtensionListItem(installed: installedMap[ext.id], store: ext))
-        .toList();
-  }
+  List<ExtensionListItem> get displayItems => installedExtensions
+      .map((extension) => ExtensionListItem(installed: extension))
+      .toList();
 
   @override
   Future<void> onInit() async {
@@ -112,13 +79,7 @@ class ExtensionController extends GetxController {
     await loadInitialData();
   }
 
-  Future<void> loadInitialData() async {
-    if (Util.isMacos()) {
-      await loadInstalled();
-      return;
-    }
-    await Future.wait([loadInstalled(refreshUpdates: true), refreshStore()]);
-  }
+  Future<void> loadInitialData() => loadInstalled();
 
   Future<void> loadInstalled({bool refreshUpdates = false}) async {
     loadingInstalled.value = true;
@@ -147,63 +108,6 @@ class ExtensionController extends GetxController {
     updateFlags.assignAll(nextFlags);
   }
 
-  Future<void> refreshStore() async {
-    loadingStore.value = true;
-    storeError.value = null;
-    try {
-      final page = await GopeedSiteApi.instance.getExtensions(
-        page: 1,
-        limit: 20,
-        sort: storeSort.value,
-        query: storeQuery.value,
-      );
-      storeExtensions.assignAll(page.data);
-      storePagination.value = page.pagination;
-    } catch (error) {
-      storeError.value = '暂时无法连接扩展商店，请检查网络后重试。';
-    } finally {
-      loadingStore.value = false;
-    }
-  }
-
-  Future<void> loadMoreStore() async {
-    final pagination = storePagination.value;
-    if (pagination == null || !pagination.hasNext || loadingMoreStore.value) {
-      return;
-    }
-    loadingMoreStore.value = true;
-    try {
-      final page = await GopeedSiteApi.instance.getExtensions(
-        page: pagination.page + 1,
-        limit: pagination.limit,
-        sort: storeSort.value,
-        query: storeQuery.value,
-      );
-      storeExtensions.addAll(page.data);
-      storePagination.value = page.pagination;
-    } finally {
-      loadingMoreStore.value = false;
-    }
-  }
-
-  Future<void> searchStore(String query) async {
-    storeQuery.value = query.trim();
-    await refreshStore();
-  }
-
-  Future<void> changeSort(StoreExtensionSort sort) async {
-    if (storeSort.value == sort) {
-      await refreshStore();
-      return;
-    }
-    storeSort.value = sort;
-    await refreshStore();
-  }
-
-  void changeFilter(ExtensionListFilter filter) {
-    listFilter.value = filter;
-  }
-
   void toggleInstallTools() {
     showInstallTools.value = !showInstallTools.value;
   }
@@ -218,44 +122,20 @@ class ExtensionController extends GetxController {
     return _compareVersion(extension.version, installed.version) > 0;
   }
 
-  bool canUpdateItem(ExtensionListItem item) {
-    if (item.installed == null) return false;
-    if (listFilter.value == ExtensionListFilter.market && item.store != null) {
-      return canUpdateFromStore(item.store!);
-    }
-    return updateFlags.containsKey(item.installed!.identity);
-  }
+  bool canUpdateItem(ExtensionListItem item) =>
+      item.installed != null &&
+      updateFlags.containsKey(item.installed!.identity);
 
-  Future<void> installFromStore(StoreExtension extension) async {
-    await _runBusy(extension.id, () async {
-      final installUrl = (extension.directory ?? '').trim().isEmpty
+  Future<void> installFromStore(StoreExtension extension) =>
+      installFromUrl((extension.directory ?? '').trim().isEmpty
           ? extension.repoUrl
-          : '${extension.repoUrl}#${extension.directory!.trim()}';
+          : '${extension.repoUrl}#${extension.directory!.trim()}');
 
-      final installedId =
-          await installExtension(InstallExtension(url: installUrl));
-      final statsId = installedId.isNotEmpty ? installedId : extension.id;
-      await loadInstalled(refreshUpdates: false);
-      _backgroundCheckUpdate();
-      _bumpStoreInstallCount(statsId);
-      _reportInstallSafe(statsId);
-    });
-  }
-
-  Future<void> installFromUrl(String url,
-      {bool devInstall = false, String? statsId}) async {
+  Future<void> installFromUrl(String url, {bool devInstall = false}) async {
     await _runBusy(manualInstallBusyKey, () async {
-      final installedId = await installExtension(
-          InstallExtension(devMode: devInstall, url: url));
-      await loadInstalled(refreshUpdates: false);
+      await installExtension(InstallExtension(devMode: devInstall, url: url));
+      await loadInstalled();
       _backgroundCheckUpdate();
-      if (installedId.isNotEmpty) {
-        _bumpStoreInstallCount(installedId);
-        _reportInstallSafe(installedId);
-      } else if (statsId != null && statsId.isNotEmpty) {
-        _bumpStoreInstallCount(statsId);
-        _reportInstallSafe(statsId);
-      }
     });
   }
 
@@ -280,8 +160,6 @@ class ExtensionController extends GetxController {
       await updateExtension(extension.identity);
       await loadInstalled(refreshUpdates: false);
       _backgroundCheckUpdate();
-      _bumpStoreInstallCount(extension.identity);
-      _reportInstallSafe(extension.identity);
     });
   }
 
@@ -333,41 +211,5 @@ class ExtensionController extends GetxController {
 
   void _backgroundCheckUpdate() {
     unawaited(checkUpdate());
-  }
-
-  void _reportInstallSafe(String id) {
-    unawaited(() async {
-      try {
-        await GopeedSiteApi.instance.reportExtensionInstall(id);
-      } catch (_) {
-        // Ignore stats reporting failures.
-      }
-    }());
-  }
-
-  void _bumpStoreInstallCount(String id) {
-    final index = storeExtensions.indexWhere((e) => e.id == id);
-    if (index < 0) return;
-    final ext = storeExtensions[index];
-    storeExtensions[index] = StoreExtension(
-      id: ext.id,
-      repoFullName: ext.repoFullName,
-      repoUrl: ext.repoUrl,
-      directory: ext.directory,
-      commitSha: ext.commitSha,
-      name: ext.name,
-      author: ext.author,
-      title: ext.title,
-      description: ext.description,
-      icon: ext.icon,
-      version: ext.version,
-      homepage: ext.homepage,
-      readme: ext.readme,
-      installCount: ext.installCount + 1,
-      stars: ext.stars,
-      topics: ext.topics,
-      createdAt: ext.createdAt,
-      updatedAt: ext.updatedAt,
-    );
   }
 }

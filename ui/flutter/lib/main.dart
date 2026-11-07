@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:get/get.dart';
-import 'package:gopeed/util/analytics.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -20,11 +19,12 @@ import 'util/locale_manager.dart';
 import 'util/log_util.dart';
 import 'util/package_info.dart';
 import 'util/scheme_register/scheme_register.dart';
-import 'util/updater.dart';
 import 'util/util.dart';
 import 'util/startup_tasks.dart';
 import 'macos/mac_appearance.dart';
 import 'macos/mac_panel.dart';
+import 'identity/bootstrap.dart';
+import 'identity/app_identity.dart';
 import 'app/modules/task/controllers/task_controller.dart';
 
 class StartupArgs {
@@ -58,7 +58,19 @@ void main(List<String> arguments) async {
 
   final args = StartupArgs.parse(arguments);
 
-  await init(args);
+  try {
+    await init(args);
+  } on IdentityBootstrapException catch (e) {
+    runApp(MaterialApp(
+        home: Scaffold(
+            body: Center(
+                child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(e.message))))));
+    await windowManager.ensureInitialized();
+    await windowManager.show();
+    return;
+  }
   onStart();
 
   runApp(const AppView());
@@ -70,6 +82,7 @@ Future<void> init(StartupArgs args) async {
     FlutterForegroundTask.initCommunicationPort();
   }
   await Util.initStorageDir(previewStorage: args.previewStorage);
+  await bootstrapIdentity();
   await Database.instance.init();
   if (Util.isDesktop()) {
     await windowManager.ensureInitialized();
@@ -145,7 +158,8 @@ Future<void> init(StartupArgs args) async {
   }
 
   // Auto-start incomplete tasks if enabled
-  if (controller.downloaderConfig.value.extra.autoStartTasks) {
+  if (!Util.isIsolatedPreview &&
+      controller.downloaderConfig.value.extra.autoStartTasks) {
     try {
       await resumeStartupTasks(
           load: () => api.getTasks(Status.values),
@@ -157,9 +171,17 @@ Future<void> init(StartupArgs args) async {
   }
 
   () async {
+    if (Util.isDesktop()) {
+      try {
+        await installHost();
+      } catch (e) {
+        logger.e("browser extension host binary install fail", e);
+      }
+    }
     if (Util.isDesktop() && !Util.isIsolatedPreview) {
       try {
-        registerUrlScheme("gopeed");
+        registerUrlScheme(AppIdentity.scheme);
+        registerUrlScheme(AppIdentity.legacyScheme);
         if (controller.downloaderConfig.value.extra.defaultBtClient) {
           registerDefaultTorrentClient();
         }
@@ -167,25 +189,7 @@ Future<void> init(StartupArgs args) async {
         logger.e("register scheme fail", e);
       }
 
-      try {
-        await installHost();
-      } catch (e) {
-        logger.e("browser extension host binary install fail", e);
-      }
-      for (final browser in Browser.values) {
-        try {
-          await installManifest(browser);
-        } catch (e) {
-          logger.e(
-              "browser [${browser.name}] extension host integration fail", e);
-        }
-      }
-
-      try {
-        await installUpdater();
-      } catch (e) {
-        logger.e("updater install fail", e);
-      }
+      // Browser manifests are switched only by an explicit installation action.
     }
   }();
 }
@@ -207,14 +211,5 @@ Future<void> onStart() async {
         logger.w("missing language: $lang, keys: $missingKeys");
       }
     });
-  }
-
-  if (Config.isConfigured && Database.instance.getAnalyticsEnabled()) {
-    try {
-      await Analytics.instance.init();
-      await Analytics.instance.logAppOpen();
-    } catch (e) {
-      logger.w("GA4 init failed: $e");
-    }
   }
 }

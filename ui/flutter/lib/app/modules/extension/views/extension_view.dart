@@ -12,7 +12,6 @@ import 'package:gopeed/macos/mac_widgets.dart';
 import '../../../../api/api.dart';
 import '../../../../api/model/extension.dart';
 import '../../../../api/model/install_extension.dart';
-import '../../../../api/model/store_extension.dart';
 import '../../../../api/model/update_extension_settings.dart';
 import '../../../../util/message.dart';
 import '../../../../util/util.dart';
@@ -39,13 +38,7 @@ class ExtensionView extends StatefulWidget {
 
 class _ExtensionViewState extends State<ExtensionView> {
   ExtensionController get controller => Get.find<ExtensionController>();
-  bool _showStore = false;
   bool get _maintenance => widget.mode == ExtensionViewMode.maintenance;
-  ExtensionListFilter get _filter => Util.isMacos()
-      ? (_showStore
-          ? ExtensionListFilter.market
-          : ExtensionListFilter.installed)
-      : controller.listFilter.value;
 
   @override
   void initState() {
@@ -58,12 +51,10 @@ class _ExtensionViewState extends State<ExtensionView> {
   @override
   void dispose() {
     _installUrlController.dispose();
-    _searchController.dispose();
     super.dispose();
   }
 
   final _installUrlController = TextEditingController();
-  final _searchController = TextEditingController();
   final _installBtnController = IconButtonLoadingController();
 
   Future<void> _doInstall() async {
@@ -113,71 +104,26 @@ class _ExtensionViewState extends State<ExtensionView> {
 
     if (Util.isMacos()) return _buildMacView(context);
     return Scaffold(
-      body: SafeArea(
-        child: Obx(
-          () => RefreshIndicator(
-            onRefresh: controller.loadInitialData,
-            child: ListView(
-              padding: EdgeInsets.symmetric(
-                horizontal: ResponsiveBuilder.isNarrow(context) ? 16 : 24,
-                vertical: 20,
-              ),
-              children: [
-                _buildMarketToolbar(context),
-                const SizedBox(height: 12),
-                _buildFilterBar(context),
-                if (controller.showInstallTools.value) ...[
-                  const SizedBox(height: 10),
-                  _buildInstallPanel(context),
-                ],
-                const SizedBox(height: 12),
-                _buildUnifiedGrid(context),
-                if (_filter == ExtensionListFilter.market &&
-                    controller.storePagination.value?.hasNext == true) ...[
-                  const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.center,
-                    child: OutlinedButton.icon(
-                      onPressed: controller.loadingMoreStore.value
-                          ? null
-                          : controller.loadMoreStore,
-                      icon: controller.loadingMoreStore.value
-                          ? const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.expand_more),
-                      label: Text('extensionLoadMore'.tr),
-                    ),
-                  ),
-                ],
-                if (_filter == ExtensionListFilter.market &&
-                    controller.storePagination.value != null &&
-                    controller.storeExtensions.isNotEmpty &&
-                    controller.storePagination.value!.hasNext == false) ...[
-                  const SizedBox(height: 12),
-                  Center(
-                    child: Text(
-                      'extensionNoMore'.tr,
-                      style: Get.textTheme.bodySmall
-                          ?.copyWith(color: Get.theme.hintColor),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _openStore() async {
-    setState(() => _showStore = true);
-    if (controller.storePagination.value == null) {
-      await controller.refreshStore();
-    }
+        body: SafeArea(
+            child: Obx(() => ListView(
+                  padding: const EdgeInsets.all(20),
+                  children: [
+                    Wrap(spacing: 8, children: [
+                      TextButton.icon(
+                          onPressed: controller.toggleInstallTools,
+                          icon: const Icon(Icons.link),
+                          label: Text('extensionManualInstall'.tr)),
+                      TextButton.icon(
+                          onPressed: () =>
+                              controller.loadInstalled(refreshUpdates: true),
+                          icon: const Icon(Icons.refresh),
+                          label: Text('update'.tr)),
+                    ]),
+                    if (controller.showInstallTools.value)
+                      _buildInstallPanel(context),
+                    _buildUnifiedGrid(context),
+                  ],
+                ))));
   }
 
   Widget _buildMacView(BuildContext context) {
@@ -187,119 +133,56 @@ class _ExtensionViewState extends State<ExtensionView> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(_showStore ? '扩展商店' : '已安装的扩展',
-                    style: TextStyle(color: colors.secondary, fontSize: 12)),
-                IconButton(
-                  tooltip: '刷新已安装扩展',
-                  onPressed: () => controller.loadInstalled(),
-                  icon: const Icon(CupertinoIcons.arrow_clockwise, size: 16),
-                ),
-                if (_maintenance) ...[
-                  MacButton(
-                    onPressed: controller.loadingInstalled.value
-                        ? null
-                        : () => controller.loadInstalled(refreshUpdates: true),
-                    child: const Text('检查扩展更新'),
-                  ),
-                  MacButton(
-                    onPressed: _showStore
-                        ? () => setState(() => _showStore = false)
-                        : _openStore,
-                    child: Text(_showStore ? '返回已安装' : '打开扩展商店'),
-                  ),
-                  MacButton(
-                    onPressed: controller.toggleInstallTools,
-                    icon: CupertinoIcons.link,
-                    child: Text('extensionManualInstall'.tr),
-                  ),
+                spacing: 8,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text('已安装的扩展',
+                      style: TextStyle(color: colors.secondary, fontSize: 12)),
                   IconButton(
-                    tooltip: 'extensionDevelop'.tr,
-                    onPressed: () => launchUrl(
-                        Uri.parse('https://gopeed.com/docs/dev-extension')),
-                    icon: const Icon(CupertinoIcons.book, size: 16),
-                  ),
-                ],
-              ],
-            ),
-            if (_maintenance && _showStore) ...[
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                  child: Focus(
-                    onKeyEvent: (node, event) {
-                      if (event is KeyDownEvent &&
-                          event.logicalKey == LogicalKeyboardKey.enter) {
-                        controller.searchStore(_searchController.text);
-                        return KeyEventResult.handled;
-                      }
-                      return KeyEventResult.ignored;
-                    },
-                    child: MacSearchField(
-                        controller: _searchController,
-                        hint: 'extensionSearchHint'.tr),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'extensionSearchHint'.tr,
-                  onPressed: () =>
-                      controller.searchStore(_searchController.text),
-                  icon: const Icon(CupertinoIcons.search, size: 17),
-                ),
-              ]),
-              _buildSortTabs(context),
-            ],
+                      tooltip: '刷新已安装扩展',
+                      onPressed: () => controller.loadInstalled(),
+                      icon:
+                          const Icon(CupertinoIcons.arrow_clockwise, size: 16)),
+                  if (_maintenance) ...[
+                    MacButton(
+                        onPressed: controller.loadingInstalled.value
+                            ? null
+                            : () =>
+                                controller.loadInstalled(refreshUpdates: true),
+                        child: const Text('检查扩展更新')),
+                    MacButton(
+                        onPressed: controller.toggleInstallTools,
+                        icon: CupertinoIcons.link,
+                        child: Text('extensionManualInstall'.tr)),
+                    IconButton(
+                        tooltip: 'extensionDevelop'.tr,
+                        onPressed: () => launchUrl(Uri.parse(
+                            'https://github.com/kbwumin13-sudo/kownload/blob/main/pkg/download/extension.go')),
+                        icon: const Icon(CupertinoIcons.book, size: 16)),
+                  ],
+                ]),
             if (_maintenance && controller.showInstallTools.value) ...[
               const SizedBox(height: 10),
               _buildInstallPanel(context),
             ],
             const SizedBox(height: 10),
             Container(
-              decoration: BoxDecoration(
-                color: colors.surface,
-                border: Border.all(color: colors.border),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: _buildUnifiedGrid(context),
-            ),
-            if (_maintenance &&
-                _showStore &&
-                controller.storePagination.value?.hasNext == true)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Center(
-                    child: MacButton(
-                  onPressed: controller.loadingMoreStore.value
-                      ? null
-                      : controller.loadMoreStore,
-                  child: Text('extensionLoadMore'.tr),
-                )),
-              ),
-            if (_maintenance &&
-                _showStore &&
-                controller.storePagination.value?.hasNext == false)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Center(
-                    child: Text('extensionNoMore'.tr,
-                        style:
-                            TextStyle(color: colors.secondary, fontSize: 12))),
-              ),
+                decoration: BoxDecoration(
+                    color: colors.surface,
+                    border: Border.all(color: colors.border),
+                    borderRadius: BorderRadius.circular(8)),
+                clipBehavior: Clip.antiAlias,
+                child: _buildUnifiedGrid(context)),
           ],
         ));
     if (widget.embedded) return content;
     return Scaffold(
         body: MacPage(
-      title: '连接与能力',
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(22, 16, 22, 24),
-        children: [content],
-      ),
-    ));
+            title: '连接与能力',
+            child: ListView(
+                padding: const EdgeInsets.fromLTRB(22, 16, 22, 24),
+                children: [content])));
   }
 
   Widget _buildInstallPanel(BuildContext context) {
@@ -412,248 +295,16 @@ class _ExtensionViewState extends State<ExtensionView> {
           );
   }
 
-  Widget _buildMarketToolbar(BuildContext context) {
-    final narrow = ResponsiveBuilder.isNarrow(context);
-    InputDecoration decoration() {
-      return const InputDecoration(
-        hintText: '搜索扩展...',
-        hintStyle: TextStyle(fontSize: 13),
-      );
-    }
-
-    return narrow
-        ? Column(
-            children: [
-              TextField(
-                controller: _searchController,
-                textInputAction: TextInputAction.search,
-                onSubmitted: controller.searchStore,
-                decoration: decoration().copyWith(
-                  suffixIcon: IconButton(
-                    onPressed: () =>
-                        controller.searchStore(_searchController.text),
-                    icon: const Icon(Icons.search_rounded),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Flexible(child: _buildSortTabs(context)),
-                  const SizedBox(width: 6),
-                  IconButton(
-                    tooltip: 'update'.tr,
-                    onPressed: controller.refreshStore,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
-              ),
-            ],
-          )
-        : Column(
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _searchController,
-                      textInputAction: TextInputAction.search,
-                      onSubmitted: controller.searchStore,
-                      decoration: decoration().copyWith(
-                        suffixIcon: IconButton(
-                          onPressed: () =>
-                              controller.searchStore(_searchController.text),
-                          icon: const Icon(Icons.search_rounded),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _buildSortTabs(context),
-                  IconButton(
-                    tooltip: 'update'.tr,
-                    onPressed: controller.refreshStore,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
-              ),
-            ],
-          );
-  }
-
-  Widget _buildSortTabs(BuildContext context) {
-    Widget tab(StoreExtensionSort sort, String label) {
-      final selected = controller.storeSort.value == sort;
-      return InkWell(
-        borderRadius: BorderRadius.circular(7),
-        onTap: () => controller.changeSort(sort),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(7),
-            color: selected
-                ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.12)
-                : Colors.transparent,
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-              fontSize: 12,
-              height: 1.0,
-              color: selected
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context)
-                      .textTheme
-                      .bodyMedium
-                      ?.color
-                      ?.withValues(alpha: 0.82),
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 310),
-      padding: const EdgeInsets.all(2),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.35),
-        border: Border.all(
-          color: Theme.of(context).dividerColor.withValues(alpha: 0.45),
-        ),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          tab(StoreExtensionSort.stars, 'extensionSortStars'.tr),
-          tab(StoreExtensionSort.installs, 'extensionSortInstalls'.tr),
-          tab(StoreExtensionSort.updated, 'extensionSortUpdated'.tr),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFilterBar(BuildContext context) {
-    final narrow = ResponsiveBuilder.isNarrow(context);
-    Widget option(ExtensionListFilter filter, String text) {
-      final selected = _filter == filter;
-      return InkWell(
-        onTap: () => controller.changeFilter(filter),
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            color: selected
-                ? Get.theme.colorScheme.primary.withValues(alpha: 0.14)
-                : Colors.transparent,
-          ),
-          child: Text(
-            text,
-            style: TextStyle(
-              color: selected ? Get.theme.colorScheme.primary : null,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-            ),
-          ),
-        ),
-      );
-    }
-
-    final left = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        option(ExtensionListFilter.market, 'extensionFilterMarket'.tr),
-        const SizedBox(width: 8),
-        option(ExtensionListFilter.installed, 'extensionFilterInstalled'.tr),
-      ],
-    );
-
-    final right = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        TextButton.icon(
-          onPressed: controller.toggleInstallTools,
-          icon: const Icon(Icons.link),
-          label: Text('extensionManualInstall'.tr),
-        ),
-        const SizedBox(width: 8),
-        TextButton.icon(
-          onPressed: () =>
-              launchUrl(Uri.parse('https://gopeed.com/docs/dev-extension')),
-          icon: const Icon(Icons.menu_book_outlined),
-          label: Text('extensionDevelop'.tr),
-        ),
-      ],
-    );
-
-    if (narrow) {
-      return Wrap(
-        spacing: 8,
-        runSpacing: 6,
-        alignment: WrapAlignment.spaceBetween,
-        children: [left, right],
-      );
-    }
-
-    return Row(
-      children: [
-        left,
-        const Spacer(),
-        right,
-      ],
-    );
-  }
-
   Widget _buildUnifiedGrid(BuildContext context) {
-    final items = !Util.isMacos()
-        ? controller.displayItems
-        : _showStore
-            ? controller.storeExtensions
-                .map((ext) => ExtensionListItem(
-                    installed: controller.installedMap[ext.id], store: ext))
-                .toList()
-            : controller.installedExtensions
-                .map((ext) => ExtensionListItem(installed: ext))
-                .toList();
-    final loading = controller.loadingInstalled.value ||
-        (_filter == ExtensionListFilter.market &&
-            controller.loadingStore.value);
-    if (loading && items.isEmpty) {
+    final items = controller.displayItems;
+    if (controller.loadingInstalled.value && items.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (Util.isMacos() &&
-        _filter == ExtensionListFilter.market &&
-        controller.storeError.value != null) {
-      return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 36),
-          child: MacEmptyState(
-            icon: CupertinoIcons.exclamationmark_circle,
-            title: '无法载入扩展商店',
-            message: controller.storeError.value,
-            action: MacButton(
-                onPressed: controller.refreshStore, child: const Text('重试')),
-          ));
-    }
     if (items.isEmpty) {
-      if (Util.isMacos()) {
-        return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 36),
-            child: MacEmptyState(
-                icon: controller.storeQuery.value.isEmpty
-                    ? CupertinoIcons.square_stack
-                    : CupertinoIcons.search,
-                title: _filter == ExtensionListFilter.installed
-                    ? '还没有安装扩展'
-                    : 'extensionStoreEmpty'.tr));
-      }
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 24),
-        child: Text('extensionStoreEmpty'.tr),
-      );
+      return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 36),
+          child: MacEmptyState(
+              icon: CupertinoIcons.square_stack, title: '还没有安装扩展'));
     }
 
     if (Util.isMacos()) {
@@ -696,10 +347,7 @@ class _ExtensionViewState extends State<ExtensionView> {
     final installed = item.installed;
     final store = item.store;
     final allowMaintenance = !Util.isMacos() || _maintenance;
-    final canUpdate = allowMaintenance &&
-        (_filter == ExtensionListFilter.market && store != null
-            ? controller.canUpdateFromStore(store)
-            : controller.canUpdateItem(item));
+    final canUpdate = allowMaintenance && controller.canUpdateItem(item);
     final busy = controller.busyExtensionIds.contains(item.id);
 
     final card = ExtensionCard(

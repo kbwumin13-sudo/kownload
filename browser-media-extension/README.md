@@ -1,6 +1,6 @@
 # kownload 下载助手
 
-Chrome / Edge MV3 下载助手，支持网页媒体和九类网盘的所选文件。不申请 `downloads` 或下载拦截权限。Gopeed 原有浏览器插件可同时保留。
+Chrome / Edge MV3 下载助手，支持网页媒体和九类网盘的所选文件。不申请 `downloads` 或下载拦截权限。原有兼容浏览器插件可同时保留。
 
 ## 0.4.0 九网盘
 
@@ -16,7 +16,7 @@ Cookie 仅在获得 claim 或按钮点击后，由后台按标签所属 cookie s
 
 本地 mock 覆盖九类选择映射、无选择/单文件分享、跨页面失效、claim 不唤醒、所选资源 Native 提交、store/partition 与敏感字段过滤。未执行真实网盘登录、API 下载、安装或 Flutter 实机验收；页面布局改版和当前账号权限仍需后续实际确认。助手只读取现有登录/分享状态，不刷新令牌、不写站点 storage；缺少有效凭证时需在原站完成登录或打开已解锁分享后重试。
 
-选择布局参考 [hmjz100/LinkSwift](https://github.com/hmjz100/LinkSwift)，固定原件在上级 `artifacts/linkswift-2026-10-14/upstream/LinkSwift-{stable,dev}.user.js`，保留 AGPL-3.0-or-later 归属。未复制上游 API 下载、自动登录/令牌刷新或修改原站界面的逻辑。
+选择布局参考 [hmjz100/LinkSwift](https://github.com/hmjz100/LinkSwift)，固定参考版本见 [来源声明](../third_party/linkswift/NOTICE.md)，保留 AGPL-3.0-or-later 归属。未复制上游 API 下载、自动登录/令牌刷新或修改原站界面的逻辑。
 
 交接字段约定：Capture 的 `tokens` 使用原站字段名。百度保留 `bdstoken/sign/timestamp/jsToken/sekey/shareid`（数值 shareid 保留在 tokens，URL 分享身份在 share.shareId）；阿里保留 `access_token/token_type/user_id/default_drive_id/resource_drive_id`，文件 driveId 在 meta；天翼为 `accessToken`；迅雷/光鸭为 `access_token/token_type/user_id/client_id/captcha_token/deviceid`；夸克/UC 为 `stoken` 和每文件 `meta.share_fid_token`；123 为 `authorToken/LoginUuid`、文件 `hash`（Etag）及 `meta.S3KeyFlag/StorageNode`。移动云盘读取后台 Cookie 中的 authorization。已有 access_token/authorToken 自动生成 Capture.headers.Authorization，设备/验证码/客户端字段只生成固定对应 Header；这些头只存在于 capture，不能进入 create 的 task extra。
 
@@ -25,13 +25,13 @@ Cookie 仅在获得 claim 或按钮点击后，由后台按标签所属 cookie s
 1. 在 Chrome 打开 `chrome://extensions`，或在 Edge 打开 `edge://extensions`。
 2. 开启开发者模式，选择“加载已解压的扩展程序”。
 3. 选择本目录 `browser-media-extension/`。弹出面板会展示当前页视频、图片和音频。
-4. 下载前确保 Gopeed 已安装并注册 Native Messaging 主机 `com.gopeed.gopeed`。
+4. 下载前确保 kownload 已安装并注册 Native Messaging 主机 `com.gopeed.gopeed`。
 
 固定扩展 ID：`jcalkpjhhaachliihlkojhmafniepnoj`。Chrome 和 Edge 使用同一个 `manifest.key`，Native Messaging 主机的 `allowed_origins` 需加入 `chrome-extension://jcalkpjhhaachliihlkojhmafniepnoj/`。此公开 key 只用于固定 ID；目录中没有私钥。Main 可用该 ID 在 Chrome / Edge 实际安装验收。
 
 面板默认隐藏宽、高都已知且小于 128 像素的图片；未知尺寸保留。“显示小图”可切换。选择媒体清单后会检查格式并默认选中最高画质的带音轨组合；每档单独视频轨会自动配音轨，保留仅音频和原有含音轨格式。暂停或失败任务可按当前资源来源页与协议查找，选择任务名称后更新资源地址并继续。每个可见播放器拥有自己的下载按钮；点击后只显示该播放器对应的一个视频，可选择清晰度、名称和目录。单视频界面不提供全选或其他资源，来源失效后提示回原页面重新点击。`blob:` 只有同一播放器显式提供清单地址时才关联，否则显示“未识别这个视频”并禁用下载。整页视频、图片、音频列表与批量下载仅通过工具栏图标进入，默认不选中任何资源。分片不会作为完整视频提交。
 
-面板首次读取默认目录或用户点击检查、下载时才唤醒 Gopeed；被动嗅探不会唤醒。Cookie 只在点击所选资源时按资源 URL 获取并传给 Native 主机，候选状态只存 `storage.session`。站点关闭状态和“显示小图”偏好存在 `storage.local`。
+面板首次读取默认目录或用户点击检查、下载时才唤醒 kownload；被动嗅探不会唤醒。Cookie 只在点击所选资源时按资源 URL 获取并传给 Native 主机，候选状态只存 `storage.session`。站点关闭状态和“显示小图”偏好存在 `storage.local`。
 
 Native `forward` 会统一把 `/config`、`/media/inspect`、`/tasks` 等简写路径补成 `/api/v1/...`，已带此前缀的路径保持原样。
 
@@ -66,3 +66,8 @@ identify列表和检查/创建/更新任务接口都要求明确playerId或manua
 增强识别只收集当前 60 秒会话的新候选；精确 MSE 来源证据可绑定播放器，其他新候选需要手动确认一项。支持受限 JSON 配置观察与无扩展名清单，不扫描密钥正文或复制媒体缓冲区。CSS 背景括号/转义、image-set、伪元素、srcset/picture 与动态图片的识别已补全。清晰度选择保留音轨语言，提取器提供的字幕可选下载并嵌入；面板显示真实标题、时长、封面和图片备选。
 
 授权头仅在后台内存按目标限定，Cookie 按确认引用域/path 读取；会话检查点不会写入敏感头。普通下载接管仍由官方扩展处理。更新源码后在扩展管理页重新加载，再刷新已打开的来源页（包括 Chrome 安装的 X 应用）。详细能力、安装验收与边界见仓库 MEDIA_SNIFFER.md 和项目 artifacts/sniffer-system-0.3.0/验收报告.md。
+
+
+## 许可与源码
+
+发行 ZIP 附主 GPLv3 许可证、第三方许可与来源声明、`SOURCE.txt`，并保留 LinkSwift 的 AGPL 来源。对应源码与应用使用相同提交，随正式 Release 提供。Native host 名称 `com.gopeed.gopeed` 与 manifest 固定公钥本阶段保留兼容；公钥不是私钥。

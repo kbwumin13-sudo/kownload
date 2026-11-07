@@ -1,3 +1,9 @@
+# 上游历史资料
+
+以下原文仅记录来源，不是 kownload 当前功能或下载承诺。当前支持范围见 [README](../README.md)，多语言旧原文与贡献指南集中保存在 [upstream/](upstream/)。版权、许可证与作者归属继续保留。
+
+---
+
 # [![](../_docs/img/banner.svg)](https://gopeed.com)
 
 [![Test Status](https://github.com/GopeedLab/gopeed/workflows/test/badge.svg)](https://github.com/GopeedLab/gopeed/actions?query=workflow%3Atest)

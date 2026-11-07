@@ -14,7 +14,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_handler/share_handler.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:uri_to_file/uri_to_file.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../../api/api.dart';
@@ -24,6 +23,7 @@ import '../../../../api/model/install_extension.dart';
 import '../../../../api/model/request.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../core/libgopeed_boot.dart';
+import '../../../../identity/app_identity.dart';
 import '../../../../database/database.dart';
 import '../../../../database/entity.dart';
 import '../../../../i18n/message.dart';
@@ -33,7 +33,7 @@ import '../../../../util/locale_manager.dart';
 import '../../../../util/local_server_config.dart';
 import '../../../../util/log_util.dart';
 import '../../../../util/package_info.dart';
-import '../../../../util/updater.dart';
+import '../../../../util/release_updates.dart';
 import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
@@ -108,16 +108,16 @@ class AppController extends GetxController with WindowListener, TrayListener {
     _initTray().onError(
         (error, stackTrace) => logger.w("initTray error", error, stackTrace));
 
-    if (!Util.isIsolatedPreview) {
-      _initRpcServer().onError((error, stackTrace) =>
-          logger.w("initRpcServer error", error, stackTrace));
-    }
+    _initRpcServer().onError((error, stackTrace) =>
+        logger.w("initRpcServer error", error, stackTrace));
 
     _initForegroundTask().onError((error, stackTrace) =>
         logger.w("initForegroundTask error", error, stackTrace));
 
-    _initTrackerUpdate().onError((error, stackTrace) =>
-        logger.w("initTrackerUpdate error", error, stackTrace));
+    if (!Util.isIsolatedPreview) {
+      _initTrackerUpdate().onError((error, stackTrace) =>
+          logger.w("initTrackerUpdate error", error, stackTrace));
+    }
 
     if (!Util.isIsolatedPreview) {
       _initLaunchAtStartup().onError((error, stackTrace) =>
@@ -219,8 +219,10 @@ class AppController extends GetxController with WindowListener, TrayListener {
     // Priority 1: gopeed: URL scheme hidden parameter
     // Priority 2: Command line --hidden flag
     bool shouldHide = hiddenFromArgs;
-    if (initialLink?.scheme == "gopeed") {
-      shouldHide = initialLink!.queryParameters["hidden"] == "true";
+    if (initialLink != null &&
+        [AppIdentity.scheme, AppIdentity.legacyScheme]
+            .contains(initialLink.scheme)) {
+      shouldHide = initialLink.queryParameters["hidden"] == "true";
     }
 
     // Show window if not hidden (desktop only)
@@ -325,13 +327,6 @@ class AppController extends GetxController with WindowListener, TrayListener {
         },
       ),
       MenuItem.separator(),
-      MenuItem(
-        label: 'donate'.tr,
-        onClick: (menuItem) => {
-          launchUrl(Uri.parse("https://gopeed.com/docs/donate"),
-              mode: LaunchMode.externalApplication)
-        },
-      ),
       MenuItem(
         label: '${"version".tr}（${packageInfo.version}）',
       ),
@@ -466,7 +461,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
   }
 
   Future<void> _handleDeepLink(Uri uri) async {
-    if (uri.scheme == "gopeed") {
+    if ([AppIdentity.scheme, AppIdentity.legacyScheme].contains(uri.scheme)) {
       // gopeed:///create?params=eyJyZXEiOnsidXJsIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS9maWxlLnR4dCJ9fQ==
       if (uri.path == "/create") {
         final params = uri.queryParameters["params"];
@@ -538,10 +533,17 @@ class AppController extends GetxController with WindowListener, TrayListener {
     } else {
       _defaultStartConfig!.network = "unix";
       _defaultStartConfig!.address = Util.isIsolatedPreview || Util.isMacos()
-          ? path.join(Util.getStorageDir(), unixSocketPath)
+          ? path.join(Util.getStorageDir(),
+              Util.isMacos() ? AppIdentity.apiSocket : unixSocketPath)
           : "${(await getTemporaryDirectory()).path}/$unixSocketPath";
     }
     _defaultStartConfig!.apiToken = '';
+    if (Util.isMacos()) {
+      await File(_defaultStartConfig!.address).parent.create(recursive: true);
+      if (utf8.encode(_defaultStartConfig!.address).length >= 104) {
+        throw StateError('IPC 路径过长，请使用更短的数据目录');
+      }
+    }
     return _defaultStartConfig!;
   }
 
@@ -552,10 +554,21 @@ class AppController extends GetxController with WindowListener, TrayListener {
           network: defaultCfg.network,
           address: defaultCfg.address,
           apiToken: defaultCfg.apiToken),
-      saved: Database.instance.getStartConfig(),
+      saved: Util.isIsolatedPreview ? null : Database.instance.getStartConfig(),
       legacyUnixAddress: Util.isMacos()
           ? path.join((await getTemporaryDirectory()).path, unixSocketPath)
           : defaultCfg.address,
+      additionalLegacyUnixAddresses: Util.isMacos()
+          ? [
+              path.join(Util.getStorageDir(), unixSocketPath),
+              path.join(
+                  Platform.environment['HOME']!,
+                  'Library',
+                  'Application Support',
+                  AppIdentity.legacyBundleId,
+                  unixSocketPath),
+            ]
+          : const [],
     );
     startConfig.value.network = saveCfg.network;
     startConfig.value.address = saveCfg.address;

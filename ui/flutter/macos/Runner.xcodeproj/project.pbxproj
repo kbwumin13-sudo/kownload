@@ -21,6 +21,8 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		B00000000000000000000001 /* AppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* AppIdentity.swift */; };
+		B00000000000000000000003 /* IdentityPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* IdentityPreferences.swift */; };
 		A101BEEFD00D000000000001 /* MouseEventRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A101BEEFD00D000000000002 /* MouseEventRouter.swift */; };
 		0F970437545A111A20927325 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8592AF029594F4D655755C12 /* Pods_Runner.framework */; };
 		335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */; };
@@ -56,6 +58,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B00000000000000000000002 /* AppIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIdentity.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* IdentityPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityPreferences.swift; sourceTree = "<group>"; };
 		A101BEEFD00D000000000002 /* MouseEventRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseEventRouter.swift; sourceTree = "<group>"; };
 		1D1C571344AEA87ADEA020F0 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		1DFC930634B94349932896F5 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
@@ -149,6 +153,8 @@
 			isa = PBXGroup;
 			children = (
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
+				B00000000000000000000002 /* AppIdentity.swift */,
+				B00000000000000000000004 /* IdentityPreferences.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
 				A101BEEFD00D000000000002 /* MouseEventRouter.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
@@ -347,6 +353,8 @@
 				33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */,
 				A101BEEFD00D000000000001 /* MouseEventRouter.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,
+				B00000000000000000000001 /* AppIdentity.swift in Sources */,
+				B00000000000000000000003 /* IdentityPreferences.swift in Sources */,
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -1,6 +1,6 @@
 import 'package:get/get.dart';
 
-import '../../../../util/updater.dart';
+import '../../../../util/release_updates.dart';
 
 class SettingController extends GetxController {
   final tapStatues = <String, bool>{}.obs;

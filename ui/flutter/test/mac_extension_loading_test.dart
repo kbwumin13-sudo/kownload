@@ -45,10 +45,8 @@ void main() {
     api.init('tcp', '127.0.0.1:${server.port}', '');
     final controller = ExtensionController();
     await controller.onInit();
-    expect(controller.listFilter.value, ExtensionListFilter.installed);
     expect(controller.installedExtensions.single.identity, 'sample');
     expect(controller.updateFlags, isEmpty);
-    expect(controller.storePagination.value, isNull);
     expect(requests, ['/api/v1/extensions']);
 
     await controller.loadInitialData();

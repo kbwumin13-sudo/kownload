@@ -49,8 +49,8 @@ Cleanup 核对 provider、同账号、批次、实际创建身份，远端根目
 
 ## 来源与归属
 
-- 固定上游 [hmjz100/LinkSwift](https://github.com/hmjz100/LinkSwift)，源码 `../artifacts/linkswift-2026-10-14/upstream/LinkSwift-{stable,dev}.user.js`，作者 hmjz100 / 油小猴，上游 AGPL-3.0 归属及完整 LICENSE 保存在同目录。本实现保留该参考归属；未照搬开发版阿里 getFilesUrl 的 batch.forEach 覆盖错误。
-- Primary：[OpenListTeam/OpenList](https://github.com/OpenListTeam/OpenList/tree/482464c2affc5eeba5d4a25bb272aeb352ec5918/drivers)，2026-10-14 通过 `gh api` 读取 main，核对时 SHA `482464c2affc5eeba5d4a25bb272aeb352ec5918`；189 / 189pc / aliyundrive / aliyundrive_share / quark_uc / guangyapan / 123_share / thunder_browser。139 / 123 使用同目录 `upstream/openlist/*` 缓存。
+- 固定上游 [hmjz100/LinkSwift](https://github.com/hmjz100/LinkSwift)，固定源码版本见 [LinkSwift NOTICE](third_party/linkswift/NOTICE.md)，作者 hmjz100 / 油小猴，上游 AGPL-3.0 归属及完整 LICENSE 保存在 `third_party/linkswift/`。本实现保留该参考归属；未照搬开发版阿里 getFilesUrl 的 batch.forEach 覆盖错误。
+- Primary：[OpenListTeam/OpenList](https://github.com/OpenListTeam/OpenList/tree/482464c2affc5eeba5d4a25bb272aeb352ec5918/drivers)，2026-10-14 通过 `gh api` 读取 main，核对时 SHA `482464c2affc5eeba5d4a25bb272aeb352ec5918`；189 / 189pc / aliyundrive / aliyundrive_share / quark_uc / guangyapan / 123_share / thunder_browser。139 / 123 同样参考该固定提交的对应驱动。
 - 天翼分享目录补充参考 [bookstairs/bookhunter telecom/share.go](https://github.com/bookstairs/bookhunter/blob/master/internal/driver/telecom/share.go)，通过 `gh api` 获取源文件。
 - 天翼 SHARE_SAVE、创建/删除/批次轮询补充参考 [1307super/cloud189-auto-save](https://github.com/1307super/cloud189-auto-save)，`src/services/cloud189.js` / `src/services/task.js`；不采用其中默认根目录转存与覆盖策略。
 - 百度转存及 Cookie 个人接口补充参考 [qjfoidnh/BaiduPCS-Go transfer.go](https://github.com/qjfoidnh/BaiduPCS-Go/blob/main/baidupcs/transfer.go)、[prepare.go](https://github.com/qjfoidnh/BaiduPCS-Go/blob/main/baidupcs/prepare.go)、[panhome/sign.go](https://github.com/qjfoidnh/BaiduPCS-Go/blob/main/baidupcs/internal/panhome/sign.go)、[panhome/parse.go](https://github.com/qjfoidnh/BaiduPCS-Go/blob/main/baidupcs/internal/panhome/parse.go)、[GDownload baidu_api.js](https://github.com/cool2528/GDownload/blob/main/plugins/baidu-netdisk/lib/baidu_api.js)、[BaiduPCS-Rust client.rs](https://github.com/komorebiCarry/BaiduPCS-Rust/blob/main/backend/src/netdisk/client.rs)。采用 to_fs_id，不采用 GDownload 把 from_fs_id 当成转存文件 ID 的逻辑。
@@ -66,6 +66,6 @@ Cleanup 核对 provider、同账号、批次、实际创建身份，远端根目
 
 ## Main 实机增补（2026-10-14）
 
-已通过现有 Chrome 助手同步夸克网页登录态，以内置 netdisk 任务下载用户提供的分享原文件「巨构案例.zip」。实际大小 439278761 字节，78 个 ZIP 条目的 CRC 全通过；暂停、应用退出、重启、重新同步后继续同一任务和断点通过。文件 SHA256 为 48d64b4ca0bcea80a709cc1f67739c8498252ee92f1493ed733714ce44603653。没有转存该文件或清理任何用户云端原文件。
+已通过浏览器助手同步登录态，完成受控网盘文件下载验收：文件大小与完整 ZIP CRC 校验通过；暂停、退出应用、重启、重新同步后，同一任务的断点续传通过。未转存或清理用户云端原文件。私人文件名和文件摘要不作为公开验证材料。
 
 原始个人/分享文件以来源身份和文件接口的权限核验恢复。转存副本仍以账号和实际创建 ID 核验；缺少稳定 UID 的平台会拒绝重认证后的清理，不通过 Cookie 指纹变化推断账号一致。账号接口字段和真实转存流程仍需补验，不能将该分享下载结果外推为所有盘、目录或副本清理已实测。
