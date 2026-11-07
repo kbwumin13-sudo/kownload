@@ -3,16 +3,26 @@
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 
 IDENTITY = json.loads((pathlib.Path(__file__).resolve().parents[1] / 'config/identity.json').read_text())
 SKIP = {'.kownload-identity.json', '.kownload-import-pending.json', '.kownload-import-owner',
         'ipc', 'native-manifest-backups', IDENTITY['hostExecutable'], 'logs'}
+
+def sha256(path):
+    # hashlib.file_digest needs Python 3.11; macOS ships 3.9 as /usr/bin/python3.
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            digest.update(block)
+    return digest.digest()
 
 @contextlib.contextmanager
 def store_locks(roots):
@@ -57,6 +67,12 @@ def main():
         return
     if not new.is_dir() or not (new / '.kownload-identity.json').is_file() or backup.exists():
         p.error('Require a completed new identity root and a new backup destination')
+    # The new root is kept under another name after the copy. Leaving it in
+    # place would let a later upgrade reopen it instead of importing what the
+    # old version does after the rollback.
+    kept = new.with_name(new.name + '.rolled-back-' + time.strftime('%Y%m%d-%H%M%S'))
+    if kept.exists():
+        p.error('Retry in a second: the kept-root name already exists')
     for saved, _ in a.manifest_pair:
         saved = pathlib.Path(saved)
         for name in [IDENTITY['hostName'], IDENTITY['legacyHostName']]:
@@ -81,7 +97,6 @@ def main():
             if (old / 'host').is_file():
                 shutil.copy2(old / 'host', stage / 'host')
             # Verify each source file before either active directory is moved.
-            import hashlib
             for src in new.rglob('*'):
                 rel = src.relative_to(new)
                 if rel.parts[0] in SKIP or src.is_dir():
@@ -89,7 +104,7 @@ def main():
                 if src.is_symlink():
                     raise RuntimeError('source_symlink')
                 dst = stage / rel
-                if hashlib.file_digest(src.open('rb'), 'sha256').digest() != hashlib.file_digest(dst.open('rb'), 'sha256').digest():
+                if sha256(src) != sha256(dst):
                     raise RuntimeError('copy_verification_failed')
             if old.exists():
                 old.rename(backup)
@@ -118,7 +133,9 @@ def main():
                 temporary.replace(dest)
             elif (saved / (name + '.absent')).is_file() and dest.exists():
                 dest.unlink()
-    print(json.dumps({'applied': True, 'formatConversion': False, 'oldRootBackedUp': True, 'copyHashesMatch': True}))
+    new.rename(kept)
+    print(json.dumps({'applied': True, 'formatConversion': False, 'oldRootBackedUp': True, 'copyHashesMatch': True,
+                      'newRootKeptAt': str(kept)}))
 
 if __name__ == '__main__':
     main()

@@ -83,4 +83,25 @@ void main() {
       }
     }
   });
+  test('legacy use after the import stops with commands to keep either side',
+      () async {
+    try {
+      await runIdentityImport(
+          source: '/fixture/legacy root',
+          target: '/fixture/new root',
+          run: (_) async => ProcessResult(1, 1,
+              '{"ok":false,"error":"legacy_changed_after_import"}', ''));
+      fail('bootstrap should stop');
+    } on IdentityBootstrapException catch (e) {
+      expect(e.message, contains('没有继续任何任务'));
+      expect(
+          e.message,
+          contains(
+              'mv "/fixture/new root" "/fixture/new root.kept-\$(date +%Y%m%d-%H%M%S)"'));
+      expect(
+          e.message,
+          contains(
+              'mv "/fixture/legacy root" "/fixture/legacy root.kept-\$(date +%Y%m%d-%H%M%S)"'));
+    }
+  });
 }

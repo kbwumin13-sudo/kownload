@@ -30,6 +30,28 @@ type Summary struct {
 	Digest         string `json:"digest"`
 	DatabaseDigest string `json:"databaseDigest"`
 }
+
+// Fingerprint identifies the legacy database bytes an import was taken from.
+// Only the legacy app writes that file after a completed import (it commits a
+// transaction whenever it starts), so a different fingerprint means the old
+// version ran on its root after the migration.
+type Fingerprint struct {
+	Present bool   `json:"present"`
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256,omitempty"`
+}
+
+// record is the marker and pending-manifest format. Markers written before
+// fingerprints existed decode with a nil SourceDatabase and are not compared.
+type record struct {
+	Summary
+	SourceDatabase *Fingerprint `json:"sourceDatabase,omitempty"`
+}
+
+// ErrLegacyChanged reports that the legacy root changed after the import, so
+// opening the imported copy would silently use outdated data.
+var ErrLegacyChanged = errors.New("legacy_changed_after_import")
+
 type Options struct {
 	Source string
 	Target string
@@ -73,27 +95,33 @@ func Import(o Options) (Summary, error) {
 		return zero, errors.New("target_symlink")
 	}
 	if data, err := os.ReadFile(filepath.Join(target, Marker)); err == nil {
-		var done Summary
+		var done record
 		if json.Unmarshal(data, &done) != nil || done.Version != 1 {
 			return zero, errors.New("invalid_marker")
 		}
-		return done, nil
+		if err = sourceUnchanged(source, done.SourceDatabase); err != nil {
+			return zero, err
+		}
+		return done.Summary, nil
 	}
 	// A crash between the atomic rename and final marker can finish only after
 	// verifying the previously verified tree; arbitrary existing data is refused.
 	if data, err := os.ReadFile(filepath.Join(target, pending)); err == nil {
-		var s Summary
+		var s record
 		if json.Unmarshal(data, &s) != nil {
 			return zero, errors.New("invalid_pending_import")
 		}
 		actual, err := summarize(target, s.Imported)
-		if err != nil || actual != s {
+		if err != nil || actual != s.Summary {
 			return zero, errors.New("pending_verification_failed")
+		}
+		if err = sourceUnchanged(source, s.SourceDatabase); err != nil {
+			return zero, err
 		}
 		if err = publishMarker(target); err != nil {
 			return zero, err
 		}
-		return s, nil
+		return s.Summary, nil
 	}
 	if entries, err := os.ReadDir(target); err == nil && len(entries) != 0 {
 		return zero, errors.New("target_has_unmarked_data")
@@ -147,6 +175,7 @@ func Import(o Options) (Summary, error) {
 		return zero, err
 	}
 	imported := false
+	fingerprint := Fingerprint{}
 	if info, err := os.Lstat(source); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return zero, errors.New("source_not_directory")
@@ -163,6 +192,11 @@ func Import(o Options) (Summary, error) {
 				return zero, errors.New("legacy_database_locked_or_invalid")
 			}
 			defer db.Close()
+			// The read-only store lock is held until Import returns, so the
+			// legacy app cannot write between this fingerprint and the copy.
+			if fingerprint, err = fingerprintFile(filepath.Join(source, "gopeed.db")); err != nil {
+				return zero, errors.New("source_read_failed")
+			}
 		}
 		if err = copyTree(source, stage); err != nil {
 			return zero, err
@@ -190,7 +224,7 @@ func Import(o Options) (Summary, error) {
 	if err != nil {
 		return zero, err
 	}
-	data, _ := json.Marshal(summary)
+	data, _ := json.Marshal(record{Summary: summary, SourceDatabase: &fingerprint})
 	if err = writeSync(filepath.Join(stage, pending), data); err != nil {
 		return zero, err
 	}
@@ -218,6 +252,58 @@ func Import(o Options) (Summary, error) {
 		return zero, err
 	}
 	return summary, nil
+}
+func fingerprintFile(path string) (Fingerprint, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Fingerprint{}, err
+	}
+	defer f.Close()
+	return fingerprintOpen(f)
+}
+
+func fingerprintOpen(f *os.File) (Fingerprint, error) {
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return Fingerprint{}, err
+	}
+	return Fingerprint{Present: true, Size: n, SHA256: hex.EncodeToString(h.Sum(nil))}, nil
+}
+
+// sourceUnchanged refuses to reopen an import whose legacy root was used
+// afterwards, for example by build 25 after a rollback. It never changes
+// either root; the caller shows how to keep one side.
+func sourceUnchanged(source string, recorded *Fingerprint) error {
+	if recorded == nil {
+		return nil
+	}
+	f, err := os.Open(filepath.Join(source, "gopeed.db"))
+	if err != nil {
+		// A missing database means the legacy app has not run on this root
+		// since (it creates the file on start); moving the legacy root aside is
+		// the documented way to keep the imported data. An unreadable file
+		// cannot have been used by the legacy app either.
+		return nil
+	}
+	defer f.Close()
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) != nil {
+		// The running legacy app holds its exclusive store lock, so its state
+		// cannot be compared now; startup keeps its previous behaviour.
+		return nil
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	if !recorded.Present {
+		return ErrLegacyChanged
+	}
+	actual, err := fingerprintOpen(f)
+	if err != nil {
+		return nil
+	}
+	if actual != *recorded {
+		return ErrLegacyChanged
+	}
+	return nil
 }
 
 // Scratch suffixes appended to the target name. ".importing-new-" holds an

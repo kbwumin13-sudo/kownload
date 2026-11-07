@@ -1,6 +1,7 @@
 package identitymigration
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -226,5 +227,166 @@ func TestInterruptedDiscardAndSymlinkStaging(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(outside, "keep")); err != nil || string(data) != "keep" {
 		t.Fatal("symlinked staging target modified")
+	}
+}
+
+// useLegacy stands in for build 25 running on its root after the import.
+func useLegacy(t *testing.T, source string) {
+	t.Helper()
+	db, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("task")).Put([]byte("created-after-rollback"), []byte(`{"status":"done"}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMarkerRecordsLegacyDatabaseFingerprint(t *testing.T) {
+	source, target := fixture(t)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, Marker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m record
+	if err = json.Unmarshal(data, &m); err != nil || m.SourceDatabase == nil {
+		t.Fatal("marker lacks the legacy fingerprint", string(data))
+	}
+	want, err := fingerprintFile(filepath.Join(source, "gopeed.db"))
+	if err != nil || *m.SourceDatabase != want || !want.Present || want.Size == 0 {
+		t.Fatal(m.SourceDatabase, want, err)
+	}
+}
+
+// Reviewer reproduction M1: after a rollback build 25 keeps using the legacy
+// root; reopening the earlier import would silently show the old state.
+func TestLegacyUseAfterImportIsRefusedWithoutChangingEitherRoot(t *testing.T) {
+	source, target := fixture(t)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("an unchanged legacy root must reopen the import", err)
+	}
+	useLegacy(t, source)
+	current, _ := summarize(target, true)
+	legacy, _ := fingerprintFile(filepath.Join(source, "gopeed.db"))
+	for i := 0; i < 2; i++ {
+		if _, err := Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+			t.Fatal(i, err)
+		}
+	}
+	currentAfter, _ := summarize(target, true)
+	legacyAfter, _ := fingerprintFile(filepath.Join(source, "gopeed.db"))
+	if current != currentAfter || legacy != legacyAfter {
+		t.Fatal("a refused start changed one of the roots")
+	}
+	// Moving the legacy root aside keeps using the imported data.
+	if err := os.Rename(source, source+".kept"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Moving the imported root aside (what the rollback script now does) makes
+// the next start import the legacy root again, including its newer records.
+func TestMovedAsideImportReimportsCurrentLegacyData(t *testing.T) {
+	source, target := fixture(t)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	useLegacy(t, source)
+	if err := os.Rename(target, target+".rolled-back-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := bolt.Open(filepath.Join(target, "gopeed.db"), 0600, &bolt.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte("task")).Get([]byte("created-after-rollback")) == nil {
+			t.Fatal("re-import missed records written by the legacy app")
+		}
+		return nil
+	})
+}
+
+func TestRunningLegacyAppIsNotCompared(t *testing.T) {
+	source, target := fixture(t)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	useLegacy(t, source)
+	running, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("the store lock of a running legacy app must not block startup", err)
+	}
+	running.Close()
+	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyDatabaseCreatedAfterFreshSetupIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	source, target := filepath.Join(dir, "legacy"), filepath.Join(dir, "current")
+	if s, err := Import(Options{Source: source, Target: target}); err != nil || s.Imported {
+		t.Fatal(s, err)
+	}
+	os.Mkdir(source, 0700)
+	db, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+		t.Fatal(err)
+	}
+}
+
+func TestMarkerWithoutFingerprintAndPendingImport(t *testing.T) {
+	source, target := fixture(t)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(target, Marker))
+	var m map[string]any
+	json.Unmarshal(data, &m)
+	delete(m, "sourceDatabase")
+	data, _ = json.Marshal(m)
+	os.WriteFile(filepath.Join(target, Marker), data, 0600)
+	useLegacy(t, source)
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("markers from before fingerprints are not compared", err)
+	}
+
+	source, target = fixture(t)
+	Import(Options{Source: source, Target: target, Hook: func(phase string) error {
+		if phase == "published" {
+			return errors.New("fixture_interrupt")
+		}
+		return nil
+	}})
+	useLegacy(t, source)
+	if _, err := Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, Marker)); !os.IsNotExist(err) {
+		t.Fatal("a changed legacy root must not complete a pending import")
 	}
 }

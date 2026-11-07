@@ -61,13 +61,15 @@ void main(List<String> arguments) async {
   try {
     await init(args);
   } on IdentityBootstrapException catch (e) {
+    // Selectable and scrollable: some messages carry commands to copy.
     runApp(MaterialApp(
         home: Scaffold(
-            body: Center(
-                child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(e.message))))));
+            body: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: SelectableText(e.message)))));
     await windowManager.ensureInitialized();
+    await windowManager.setSize(const Size(720, 480));
+    await windowManager.center();
     await windowManager.show();
     return;
   }
