@@ -323,21 +323,61 @@ func TestMovedAsideImportReimportsCurrentLegacyData(t *testing.T) {
 	})
 }
 
-func TestRunningLegacyAppIsNotCompared(t *testing.T) {
+// Review finding R2-2 (reviewer reproduction E2): after the import a running
+// legacy app (it holds its store lock) stops startup, whether or not it has
+// changed its data yet; the persistent choice skips this check too.
+func TestRunningLegacyAppStopsStartup(t *testing.T) {
 	source, target := fixture(t)
 	if _, err := Import(Options{Source: source, Target: target}); err != nil {
 		t.Fatal(err)
 	}
-	useLegacy(t, source)
 	running, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Import(Options{Source: source, Target: target}); err != nil {
-		t.Fatal("the store lock of a running legacy app must not block startup", err)
+	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyRunning) {
+		t.Fatal("an unchanged but running legacy app must stop startup", err)
+	}
+	if err = running.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("task")).Put([]byte("k"), []byte("v2"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyRunning) {
+		t.Fatal(err)
 	}
 	running.Close()
 	if _, err = Import(Options{Source: source, Target: target}); !errors.Is(err, ErrLegacyChanged) {
+		t.Fatal(err)
+	}
+	if _, err = Import(Options{Source: source, Target: target, IgnoreLegacyChanges: true}); err != nil {
+		t.Fatal(err)
+	}
+	running, err = bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer running.Close()
+	if _, err = Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal("the persistent choice must skip the running check", err)
+	}
+}
+
+// Upstream Gopeed running on a root that appeared after a fresh setup does not
+// stop startup either.
+func TestRunningUpstreamAfterFreshSetupDoesNotStopStartup(t *testing.T) {
+	dir := t.TempDir()
+	source, target := filepath.Join(dir, "com.gopeed.gopeed"), filepath.Join(dir, "current")
+	if _, err := Import(Options{Source: source, Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(source, 0700)
+	running, err := bolt.Open(filepath.Join(source, "gopeed.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer running.Close()
+	if _, err = Import(Options{Source: source, Target: target}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -57,6 +57,10 @@ type record struct {
 // opening the imported copy would silently use outdated data.
 var ErrLegacyChanged = errors.New("legacy_changed_after_import")
 
+// ErrLegacyRunning reports that the legacy app holds its store lock after the
+// import: it would continue the same unfinished tasks as this app.
+var ErrLegacyRunning = errors.New("legacy_running")
+
 type Options struct {
 	Source string
 	Target string
@@ -314,9 +318,10 @@ func sourceUnchanged(source string, recorded *Fingerprint) error {
 	}
 	defer f.Close()
 	if syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) != nil {
-		// The running legacy app holds its exclusive store lock, so its state
-		// cannot be compared now; startup keeps its previous behaviour.
-		return nil
+		// The legacy app is running (it holds its exclusive store lock). Both
+		// apps would continue the same unfinished tasks and write the same
+		// files, so startup stops as it does before an import.
+		return ErrLegacyRunning
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	actual, err := fingerprintOpen(f)

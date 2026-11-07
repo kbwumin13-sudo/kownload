@@ -129,4 +129,42 @@ void main() {
             run: (_) async => throw const FileSystemException('missing tool')),
         false);
   });
+  test('a running legacy app after the import stops with the same choice',
+      () async {
+    final calls = <List<String>>[];
+    try {
+      await runIdentityImport(
+          source: '/fixture/legacy',
+          target: '/fixture/new',
+          run: (args) async {
+            calls.add(args);
+            return args.contains('--ignore-legacy-changes')
+                ? ProcessResult(1, 0, '{"ok":true}', '')
+                : ProcessResult(
+                    1, 1, '{"ok":false,"error":"legacy_running"}', '');
+          });
+      fail('bootstrap should stop');
+    } on IdentityBootstrapException catch (e) {
+      expect(e.message, contains('正在运行'));
+      expect(e.message, contains('请先退出旧版'));
+      expect(await e.ignoreLegacyChanges!(), true);
+      expect(calls.last, contains('--ignore-legacy-changes'));
+    }
+  });
+  test('the post-import guard applies only to imported legacy databases', () {
+    expect(
+        legacyGuardApplies('{"version":1,"sourceDatabase":{"present":true}}'),
+        true);
+    expect(
+        legacyGuardApplies('{"version":1,"sourceDatabase":{"present":false}}'),
+        false,
+        reason: 'a legacy root appearing after a fresh setup is not guarded');
+    expect(
+        legacyGuardApplies(
+            '{"version":1,"sourceDatabase":{"present":true},"ignoreLegacyChanges":true}'),
+        false);
+    expect(legacyGuardApplies('{"version":1}'), false,
+        reason: 'markers written before fingerprints are not compared');
+    expect(legacyGuardApplies('not json'), true);
+  });
 }
