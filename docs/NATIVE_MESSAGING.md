@@ -71,4 +71,19 @@ Flutter `/create` 返回标准业务 envelope；`/forward` 保留 REST envelope 
 
 Flutter 直接 API 的 `/api/v1/netdisk/prepare` 等待 310 秒；当前网盘助手经 Native forward 只调用 browser/claim、browser/capture，prepare 不经过此链路，因此本契约不为它引入预算条目。直接 API 的既有预算保持。
 
+当前既有助手的完整 forward 调用清单（worker A 依据助手全部文件及后端调用路径复核，接线前版本）：
+
+| 调用 | 现有处理与证据 |
+| --- | --- |
+| POST `/api/v1/media/inspect` | `background.js` 的媒体检查；REST InspectMedia 与 `internal/protocol/media/inspect.go` 的 workCtx 均为 45 秒 |
+| POST `/api/v1/tasks` | `background.js` 创建；CreateDirect → doCreate 先持久化任务，startTask 的 handler 在 goroutine 内执行，媒体 Resolve/yt-dlp 不在 POST 中同步等待；`pkg/download/downloader.go` 的相应函数 |
+| GET `/api/v1/tasks`（重复 status 查询参数） | `background.js` 查询暂停/错误任务，本地状态读取 |
+| PATCH `/api/v1/tasks/{id}` | `background.js` 更新任务来源，本地保存 |
+| PUT `/api/v1/tasks/{id}/continue` | `background.js` 调度继续任务，解析在任务执行流程内 |
+| GET `/api/v1/config` | `background.js` 本地配置读取 |
+| POST `/api/v1/netdisk/browser/claim` | `netdisk.js`；Service.Claim 为本地认领 |
+| POST `/api/v1/netdisk/browser/capture` | `netdisk.js`；CaptureContext 的 quark 账号探测 authCtx 为 8 秒，其余为本地验证 |
+
+旧 host 的 `forward` 明确使用 `60*time.Second`，`create` 使用 `10*time.Second`（`git show 7ccfe41:cmd/host/main.go`）。未发现上述链路有合法超过 60 秒的既有同步预算。`tasks/batch` 不在既有助手直接调用清单；网盘 list（45 秒）和 prepare（300 秒，Flutter 等待 310 秒）走 Flutter 直接 API。本轮将任务提交迁到 Native create 后，旧 POST tasks 的 forward 能力继续兼容旧助手，预算保持。
+
 最低夹具包括拆帧/多帧/截断/长度上限/坏 JSON、来源白名单、未知方法、IPC 不可达、唤醒失败、B02（**create 的 Flutter HTTP 500 必须外层 code 1/httpStatus 500**）、HTTP 200 业务错误、空 body、accepted/created、旧成功 data、同一 ID 多次提交的 host 不去重不重试，以及新旧清单名解析到同一可执行文件。Flutter/REST/助手的幂等与交互回归由对应模块测试覆盖。
