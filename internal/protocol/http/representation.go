@@ -203,12 +203,16 @@ func (f *Fetcher) completedLocalCheckpoint() bool {
 	return err == nil && info.Size() == f.meta.Res.Size
 }
 
-func (f *Fetcher) checkResumeIdentity() error {
+// checkResumeIdentity checks what the checkpoint itself can prove, without a
+// request. overlap reports saved ranges that only a comparison with the
+// server can confirm, because no validator or trusted digest was saved; the
+// download loop runs it before any stream starts (verifySavedOverlaps).
+func (f *Fetcher) checkResumeIdentity() (overlap bool, err error) {
 	if !f.usesRanges() || !f.hasResumeData() {
-		return nil // Full GET restarts from zero; it cannot reuse an old prefix.
+		return false, nil // Full GET restarts from zero; it cannot reuse an old prefix.
 	}
 	if f.completedLocalCheckpoint() {
-		return nil
+		return false, nil
 	}
 	f.identityMu.RLock()
 	r, external, expectedKey := f.identity, f.resumeHash, f.resourceKey
@@ -217,15 +221,15 @@ func (f *Fetcher) checkResumeIdentity() error {
 		expectedKey = requestResourceKey(f.meta.Req)
 	}
 	if r.ResourceKey != "" && r.ResourceKey != expectedKey && f.hasResumeValidator() && !(r.Hash != "" && r.Hash == external) {
-		return fmt.Errorf("%w: source resource changed", ErrUnsafeResume)
+		return false, fmt.Errorf("%w: source resource changed", ErrUnsafeResume)
 	}
 	if r.Size > 0 && r.Size != f.meta.Res.Size {
-		return fmt.Errorf("%w: saved total length changed", ErrUnsafeResume)
+		return false, fmt.Errorf("%w: saved total length changed", ErrUnsafeResume)
 	}
 	if r.ETag != "" || r.LastModified != "" || f.rangeResumeValidator != "" || r.Hash != "" && r.Hash == external {
-		return nil
+		return false, nil
 	}
-	return f.verifySavedOverlaps()
+	return true, nil
 }
 
 func (f *Fetcher) hasResumeValidator() bool {

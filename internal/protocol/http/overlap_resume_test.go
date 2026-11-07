@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 )
@@ -124,9 +126,12 @@ func TestNoValidatorPauseResumeOverlap(t *testing.T) {
 			}
 			replacement.Store(changed)
 			err = f.Start()
+			if err == nil {
+				err = waitDone(t, f, 5*time.Second)
+			}
 			if changed {
-				if err == nil {
-					t.Fatal("changed overlap was accepted")
+				if !errors.Is(err, ErrUnsafeResume) {
+					t.Fatalf("changed overlap was accepted: %v", err)
 				}
 				after, _ := os.ReadFile(f.Meta().SingleFilepath())
 				if !bytes.Equal(before, after) {
@@ -135,9 +140,6 @@ func TestNoValidatorPauseResumeOverlap(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatal(err)
-			}
-			if err := waitDone(t, f, 5*time.Second); err != nil {
 				t.Fatal(err)
 			}
 			got, _ := os.ReadFile(f.Meta().SingleFilepath())
@@ -337,5 +339,280 @@ func TestPrimaryStealPauseResume(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(f.Meta().SingleFilepath()); !bytes.Equal(got, payload) {
 		t.Fatal("resumed bytes differ")
+	}
+}
+
+// isOverlapCheck tells the resume check's small comparison requests from
+// stream requests, which cover at least the rest of a 256 KiB chunk here.
+func isOverlapCheck(r *http.Request) bool {
+	var b, e int64
+	_, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &b, &e)
+	return err == nil && e-b+1 <= 64<<10
+}
+
+// oneSavedRange is a checkpoint whose single stream saved 512 KiB of 2 MiB.
+func oneSavedRange(t *testing.T, raw string, payload []byte) *Fetcher {
+	t.Helper()
+	conns := []*connection{{ID: 0, Role: rolePrimary, Chunk: &chunk{Begin: 0, End: int64(len(payload)) - 1, Downloaded: 512 << 10}, Downloaded: 512 << 10}}
+	return restoreRangeCheckpoint(t, raw, payload, conns)
+}
+
+// startAndWait starts f and returns the run's result.
+func startAndWait(t *testing.T, f *Fetcher, limit time.Duration) error {
+	t.Helper()
+	if err := f.Start(); err != nil {
+		return err
+	}
+	return waitDone(t, f, limit)
+}
+
+// Sixteen saved streams at a source with WAN latency: the resume compares a
+// sample of three spans, each request with its own timeout, instead of every
+// span under one three-second limit. build 25 resumed without a check.
+func TestOverlapCheckSamplesWithOwnTimeouts(t *testing.T) {
+	const MiB = 1 << 20
+	payload := rangeProbePayload(16 * MiB)
+	var checks atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isOverlapCheck(r) {
+			checks.Add(1)
+			time.Sleep(1200 * time.Millisecond) // three of them exceed the old 3 s limit
+		}
+		serveUnvalidatedRange(t, w, r, payload, 0, false)
+	}))
+	defer server.Close()
+	var conns []*connection
+	for i := 0; i < 16; i++ {
+		begin := int64(i) * MiB
+		conns = append(conns, &connection{ID: i, Role: roleWorker, Chunk: &chunk{Begin: begin, End: begin + MiB - 1, Downloaded: 512 << 10}, Downloaded: 512 << 10})
+	}
+	conns[0].Role = rolePrimary
+	f := restoreRangeCheckpoint(t, server.URL+"/file", payload, conns)
+	if err := startAndWait(t, f, 30*time.Second); err != nil {
+		t.Fatalf("unchanged slow resume refused: %v", err)
+	}
+	checkFile(t, f.Meta().SingleFilepath(), payload)
+	if n := checks.Load(); n != 3 {
+		t.Fatalf("compared %d spans, want a sample of 3", n)
+	}
+}
+
+// A rate limit at the resume check follows Retry-After and the source
+// cooldown like any request. build 25 waited, then resumed.
+func TestOverlapCheckRateLimitWaits(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		budget bool
+	}{{429, false}, {503, false}, {429, true}} {
+		t.Run(fmt.Sprintf("status=%d/budget=%t", tc.status, tc.budget), func(t *testing.T) {
+			payload := rangeProbePayload(2 << 20)
+			var limited atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Range") != "" && limited.Add(1) == 1 {
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(tc.status)
+					return
+				}
+				serveUnvalidatedRange(t, w, r, payload, 0, false)
+			}))
+			defer server.Close()
+			f := oneSavedRange(t, server.URL+"/file", payload)
+			if tc.budget {
+				budget := transfer.NewBudget()
+				defer budget.Close()
+				f.ctl.Budget = budget
+			}
+			started := time.Now()
+			if err := startAndWait(t, f, 20*time.Second); err != nil {
+				t.Fatalf("rate-limited resume check became terminal: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed < 900*time.Millisecond {
+				t.Fatalf("Retry-After not honoured: resumed after %v", elapsed)
+			}
+			checkFile(t, f.Meta().SingleFilepath(), payload)
+			if f.Stats().(*fhttp.Stats).RateLimits < 1 {
+				t.Fatal("rate limit was not recorded")
+			}
+		})
+	}
+}
+
+// A Retry-After too long to hold the task's running slot defers the run at
+// the resume check, as for a stream; nothing is refused or written.
+func TestOverlapCheckLongRateLimitDefers(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		serveUnvalidatedRange(t, w, r, payload, 0, false)
+	}))
+	defer server.Close()
+	f := oneSavedRange(t, server.URL+"/file", payload)
+	before, _ := os.ReadFile(f.Meta().SingleFilepath())
+	budget := transfer.NewBudget()
+	defer budget.Close()
+	f.ctl.Budget = budget
+	err := startAndWait(t, f, 10*time.Second)
+	deferred, ok := transfer.AsDeferred(err)
+	if !ok || errors.Is(err, ErrUnsafeResume) || time.Until(deferred.Until) < time.Minute {
+		t.Fatalf("long rate limit at the resume check: %v", err)
+	}
+	if after, _ := os.ReadFile(f.Meta().SingleFilepath()); !bytes.Equal(before, after) {
+		t.Fatal("deferred check changed the file")
+	}
+}
+
+// A network error at the resume check is retried; it says nothing about the
+// saved bytes.
+func TestOverlapCheckRetriesNetworkErrors(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	var checks atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isOverlapCheck(r) && checks.Add(1) == 1 {
+			panic(http.ErrAbortHandler) // connection closed without a response
+		}
+		serveUnvalidatedRange(t, w, r, payload, 0, false)
+	}))
+	defer server.Close()
+	f := oneSavedRange(t, server.URL+"/file", payload)
+	if err := startAndWait(t, f, 20*time.Second); err != nil {
+		t.Fatalf("network error at the resume check became terminal: %v", err)
+	}
+	checkFile(t, f.Meta().SingleFilepath(), payload)
+	if checks.Load() < 2 {
+		t.Fatal("resume check was not retried")
+	}
+}
+
+// Unusable answers are retried like a stream's counted failures, then end the
+// task without claiming that the source changed. A full 200 says nothing
+// about the saved offsets; a refusal keeps status=403, which wrappers use to
+// refresh an expired link.
+func TestOverlapCheckUnusableAnswersAreNotIdentityFailures(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	for _, tc := range []struct {
+		name, want string
+		status     int
+	}{{"ignored range", "ignored the range request", http.StatusOK}, {"refused", "status=403", http.StatusForbidden}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var checks atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				checks.Add(1)
+				if tc.status == http.StatusOK {
+					w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+					w.Write(payload)
+					return
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+			f := oneSavedRange(t, server.URL+"/file", payload)
+			before, _ := os.ReadFile(f.Meta().SingleFilepath())
+			err := startAndWait(t, f, 20*time.Second)
+			if err == nil || errors.Is(err, ErrUnsafeResume) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unusable answer: %v", err)
+			}
+			if tc.status == http.StatusForbidden && !IsExpiredLinkError(err) {
+				t.Fatal("refusal lost its status for link refresh")
+			}
+			if n := checks.Load(); n != 3 {
+				t.Fatalf("requests=%d, want three attempts", n)
+			}
+			if after, _ := os.ReadFile(f.Meta().SingleFilepath()); !bytes.Equal(before, after) {
+				t.Fatal("failed check changed the file")
+			}
+		})
+	}
+}
+
+// Other bytes or another total length in a legal answer refuse the resume at
+// once and keep the file.
+func TestOverlapCheckChangedSourceIsRefused(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	for _, mode := range []string{"bytes", "206 length", "416 length"} {
+		t.Run(mode, func(t *testing.T) {
+			var checks atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				checks.Add(1)
+				switch mode {
+				case "bytes":
+					serveUnvalidatedRange(t, w, r, bytes.Repeat([]byte("B"), len(payload)), 0, false)
+				case "206 length":
+					var b, e int
+					fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &b, &e)
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", b, e, len(payload)+1))
+					w.WriteHeader(http.StatusPartialContent)
+					w.Write(payload[b : e+1])
+				case "416 length":
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", 1024))
+					w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				}
+			}))
+			defer server.Close()
+			f := oneSavedRange(t, server.URL+"/file", payload)
+			before, _ := os.ReadFile(f.Meta().SingleFilepath())
+			if err := startAndWait(t, f, 10*time.Second); !errors.Is(err, ErrUnsafeResume) {
+				t.Fatalf("changed source accepted: %v", err)
+			}
+			if checks.Load() != 1 {
+				t.Fatalf("requests=%d, want a single refusal", checks.Load())
+			}
+			if !strings.Contains(f.Stats().(*fhttp.Stats).LastError, "preserved") {
+				t.Fatal("identity refusal missing from task diagnostics")
+			}
+			if after, _ := os.ReadFile(f.Meta().SingleFilepath()); !bytes.Equal(before, after) {
+				t.Fatal("refusal changed the file")
+			}
+		})
+	}
+}
+
+// Start returns before the resume check reaches the network, so the task
+// locks held around Start never wait for it, and Pause stops it at once.
+func TestOverlapCheckDoesNotBlockStartOrPause(t *testing.T) {
+	payload := rangeProbePayload(2 << 20)
+	entered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	f := oneSavedRange(t, server.URL+"/file", payload)
+	before, _ := os.ReadFile(f.Meta().SingleFilepath())
+	started := time.Now()
+	if err := f.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Start waited %v for the network", elapsed)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume check did not start")
+	}
+	paused := time.Now()
+	if err := f.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(paused); elapsed > time.Second {
+		t.Fatalf("Pause waited %v for the resume check", elapsed)
+	}
+	select {
+	case err := <-f.doneCh:
+		t.Fatalf("paused check reported %v", err)
+	default:
+	}
+	if f.getState() != statePaused {
+		t.Fatalf("state=%d after Pause", f.getState())
+	}
+	if after, _ := os.ReadFile(f.Meta().SingleFilepath()); !bytes.Equal(before, after) {
+		t.Fatal("paused check changed the file")
 	}
 }

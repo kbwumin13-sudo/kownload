@@ -96,10 +96,20 @@ func TestRepresentationResumeAndPatch(t *testing.T) {
 	}
 }
 
+// A checkpoint without a saved representation whose saved bytes differ from
+// the server is refused before anything is written.
 func TestRepresentationLegacyCheckpointPreserved(t *testing.T) {
 	payload := bytes.Repeat([]byte("A"), 32)
-	f := representationPrefix(t, "http://127.0.0.1:1/synthetic.bin", nil, payload)
-	if err := f.Start(); !errors.Is(err, ErrUnsafeResume) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveUnvalidatedRange(t, w, r, bytes.Repeat([]byte("B"), len(payload)), 0, false)
+	}))
+	defer srv.Close()
+	f := representationPrefix(t, srv.URL+"/synthetic.bin", nil, payload)
+	err := f.Start()
+	if err == nil {
+		err = waitDone(t, f, 5*time.Second)
+	}
+	if !errors.Is(err, ErrUnsafeResume) {
 		t.Fatalf("legacy checkpoint: %v", err)
 	}
 	if !strings.Contains(f.Stats().(*fhttp.Stats).LastError, "preserved") {
@@ -172,14 +182,15 @@ func TestRepresentationHashRequiresCurrentWrapper(t *testing.T) {
 	payload := bytes.Repeat([]byte("A"), 32)
 	digest := "md5:" + fmt.Sprintf("%032x", 1)
 	f := representationPrefix(t, "http://127.0.0.1:1/synthetic.bin", &representation{Hash: digest, Size: 32}, payload)
-	if !errors.Is(f.checkResumeIdentity(), ErrUnsafeResume) {
-		t.Fatal("persisted hash was trusted without a verifier")
+	// Without the wrapper's digest only a comparison with the server confirms it.
+	if overlap, err := f.checkResumeIdentity(); err != nil || !overlap {
+		t.Fatalf("persisted hash was trusted without a verifier: overlap=%t err=%v", overlap, err)
 	}
 	if err := f.SetResumeHash(digest); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.checkResumeIdentity(); err != nil {
-		t.Fatal(err)
+	if overlap, err := f.checkResumeIdentity(); err != nil || overlap {
+		t.Fatalf("trusted digest: overlap=%t err=%v", overlap, err)
 	}
 	if err := f.SetResumeHash("md5:" + fmt.Sprintf("%032x", 2)); !errors.Is(err, ErrUnsafeResume) {
 		t.Fatalf("changed expected hash: %v", err)
