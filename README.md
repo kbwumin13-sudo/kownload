@@ -47,13 +47,15 @@ A keyboard-first download manager for macOS.
 2. 打开 DMG，将 **kownload.app** 拖入 **Applications**。
 3. 打开应用，按引导完成设置。升级时先退出正在运行的应用，再替换。
 
-本版使用本机 ad-hoc 签名，未做 Apple 公证。首次打开如被系统拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」。已有任务、设置和扩展继续沿用，无需清空数据。
+本版使用本机 ad-hoc 签名，未做 Apple 公证。首次打开如被系统拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」。新版本第一次读取「下载」文件夹时，系统会询问访问权限，请选择允许。
+
+从 build 25 及更早版本升级时，首次打开会把旧数据目录 `~/Library/Application Support/com.gopeed.gopeed` 只读导入到 `~/Library/Application Support/io.github.kbwumin13-sudo.kownload`，任务、设置和扩展继续沿用，旧目录保持不变；导入前请先退出旧版。导入后到「设置 → 通用 → 浏览器助手」点「连接…」，再按下文重新加载浏览器助手。回退步骤见对应 Release 说明。
 
 ### 浏览器助手
 
-应用的首次引导提供助手目录入口。在 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载该目录。启动应用后会注册 Native Messaging 主机。
+应用的首次引导提供助手目录入口。在 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载该目录。然后在「设置 → 通用 → 浏览器助手」点「连接…」，为 Chrome 和 Edge 写入 Native Messaging 清单；应用启动时不会改动浏览器目录。
 
-也可以下载 Release 中的 **kownload-browser-helper-0.4.1.zip**，解压后加载。源码位于 [`browser-media-extension/`](browser-media-extension/)。
+也可以下载 Release 中的 **kownload-browser-helper-0.4.2-1.9.3-kownload.17.zip**，解压后加载。助手文件更新后，在扩展页点「重新加载」。源码位于 [`browser-media-extension/`](browser-media-extension/)。
 
 ### 媒体依赖
 
@@ -78,17 +80,19 @@ pipx install yt-dlp
 
 登录凭据保留在内存中，任务保存文件身份。暂停或重启后，按提示打开对应网页并同步登录状态，再继续下载。
 
-## 已发布版本 · build 19
+## 已发布版本 · build 28
 
-- 重做轻面板、任务列表、设置与首次使用引导。
-- 改善 Range 识别、分段恢复、小文件连接复用与下载调度。
-- 修复来源冷却延长、后入队任务及非 Range 暂停继续时的让槽遗漏。
-- 修复限流终止错误被延期状态覆盖，以及嵌套转义日志中的 Cookie 脱敏。
-- 改善本地通信恢复、浏览器资料读取与网盘目录任务。
+内核与 Release 版本 `1.9.3-kownload.17`，浏览器助手 0.4.2。
 
-本轮 Flutter **151 项**回归通过，相关 Go race 与 vet 通过。build 19 对 build 18 的三个常规场景耗时变化为 **−0.39%～+0.14%**；四个测速场景共 **28 次运行、6,706 个文件哈希全部正确**。令牌桶限流场景中位耗时增加 11.70%，两版波动均超过 40%，暂不能确认稳定无退化。连续 60 分钟稳定性本轮未重跑。
+- 修复下载完整性：大小未知或不支持 Range 的单流在失败、重试后不再被判为完成；换链或源站内容变化后，续传前先核对资源身份，不再把新旧版本拼成一个文件。
+- Mail.ru 临时链接过期后自动刷新并回到原任务。
+- 浏览器提交带操作 ID：应答丢失后重试不重复建任务，HTTP 状态与业务错误如实返回。
+- 独立应用身份：新的 Bundle ID 与数据目录，首次启动只读导入旧数据；Native Messaging 主机独立实现；浏览器连接改为在设置里显式切换。
+- 更新改为只提示新版本并打开 Release 页面；构建只接受干净提交，随包附完整许可声明与对应源码包。
 
-更完整的验证范围、构建身份与保全说明见 [build 19 验证记录](docs/BUILD19_VALIDATION.md)。
+本轮经过三轮独立审查。HTTP 与下载调度相关 Go race、Flutter 194 项、浏览器助手 262 项回归通过；正式数据副本上的迁移、回退与再次升级，以及真实浏览器经助手提交下载均已验证。Mail.ru 链接过期后的真实续传、夸克和百度以外网盘的实际下载仍未验证。
+
+build 19 的验证记录见 [docs/BUILD19_VALIDATION.md](docs/BUILD19_VALIDATION.md)。
 
 ## 快捷键
 
@@ -132,8 +136,8 @@ node --test browser-media-extension/tests/*.test.js
 
 ## 源码构建与后续版本
 
-当前主分支的独立化改动尚未发布。正式版本以 [Release](https://github.com/kbwumin13-sudo/kownload/releases) 为准。应用仅提示更新并打开对应 Release 页面，不自动下载安装；手动升级前请先退出应用。
+独立化改动已随 build 28 发布。正式版本以 [Release](https://github.com/kbwumin13-sudo/kownload/releases) 为准。应用仅提示更新并打开对应 Release 页面，不自动下载安装；手动升级前请先退出应用。
 
-在线扩展市场、安装统计和分析上报已关闭。已安装扩展、配置、更新及手动 Git URL 安装继续保留。浏览器助手与旧数据接口本阶段仍使用兼容标识。
+在线扩展市场、安装统计和分析上报已关闭。已安装扩展、配置、更新及手动 Git URL 安装继续保留。浏览器助手仍使用兼容的 Native Messaging 名称 `com.gopeed.gopeed`，应用另注册 `gopeed:` 过渡链接。
 
 构建版本由 `config/release.json` 统一管理；[macOS 构建、候选隔离及发行步骤](docs/RELEASING.md)。历史平台介绍与上游资料只用于 [来源记录](docs/GOPEED_UPSTREAM.md)。
