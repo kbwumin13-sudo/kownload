@@ -19,6 +19,8 @@ ENGINE = FLUTTER / 'bin/cache/artifacts/engine/darwin-x64-release/FlutterMacOS.x
 APP = next(PRODUCTS.glob('*.app'))
 RUNNER = ROOT / 'ui/flutter/macos/Runner'
 TESTS = Path(__file__).resolve().parent
+# Host sources the panel window needs, including the identity helpers it calls.
+HOST = [str(RUNNER / name) for name in ['MainFlutterWindow.swift', 'MouseEventRouter.swift', 'AppIdentity.swift', 'IdentityPreferences.swift']]
 
 
 def run(command):
@@ -31,11 +33,11 @@ with tempfile.TemporaryDirectory(prefix='kownload-panel-tests-') as temp:
         framework_flags += ['-F', str(parent)]
     common = ['xcrun', 'swiftc', '-swift-version', '5', '-target', f'{platform.machine()}-apple-macos12.0',
               '-module-cache-path', str(Path(temp) / 'module-cache')] + framework_flags
-    run(common + ['-typecheck', str(RUNNER / 'MainFlutterWindow.swift'), str(RUNNER / 'MouseEventRouter.swift'),
+    run(common + ['-typecheck'] + HOST + [
                   str(RUNNER / 'AppDelegate.swift'), str(ROOT / 'ui/flutter/macos/Flutter/GeneratedPluginRegistrant.swift')])
     print('PASS: production Swift host typecheck (real Flutter and generated plugin modules)', flush=True)
     binary = Path(temp) / 'panel-host-test'
-    run(common + [str(RUNNER / 'MainFlutterWindow.swift'), str(RUNNER / 'MouseEventRouter.swift'),
+    run(common + HOST + [
                   str(TESTS / 'panel_host_test.swift'), '-o', str(binary),
                   '-framework', 'FlutterMacOS', '-framework', 'window_manager',
                   '-Xlinker', '-rpath', '-Xlinker', str(ENGINE),

@@ -64,12 +64,19 @@ struct PanelHostTest {
     try! metadataFixture.write(to: metadataURL)
     let oldBookmarks = UserDefaults.standard.dictionary(forKey: "netdiskProfileFileBookmarks")
     UserDefaults.standard.set([metadataURL.path: Data("obsolete-bookmark".utf8)], forKey: "netdiskProfileFileBookmarks")
+    // An obsolete bookmark is dropped and reported once so the user can allow
+    // the file again; the retry then reads what the OS permits.
+    var firstRead: Any?
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { firstRead = $0 }
+    precondition((firstRead as? FlutterError)?.code == "profile_permission_denied", "An obsolete bookmark is reported once")
+    precondition((UserDefaults.standard.dictionary(forKey: "netdiskProfileFileBookmarks") as? [String: Data])?[metadataURL.path] == nil,
+                 "The obsolete bookmark is removed")
     var recoveredMetadata: Any?
     window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { recoveredMetadata = $0 }
-    precondition((recoveredMetadata as? String)?.contains("学习") == true, "Obsolete bookmarks must not block OS-permitted reads")
+    precondition((recoveredMetadata as? String)?.contains("学习") == true, "The retry reads OS-permitted metadata")
     UserDefaults.standard.set(oldBookmarks, forKey: "netdiskProfileFileBookmarks")
     try! FileManager.default.removeItem(at: metadataDirectory)
-    print("PASS: obsolete profile bookmarks preserve permitted metadata reads")
+    print("PASS: an obsolete profile bookmark is reported once and removed; the retry reads the metadata")
     let input = InputController()
     window.installContentController(input)
     var events: [(String, Any?)] = []
