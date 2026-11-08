@@ -104,6 +104,35 @@ Future<void> _reveal(WidgetTester tester, String text) async {
   await tester.pumpAndSettle();
 }
 
+/// Stands in for the host's stored Dock choice (UserDefaults): it outlives
+/// the settings view the way the choice outlives a restart.
+void _dockHost(Map<String, bool> stored,
+    {bool refuse = false, List<MethodCall>? calls}) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(MacPanel.channel, (call) async {
+    calls?.add(call);
+    switch (call.method) {
+      case 'getShowInDock':
+        return stored['ShowInDock'] ?? false;
+      case 'setShowInDock':
+        if (refuse) return stored['ShowInDock'] ?? false;
+        final show = (call.arguments as Map)['show'] as bool;
+        stored['ShowInDock'] = show;
+        return show;
+    }
+    return null;
+  });
+}
+
+Finder _dockSwitch() => find.descendant(
+    of: find
+        .ancestor(of: find.text('在程序坞中显示 kownload'), matching: find.byType(Row))
+        .first,
+    matching: find.byType(Switch));
+
+bool _dockShown(WidgetTester tester) =>
+    tester.widget<Switch>(_dockSwitch()).value;
+
 void main() {
   setUp(() {
     Get.testMode = true;
@@ -170,6 +199,74 @@ void main() {
     expect(calls, 1);
     expect(find.text('Chrome：已连接本应用 · Edge：未检测到\n已连接，下次在网页上点击下载时生效。'),
         findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('dock switch starts off and applies each change through the host',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final stored = <String, bool>{};
+    final calls = <MethodCall>[];
+    _dockHost(stored, calls: calls);
+    final app = await _mountSettings(tester, 'general');
+    expect(_dockShown(tester), isFalse);
+    expect(find.text('关闭时只在菜单栏显示，不出现在程序坞和 ⌘Tab 中。'), findsOneWidget);
+    await tester.tap(_dockSwitch());
+    await tester.pumpAndSettle();
+    expect(_dockShown(tester), isTrue);
+    expect(stored['ShowInDock'], isTrue);
+    await tester.tap(_dockSwitch());
+    await tester.pumpAndSettle();
+    expect(_dockShown(tester), isFalse);
+    expect(stored['ShowInDock'], isFalse);
+    expect(
+        calls
+            .where((c) => c.method == 'setShowInDock')
+            .map((c) => (c.arguments as Map)['show']),
+        [true, false]);
+    // The choice belongs to the host, not the download service's settings.
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a stored dock choice is shown again after a restart',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final stored = <String, bool>{'ShowInDock': true};
+    _dockHost(stored);
+    await _mountSettings(tester, 'general');
+    expect(_dockShown(tester), isTrue);
+    await tester.tap(_dockSwitch());
+    await tester.pumpAndSettle();
+    expect(stored['ShowInDock'], isFalse);
+    // Remount everything the way a new launch does; only the host keeps state.
+    await tester.pumpWidget(const SizedBox());
+    Get.reset();
+    Get.routerDelegate = null;
+    Get.routeInformationParser = null;
+    await _mountSettings(tester, 'general');
+    expect(_dockShown(tester), isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a refused or unavailable dock change keeps the actual state',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final stored = <String, bool>{};
+    _dockHost(stored, refuse: true);
+    await _mountSettings(tester, 'general');
+    await tester.tap(_dockSwitch());
+    await tester.pumpAndSettle();
+    expect(_dockShown(tester), isFalse);
+    expect(find.text('没有切换成功，请重试。'), findsOneWidget);
+    expect(stored, isEmpty);
+    // A host that cannot answer at all leaves the default: off.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async => null);
+    await tester.tap(_dockSwitch());
+    await tester.pumpAndSettle();
+    expect(_dockShown(tester), isFalse);
+    expect(find.text('没有切换成功，请重试。'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

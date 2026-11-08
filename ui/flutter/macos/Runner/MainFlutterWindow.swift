@@ -17,6 +17,29 @@ private final class PanelGlassEffectView: NSGlassEffectView {
   }
 }
 
+/// kownload lives in the menu bar. Info.plist's LSUIElement keeps every launch
+/// free of a Dock icon; a stored "show in Dock" choice, read before any window
+/// shows, makes it a regular app with a Dock icon and a ⌘Tab entry.
+enum DockPreference {
+  static let key = "ShowInDock"
+
+  static func showInDock(_ defaults: UserDefaults = .standard) -> Bool {
+    defaults.bool(forKey: key)
+  }
+
+  static func store(_ show: Bool, in defaults: UserDefaults = .standard) {
+    defaults.set(show, forKey: key)
+  }
+
+  static func policy(showInDock: Bool) -> NSApplication.ActivationPolicy {
+    showInDock ? .regular : .accessory
+  }
+
+  static func launchPolicy(_ defaults: UserDefaults = .standard) -> NSApplication.ActivationPolicy {
+    policy(showInDock: showInDock(defaults))
+  }
+}
+
 /// Owns one Carbon registration. Register the replacement first so a conflict
 /// never removes the user's working shortcut.
 final class PanelHotKey {
@@ -514,8 +537,31 @@ class MainFlutterWindow: NSWindow {
       let size = contentView?.bounds.size ?? .zero
       result(["visible": visibleToUser, "mode": presentation.rawValue,
               "width": size.width, "height": size.height])
+    case "getShowInDock": result(DockPreference.showInDock())
+    case "setShowInDock":
+      guard let show = boolean("show") else { invalid("show must be a bool"); return }
+      // Store what is actually in effect, so the next launch matches the UI.
+      let shown = applyDockPolicy(show)
+      DockPreference.store(shown)
+      result(shown)
     default: result(FlutterMethodNotImplemented)
     }
+  }
+
+  /// Applies the Dock choice immediately. Changing the activation policy can
+  /// deactivate the app, so the window the user is working in is brought back
+  /// to the front with focus. Returns whether the Dock icon is now shown.
+  @discardableResult
+  func applyDockPolicy(_ show: Bool) -> Bool {
+    let target = DockPreference.policy(showInDock: show)
+    if NSApp.activationPolicy() != target, NSApp.setActivationPolicy(target) {
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self, self.isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        self.makeKeyAndOrderFront(nil)
+      }
+    }
+    return NSApp.activationPolicy() == .regular
   }
 
   func handleAppearanceCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {

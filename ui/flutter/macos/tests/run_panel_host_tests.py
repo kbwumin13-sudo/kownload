@@ -4,13 +4,19 @@
 No Flutter/Dart build, application installation, production engine or app launch.
 """
 from pathlib import Path
+import os
 import platform
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[4]
-PRODUCTS = ROOT / 'ui/flutter/build/macos/Build/Products/Release'
-ENGINE = ROOT.parent / 'toolchains/flutter/bin/cache/artifacts/engine/darwin-x64-release/FlutterMacOS.xcframework/macos-arm64_x86_64'
+# A Release build provides the plugin frameworks; build-macos.py's work
+# directory can be passed instead of the in-tree build output.
+PRODUCTS = Path(os.environ.get('KOWNLOAD_MACOS_PRODUCTS', ROOT / 'ui/flutter/build/macos/Build/Products/Release'))
+FLUTTER = (Path(os.environ['FLUTTER_BIN']).resolve().parents[1] if os.environ.get('FLUTTER_BIN')
+           else Path(os.environ.get('KOWNLOAD_PROJECT_DIR', ROOT)) / 'toolchains/flutter')
+ENGINE = FLUTTER / 'bin/cache/artifacts/engine/darwin-x64-release/FlutterMacOS.xcframework/macos-arm64_x86_64'
+APP = next(PRODUCTS.glob('*.app'))
 RUNNER = ROOT / 'ui/flutter/macos/Runner'
 TESTS = Path(__file__).resolve().parent
 
@@ -33,5 +39,5 @@ with tempfile.TemporaryDirectory(prefix='kownload-panel-tests-') as temp:
                   str(TESTS / 'panel_host_test.swift'), '-o', str(binary),
                   '-framework', 'FlutterMacOS', '-framework', 'window_manager',
                   '-Xlinker', '-rpath', '-Xlinker', str(ENGINE),
-                  '-Xlinker', '-rpath', '-Xlinker', str(PRODUCTS / 'Gopeed.app/Contents/Frameworks')])
+                  '-Xlinker', '-rpath', '-Xlinker', str(APP / 'Contents/Frameworks')])
     run([str(binary)])

@@ -32,6 +32,21 @@ class MacPanel {
     }
   }
 
+  /// Whether kownload shows a Dock icon and a ⌘Tab entry. The native host
+  /// stores the choice so it applies before any window shows; null when the
+  /// host cannot answer.
+  static Future<bool?> showInDock() async {
+    final value = await _invoke('getShowInDock');
+    return value is bool ? value : null;
+  }
+
+  /// Applies at once and is kept for the next launch. Returns the state the
+  /// host reports afterwards, or null when it cannot answer.
+  static Future<bool?> setShowInDock(bool show) async {
+    final value = await _invoke('setShowInDock', {'show': show});
+    return value is bool ? value : null;
+  }
+
   static Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;

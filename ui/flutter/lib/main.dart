@@ -97,7 +97,9 @@ Future<void> init(StartupArgs args) async {
           ? const Size(640, 260)
           : Size(windowState?.width ?? 800, windowState?.height ?? 600),
       center: true,
-      skipTaskbar: runAsMenubarApp,
+      // On macOS the native host owns the Dock policy (LSUIElement plus the
+      // stored "show in Dock" choice); window_manager must not override it.
+      skipTaskbar: runAsMenubarApp ? null : false,
     );
     await windowManager.waitUntilReadyToShow(windowOptions, () async {
       await windowManager.setPreventClose(true);

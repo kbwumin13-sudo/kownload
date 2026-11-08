@@ -6,12 +6,14 @@ import app_links
 class AppDelegate: FlutterAppDelegate {
   override func applicationWillFinishLaunching(_ notification: Notification) {
     super.applicationWillFinishLaunching(notification)
-    NSApp.setActivationPolicy(.accessory)
+    // LSUIElement launches without a Dock icon; the stored choice applies
+    // before any window shows.
+    NSApp.setActivationPolicy(DockPreference.launchPolicy())
   }
 
   override func applicationDidFinishLaunching(_ notification: Notification) {
     super.applicationDidFinishLaunching(notification)
-    NSApp.setActivationPolicy(.accessory)
+    NSApp.setActivationPolicy(DockPreference.launchPolicy())
     (mainFlutterWindow as? MainFlutterWindow)?.configureMenus()
   }
 

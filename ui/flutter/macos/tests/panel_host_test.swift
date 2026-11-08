@@ -82,6 +82,34 @@ struct PanelHostTest {
       precondition(called, "Every method must complete its Flutter result")
       return value
     }
+    // Dock choice: off unless stored, applied at once, kept for the next launch.
+    let storedDock = UserDefaults.standard.object(forKey: DockPreference.key)
+    UserDefaults.standard.removeObject(forKey: DockPreference.key)
+    precondition(DockPreference.launchPolicy() == .accessory && call("getShowInDock") as? Bool == false,
+                 "Without a stored choice kownload stays out of the Dock")
+    precondition(call("setShowInDock", ["show": true]) as? Bool == true && NSApp.activationPolicy() == .regular,
+                 "Showing the Dock icon applies immediately")
+    precondition(UserDefaults.standard.bool(forKey: DockPreference.key) && DockPreference.launchPolicy() == .regular,
+                 "The choice is stored before the next launch reads it")
+    precondition(call("setShowInDock", ["show": false]) as? Bool == false && NSApp.activationPolicy() == .accessory,
+                 "Hiding the Dock icon applies immediately")
+    precondition(!UserDefaults.standard.bool(forKey: DockPreference.key) && DockPreference.launchPolicy() == .accessory)
+    precondition(call("setShowInDock", ["show": "yes"]) is FlutterError && NSApp.activationPolicy() == .accessory,
+                 "A non-boolean choice is rejected without a change")
+    let dockSuite = "kownload.dock-test.\(UUID().uuidString)"
+    let dockDefaults = UserDefaults(suiteName: dockSuite)!
+    precondition(!DockPreference.showInDock(dockDefaults) && DockPreference.launchPolicy(dockDefaults) == .accessory)
+    DockPreference.store(true, in: dockDefaults)
+    precondition(DockPreference.launchPolicy(UserDefaults(suiteName: dockSuite)!) == .regular,
+                 "A new launch reads the stored choice")
+    dockDefaults.removePersistentDomain(forName: dockSuite)
+    if let storedDock = storedDock {
+      UserDefaults.standard.set(storedDock, forKey: DockPreference.key)
+    } else {
+      UserDefaults.standard.removeObject(forKey: DockPreference.key)
+    }
+    drain()
+    print("PASS: Dock choice defaults off, applies immediately, persists for the next launch and rejects invalid input")
     func appearance(_ method: String, _ arguments: Any? = nil) {
       var called = false
       window.handleAppearanceCall(FlutterMethodCall(methodName: method, arguments: arguments)) { _ in called = true }

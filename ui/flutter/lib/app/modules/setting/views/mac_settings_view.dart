@@ -40,6 +40,9 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   Map<String, ManifestRoute?>? _routes;
   bool _connecting = false;
   String? _browserNotice;
+  bool? _showInDock;
+  bool _dockChanging = false;
+  String? _dockNotice;
 
   @override
   void initState() {
@@ -47,6 +50,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
     _directory =
         TextEditingController(text: _app.downloaderConfig.value.downloadDir);
     _loadRoutes();
+    _loadDock();
   }
 
   Future<void> _loadRoutes() async {
@@ -54,6 +58,28 @@ class _MacSettingsViewState extends State<MacSettingsView> {
       final routes = await BrowserConnection.routes();
       if (mounted) setState(() => _routes = routes);
     } catch (_) {}
+  }
+
+  Future<void> _loadDock() async {
+    final shown = await MacPanel.showInDock();
+    if (mounted) setState(() => _showInDock = shown ?? false);
+  }
+
+  /// The host applies the change at once and keeps it for the next launch;
+  /// the switch then shows what the host reports.
+  Future<void> _changeDock(bool show) async {
+    setState(() {
+      _showInDock = show;
+      _dockChanging = true;
+      _dockNotice = null;
+    });
+    final shown = await MacPanel.setShowInDock(show);
+    if (!mounted) return;
+    setState(() {
+      _showInDock = shown ?? !show;
+      _dockChanging = false;
+      if (shown != show) _dockNotice = '没有切换成功，请重试。';
+    });
   }
 
   String _routeText() {
@@ -266,6 +292,13 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                 onPressed: () => _open(
                     'x-apple.systempreferences:com.apple.LoginItems-Settings.extension'),
                 child: const Text('登录项…'))),
+        _row(context, '在程序坞中显示 kownload',
+            detail: _dockNotice ?? '关闭时只在菜单栏显示，不出现在程序坞和 ⌘Tab 中。',
+            control: _switch(
+                context,
+                '在程序坞中显示 kownload',
+                _showInDock ?? false,
+                _showInDock == null || _dockChanging ? null : _changeDock)),
         ListTileTheme(
           data: ListTileThemeData(
             dense: true,
@@ -472,36 +505,42 @@ class _MacSettingsViewState extends State<MacSettingsView> {
 
   Widget _toggle(BuildContext context, String title, bool value,
       ValueChanged<bool> change) {
-    void toggle() => _change(() => change(!value));
     return _row(context, title,
-        control: MergeSemantics(
-          child: Semantics(
-            label: title,
-            child: SizedBox(
-              width: 44,
-              height: 32,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: toggle,
-                child: OverflowBox(
-                  minWidth: 60,
-                  maxWidth: 60,
-                  minHeight: 40,
-                  maxHeight: 40,
-                  child: Transform.scale(
-                    scale: .64,
-                    child: Switch.adaptive(
-                      activeTrackColor: MacColors.of(context).accent,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      value: value,
-                      onChanged: (value) => _change(() => change(value)),
-                    ),
-                  ),
+        control: _switch(
+            context, title, value, (value) => _change(() => change(value))));
+  }
+
+  /// A null [onChanged] shows the switch disabled.
+  Widget _switch(BuildContext context, String title, bool value,
+      ValueChanged<bool>? onChanged) {
+    return MergeSemantics(
+      child: Semantics(
+        label: title,
+        child: SizedBox(
+          width: 44,
+          height: 32,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onChanged == null ? null : () => onChanged(!value),
+            child: OverflowBox(
+              minWidth: 60,
+              maxWidth: 60,
+              minHeight: 40,
+              maxHeight: 40,
+              child: Transform.scale(
+                scale: .64,
+                child: Switch.adaptive(
+                  activeTrackColor: MacColors.of(context).accent,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  value: value,
+                  onChanged: onChanged,
                 ),
               ),
             ),
           ),
-        ));
+        ),
+      ),
+    );
   }
 
   Widget _menu<T>({
