@@ -631,7 +631,11 @@ class BuildTaskListView extends GetView {
           : isRunning()
               ? (task.progress.mediaPhase == 'merge'
                   ? (Get.locale?.languageCode == 'zh' ? '合并中' : 'Merging')
-                  : 'downloading'.tr)
+                  : task.fetchingTorrentInfo
+                      ? (Get.locale?.languageCode == 'zh'
+                          ? '正在获取种子信息'
+                          : 'Fetching torrent info')
+                      : 'downloading'.tr)
               : task.status == Status.pause
                   ? 'pause'.tr
                   : task.status == Status.error

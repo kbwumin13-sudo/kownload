@@ -60,6 +60,13 @@ class Task {
       };
 }
 
+extension TaskTorrentInfo on Task {
+  /// A magnet task runs before any peer has sent its metadata; until then it
+  /// has no files or size to show, and it waits without a deadline.
+  bool get fetchingTorrentInfo =>
+      protocol == Protocol.bt && status == Status.running && meta.res == null;
+}
+
 @JsonSerializable()
 class Progress {
   int used;

@@ -1754,11 +1754,13 @@ class _CreateViewState extends State<CreateView> {
                         ? '下载失败 · 查看详情'
                         : done
                             ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                            : running
-                                ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
-                                : task.status == Status.pause
-                                    ? '已暂停'
-                                    : '等待下载',
+                            : task.fetchingTorrentInfo
+                                ? '正在获取种子信息'
+                                : running
+                                    ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
+                                    : task.status == Status.pause
+                                        ? '已暂停'
+                                        : '等待下载',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
