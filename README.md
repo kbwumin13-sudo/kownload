@@ -26,6 +26,7 @@ A keyboard-first download manager for macOS.
 ## 随手开始，安静下载
 
 - **轻面板**：系统字体、紧凑控件和分组设置，跟随系统明暗。隐藏后保留输入与等待中的登录流程。
+- **只在菜单栏**：默认不占程序坞和 ⌘Tab；需要时在「设置 → 通用」打开「在程序坞中显示 kownload」。
 - **一个输入框**：普通链接、多行批量、磁力、种子拖放、ED2K 和网盘分享链接。
 - **自动分段**：验证服务器的 Range 能力后启用多连接，支持断点恢复和连接复用。
 - **网页媒体**：浏览器助手按播放器提供下载入口，支持 HLS、DASH、音轨和字幕选择；音视频用 FFmpeg 合并。
@@ -55,7 +56,7 @@ A keyboard-first download manager for macOS.
 
 应用的首次引导提供助手目录入口。在 `chrome://extensions` 或 `edge://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载该目录。然后在「设置 → 通用 → 浏览器助手」点「连接…」，为 Chrome 和 Edge 写入 Native Messaging 清单；应用启动时不会改动浏览器目录。
 
-也可以下载 Release 中的 **kownload-browser-helper-0.4.2-1.9.3-kownload.17.zip**，解压后加载。助手文件更新后，在扩展页点「重新加载」。源码位于 [`browser-media-extension/`](browser-media-extension/)。
+也可以下载 Release 中的 **kownload-browser-helper-0.4.2-1.9.3-kownload.18.zip**，解压后加载。助手文件更新后，在扩展页点「重新加载」。源码位于 [`browser-media-extension/`](browser-media-extension/)。
 
 ### 媒体依赖
 
@@ -80,9 +81,16 @@ pipx install yt-dlp
 
 登录凭据保留在内存中，任务保存文件身份。暂停或重启后，按提示打开对应网页并同步登录状态，再继续下载。
 
-## 已发布版本 · build 28
+## 已发布版本 · build 30
 
-内核与 Release 版本 `1.9.3-kownload.17`，浏览器助手 0.4.2。
+内核与 Release 版本 `1.9.3-kownload.18`，浏览器助手 0.4.2。
+
+- 默认只在菜单栏，不占程序坞和 ⌘Tab；在「设置 → 通用」打开「在程序坞中显示 kownload」后立即生效，菜单栏随之切换。
+- 文件夹和文件选择框改为应用自己的系统选择框，在轻面板和设置窗口里都会弹到前台。
+
+程序坞开关、菜单栏切换和选择框已在实机上验证；.torrent、扩展目录和浏览器资料三处选择框只有测试覆盖。
+
+build 28 起的改动：
 
 - 修复下载完整性：大小未知或不支持 Range 的单流在失败、重试后不再被判为完成；换链或源站内容变化后，续传前先核对资源身份，不再把新旧版本拼成一个文件。
 - Mail.ru 临时链接过期后自动刷新并回到原任务。
@@ -90,7 +98,7 @@ pipx install yt-dlp
 - 独立应用身份：新的 Bundle ID 与数据目录，首次启动只读导入旧数据；Native Messaging 主机独立实现；浏览器连接改为在设置里显式切换。
 - 更新改为只提示新版本并打开 Release 页面；构建只接受干净提交，随包附完整许可声明与对应源码包。
 
-本轮经过三轮独立审查。HTTP 与下载调度相关 Go race、Flutter 194 项、浏览器助手 262 项回归通过；正式数据副本上的迁移、回退与再次升级，以及真实浏览器经助手提交下载均已验证。Mail.ru 链接过期后的真实续传、夸克和百度以外网盘的实际下载仍未验证。
+build 28 经过三轮独立审查。HTTP 与下载调度相关 Go race、Flutter 194 项、浏览器助手 262 项回归通过；正式数据副本上的迁移、回退与再次升级，以及真实浏览器经助手提交下载均已验证。Mail.ru 链接过期后的真实续传、夸克和百度以外网盘的实际下载仍未验证。
 
 build 19 的验证记录见 [docs/BUILD19_VALIDATION.md](docs/BUILD19_VALIDATION.md)。
 
