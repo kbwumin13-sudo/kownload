@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,6 +70,7 @@ type Fetcher struct {
 	heldTorrent     *torrent.Torrent // protected by opMu; references use the global lock
 	resolveMu       sync.Mutex
 	resolveCancel   context.CancelFunc
+	seedMu          sync.Mutex // guards data.SeedBytes and data.SeedTime, updated by doUpload
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -267,13 +269,16 @@ func (f *Fetcher) Stats() any {
 	} else {
 		stats = torrent.TorrentStats{}
 	}
+	f.seedMu.Lock()
+	seedBytes, seedTime := f.data.SeedBytes, f.data.SeedTime
+	f.seedMu.Unlock()
 	return &bt.Stats{
 		TotalPeers:       stats.TotalPeers,
 		ActivePeers:      stats.ActivePeers,
 		ConnectedSeeders: stats.ConnectedSeeders,
-		SeedBytes:        f.data.SeedBytes,
+		SeedBytes:        seedBytes,
 		SeedRatio:        f.seedRadio(),
-		SeedTime:         f.data.SeedTime,
+		SeedTime:         seedTime,
 	}
 }
 
@@ -427,10 +432,12 @@ func (f *Fetcher) doUpload(fromUpload bool) {
 	}
 
 	// Check and update seed data
+	f.seedMu.Lock()
 	lastData := &fetcherData{
 		SeedBytes: f.data.SeedBytes,
 		SeedTime:  f.data.SeedTime,
 	}
+	f.seedMu.Unlock()
 	var doneTime int64 = 0
 	for {
 		select {
@@ -442,7 +449,9 @@ func (f *Fetcher) doUpload(fromUpload bool) {
 			}
 
 			stats := f.torrentStats()
+			f.seedMu.Lock()
 			f.data.SeedBytes = lastData.SeedBytes + stats.BytesWrittenData.Int64()
+			f.seedMu.Unlock()
 
 			// Check is download complete, if not don't check and stop seeding
 			if !fromUpload && !f.isDone() {
@@ -451,7 +460,10 @@ func (f *Fetcher) doUpload(fromUpload bool) {
 			if doneTime == 0 {
 				doneTime = time.Now().Unix()
 			}
-			f.data.SeedTime = lastData.SeedTime + time.Now().Unix() - doneTime
+			seedTime := lastData.SeedTime + time.Now().Unix() - doneTime
+			f.seedMu.Lock()
+			f.data.SeedTime = seedTime
+			f.seedMu.Unlock()
 
 			// If the seed forever is true, keep seeding
 			if f.config.SeedKeep {
@@ -469,7 +481,7 @@ func (f *Fetcher) doUpload(fromUpload bool) {
 
 			// If the seed time is reached, stop seeding
 			if f.config.SeedTime > 0 {
-				if f.data.SeedTime >= f.config.SeedTime {
+				if seedTime >= f.config.SeedTime {
 					f.Close()
 					break
 				}
@@ -490,6 +502,8 @@ func (f *Fetcher) torrentStats() torrent.TorrentStats {
 }
 
 func (f *Fetcher) UploadedBytes() int64 {
+	f.seedMu.Lock()
+	defer f.seedMu.Unlock()
 	return f.data.SeedBytes
 }
 
@@ -659,7 +673,10 @@ func (f *Fetcher) seedRadio() float64 {
 		return 0
 	}
 
-	return float64(f.data.SeedBytes) / float64(bytesRead)
+	f.seedMu.Lock()
+	seedBytes := f.data.SeedBytes
+	f.seedMu.Unlock()
+	return float64(seedBytes) / float64(bytesRead)
 }
 
 type fetcherData struct {
@@ -754,7 +771,15 @@ func (fm *FetcherManager) DefaultConfig() any {
 
 func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	_f := f.(*Fetcher)
-	return _f.data, nil
+	// Persist a snapshot: doUpload keeps updating the seeding counters while
+	// the storage serializes.
+	_f.seedMu.Lock()
+	defer _f.seedMu.Unlock()
+	return &fetcherData{
+		Progress:  slices.Clone(_f.data.Progress),
+		SeedBytes: _f.data.SeedBytes,
+		SeedTime:  _f.data.SeedTime,
+	}, nil
 }
 
 func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v any) fetcher.Fetcher) {
