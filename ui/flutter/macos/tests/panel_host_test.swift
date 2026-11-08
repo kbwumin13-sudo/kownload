@@ -342,6 +342,58 @@ struct PanelHostTest {
     precondition(!window.isVisible, "The panel must dismiss after menu tracking ends without regained focus")
     window.testKey = true
     call("show")
+    // Choosers are kownload's own open panels, replaced here by a presenter that
+    // shows nothing. The panel stays while a chooser has focus, takes focus back
+    // when it closes, and a later focus loss dismisses it as usual.
+    var presented: NSOpenPanel?
+    var chosenURLs: [URL]?
+    window.presentOpenPanel = { picker, done in
+      presented = picker
+      window.testKey = false
+      window.resignKey(); drain()
+      precondition(window.isVisible, "The panel must stay while its chooser has focus")
+      window.testKey = true
+      done(chosenURLs)
+    }
+    let home = NSHomeDirectory()
+    let requestsBeforeChooser = testApp.activationRequests
+    precondition(call("chooseDirectory", ["title": "选择下载保存位置", "initialDirectory": home]) == nil,
+                 "A cancelled chooser reports nothing")
+    precondition(window.isVisible && testApp.activationRequests >= requestsBeforeChooser + 2,
+                 "kownload comes forward for the chooser and takes focus back after it is cancelled")
+    guard let folderPicker = presented else { preconditionFailure("The folder chooser must be presented") }
+    precondition(folderPicker.canChooseDirectories && !folderPicker.canChooseFiles && folderPicker.canCreateDirectories
+                 && !folderPicker.allowsMultipleSelection && folderPicker.message == "选择下载保存位置"
+                 && folderPicker.directoryURL?.standardizedFileURL.path == home,
+                 "The folder chooser starts at the current folder")
+    chosenURLs = [URL(fileURLWithPath: "/Volumes/Data/Inbox", isDirectory: true)]
+    precondition(call("chooseDirectory") as? String == "/Volumes/Data/Inbox", "A chosen folder is returned as its path")
+    chosenURLs = [URL(fileURLWithPath: "/tmp/a.torrent"), URL(fileURLWithPath: "/tmp/b.torrent")]
+    precondition(call("chooseFiles", ["extensions": ["torrent"], "multiple": true]) as? [String]
+                 == ["/tmp/a.torrent", "/tmp/b.torrent"], "Chosen files are returned as paths")
+    guard let filePicker = presented else { preconditionFailure("The file chooser must be presented") }
+    precondition(filePicker.canChooseFiles && !filePicker.canChooseDirectories && filePicker.allowsMultipleSelection
+                 && filePicker.allowedContentTypes.contains(where: { $0.preferredFilenameExtension == "torrent" }),
+                 "The file chooser is limited to the requested extensions")
+    // The browser profile chooser takes the same path.
+    let profileState = "/tmp/kownload-profile-test/Local State"
+    var chosenProfile: Any? = "unanswered"
+    chosenURLs = [URL(fileURLWithPath: profileState)]
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "choose", arguments: ["path": profileState])) { chosenProfile = $0 }
+    precondition(chosenProfile as? String == profileState && window.isVisible, "The profile chooser returns the chosen file")
+    chosenURLs = nil
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "choose", arguments: ["path": profileState])) { chosenProfile = $0 }
+    precondition(chosenProfile == nil && window.isVisible, "A cancelled profile chooser reports nothing and keeps the panel")
+    for (method, arguments) in [("chooseDirectory", ["title": 3] as [String: Any]), ("chooseFiles", ["extensions": "torrent"]),
+                                ("chooseFiles", ["extensions": [""]]), ("chooseFiles", ["multiple": "yes"])] {
+      precondition(call(method, arguments) is FlutterError, "\(method) rejects \(arguments)")
+    }
+    window.testKey = false
+    window.resignKey(); drain()
+    precondition(!window.isVisible, "After a chooser closes, losing focus dismisses the panel as usual")
+    print("PASS: choosers keep the panel while open, return focus and paths, and reject invalid input")
+    window.testKey = true
+    call("show")
     window.close()
     precondition(!window.isVisible && window.contentViewController === container)
     let state = call("getState") as! [String: Any]

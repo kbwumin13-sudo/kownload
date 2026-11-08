@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -45,20 +44,6 @@ class _App extends AppController {
     if (saving != null) await saving!.future;
     if (failSave) throw StateError('fixture config failure');
     savedDirectories.add(downloaderConfig.value.downloadDir);
-  }
-}
-
-class _Picker extends FilePicker {
-  String? selected;
-  bool fail = false;
-  @override
-  Future<String?> getDirectoryPath({
-    String? dialogTitle,
-    bool lockParentWindow = false,
-    String? initialDirectory,
-  }) async {
-    if (fail) throw StateError('fixture picker failure');
-    return selected;
   }
 }
 
@@ -242,19 +227,30 @@ void main() {
   testWidgets(
       'native directory picker persists selection and reports failures nearby',
       (tester) async {
-    final picker = _Picker()..fail = true;
-    FilePicker.platform = picker;
+    // The chooser is kownload's own AppKit panel, reached over the panel channel.
+    Object? chosen =
+        PlatformException(code: 'fixture', message: 'fixture picker failure');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async {
+      nativeCalls.add(call);
+      if (call.method != 'chooseDirectory') return null;
+      if (chosen is PlatformException) throw chosen;
+      return chosen;
+    });
     final launch = await mount(tester);
     final completed = launch();
     await tester.pumpAndSettle();
     await tester.tap(find.text('选择…'));
     await tester.pumpAndSettle();
     expect(find.text('无法选择文件夹，请重试或输入保存位置。'), findsOneWidget);
-    picker
-      ..fail = false
-      ..selected = '/picked';
+    chosen = '/picked';
     await tester.tap(find.text('选择…'));
     await tester.pumpAndSettle();
+    final choices =
+        nativeCalls.where((call) => call.method == 'chooseDirectory').toList();
+    expect(choices, hasLength(2));
+    expect(choices.last.arguments,
+        {'title': '选择下载保存位置', 'initialDirectory': '/original'});
     expect(
         tester.widget<TextField>(directoryField).controller!.text, '/picked');
     await tester.tap(find.text('完成并继续'));

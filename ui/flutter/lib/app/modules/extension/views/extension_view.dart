@@ -13,6 +13,7 @@ import '../../../../api/api.dart';
 import '../../../../api/model/extension.dart';
 import '../../../../api/model/install_extension.dart';
 import '../../../../api/model/update_extension_settings.dart';
+import '../../../../macos/mac_panel.dart';
 import '../../../../util/message.dart';
 import '../../../../util/util.dart';
 import '../../../views/icon_button_loading.dart';
@@ -83,7 +84,9 @@ class _ExtensionViewState extends State<ExtensionView> {
         .contains(ExtensionController.manualInstallBusyKey)) {
       return;
     }
-    final dir = await FilePicker.platform.getDirectoryPath();
+    final dir = Util.isMacos()
+        ? await MacPanel.chooseDirectory()
+        : await FilePicker.platform.getDirectoryPath();
     if (dir == null) return;
     try {
       await controller.installFromUrl(dir, devInstall: true);

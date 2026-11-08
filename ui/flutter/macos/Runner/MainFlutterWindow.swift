@@ -1,6 +1,7 @@
 import Cocoa
 import Carbon
 import FlutterMacOS
+import UniformTypeIdentifiers
 import window_manager
 
 @available(macOS 26.0, *)
@@ -115,6 +116,17 @@ class MainFlutterWindow: NSWindow {
   // Replaced in the native harness, which must never move the user's focus.
   var menuBarOwner: () -> pid_t? = { NSWorkspace.shared.menuBarOwningApplication?.processIdentifier }
   lazy var menuBarHandoff: () -> Void = { [weak self] in self?.reactivateThroughDock() }
+  // Shows a folder or file chooser and reports the chosen URLs, nil when
+  // cancelled. The settings window hosts it as a sheet; the borderless
+  // floating panel cannot, so the chooser runs modally above it.
+  lazy var presentOpenPanel: (NSOpenPanel, @escaping ([URL]?) -> Void) -> Void = { [weak self] picker, done in
+    let finish = { (response: NSApplication.ModalResponse) in done(response == .OK ? picker.urls : nil) }
+    if let self = self, self.presentation == .settings, self.isVisible {
+      picker.beginSheetModal(for: self, completionHandler: finish)
+    } else {
+      finish(picker.runModal())
+    }
+  }
 
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { presentation == .settings }
@@ -417,8 +429,8 @@ class MainFlutterWindow: NSWindow {
       picker.canChooseDirectories = false
       picker.allowsMultipleSelection = false
       picker.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
-      picker.beginSheetModal(for: self) { response in
-        guard response == .OK, let url = picker.url else { result(nil); return }
+      choose(with: picker) { urls in
+        guard let url = urls?.first else { result(nil); return }
         guard url.lastPathComponent == "Local State" else {
           result(FlutterError(code: "invalid_profile", message: "请选择名为 Local State 的文件", details: nil)); return
         }
@@ -540,6 +552,40 @@ class MainFlutterWindow: NSWindow {
       let size = contentView?.bounds.size ?? .zero
       result(["visible": visibleToUser, "mode": presentation.rawValue,
               "width": size.width, "height": size.height])
+    case "chooseDirectory", "chooseFiles":
+      let directories = call.method == "chooseDirectory"
+      for key in ["title", "initialDirectory"] where args[key] != nil && !(args[key] is String) {
+        invalid("\(key) must be a string"); return
+      }
+      if args["multiple"] != nil && boolean("multiple") == nil { invalid("multiple must be a bool"); return }
+      var extensions: [String] = []
+      if let raw = args["extensions"] {
+        guard let list = raw as? [String], list.allSatisfy({ !$0.isEmpty && !$0.contains("/") }) else {
+          invalid("extensions must be file name extensions"); return
+        }
+        extensions = list
+      }
+      let picker = NSOpenPanel()
+      picker.canChooseDirectories = directories
+      picker.canChooseFiles = !directories
+      picker.canCreateDirectories = directories
+      picker.allowsMultipleSelection = !directories && boolean("multiple") == true
+      if let title = args["title"] as? String, !title.isEmpty { picker.message = title }
+      if directories { picker.prompt = "选择" }
+      if !extensions.isEmpty {
+        if #available(macOS 11.0, *) {
+          picker.allowedContentTypes = extensions.compactMap { UTType(filenameExtension: $0) }
+        } else {
+          picker.allowedFileTypes = extensions
+        }
+      }
+      if let initial = args["initialDirectory"] as? String, initial.hasPrefix("/") {
+        picker.directoryURL = URL(fileURLWithPath: initial, isDirectory: true)
+      }
+      choose(with: picker) { urls in
+        guard let urls = urls, !urls.isEmpty else { result(nil); return }
+        result(directories ? urls[0].path : urls.map { $0.path })
+      }
     case "getShowInDock": result(DockPreference.showInDock())
     case "setShowInDock":
       guard let show = boolean("show") else { invalid("show must be a bool"); return }
@@ -548,6 +594,27 @@ class MainFlutterWindow: NSWindow {
       DockPreference.store(shown)
       result(shown)
     default: result(FlutterMethodNotImplemented)
+    }
+  }
+
+  /// Choosers belong to this process, so macOS grants kownload access to what
+  /// the user picks. A menu-bar-only app must be active for its chooser to come
+  /// forward with focus; the floating panel stays while the chooser has focus
+  /// and gets focus back when it closes, chosen or cancelled.
+  private func choose(with picker: NSOpenPanel, done: @escaping ([URL]?) -> Void) {
+    let wasTransient = transientActive
+    transientActive = true
+    NSApp.activate(ignoringOtherApps: true)
+    presentOpenPanel(picker) { [weak self] urls in
+      if let self = self {
+        self.transientActive = wasTransient
+        if self.isVisible {
+          NSApp.activate(ignoringOtherApps: true)
+          self.makeKeyAndOrderFront(nil)
+          self.focusFlutter()
+        }
+      }
+      done(urls)
     }
   }
 

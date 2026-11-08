@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -103,12 +102,8 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
       _error = null;
     });
     try {
-      final selected = await MacPanel.transient(() => FilePicker.platform
-          .getDirectoryPath(
-              dialogTitle: '选择下载保存位置',
-              initialDirectory: _directory.text.trim().isEmpty
-                  ? null
-                  : _directory.text.trim()));
+      final selected = await MacPanel.chooseDirectory(
+          title: '选择下载保存位置', initialDirectory: _directory.text.trim());
       if (mounted && selected != null) _directory.text = selected;
     } catch (_) {
       if (mounted) setState(() => _error = '无法选择文件夹，请重试或输入保存位置。');

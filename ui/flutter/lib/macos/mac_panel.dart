@@ -47,6 +47,32 @@ class MacPanel {
     return value is bool ? value : null;
   }
 
+  /// Folder chooser owned by kownload: it comes to the front with focus even
+  /// without a Dock icon, and the panel keeps its state when it is cancelled.
+  /// Null when cancelled or when the host cannot answer.
+  static Future<String?> chooseDirectory(
+      {String? title, String? initialDirectory}) async {
+    final value = await _invoke('chooseDirectory', {
+      if (title != null) 'title': title,
+      if (initialDirectory != null && initialDirectory.isNotEmpty)
+        'initialDirectory': initialDirectory,
+    });
+    return value is String ? value : null;
+  }
+
+  /// File chooser owned by kownload, limited to [extensions] when given.
+  static Future<List<String>?> chooseFiles(
+      {String? title,
+      List<String> extensions = const [],
+      bool multiple = false}) async {
+    final value = await _invoke('chooseFiles', {
+      if (title != null) 'title': title,
+      if (extensions.isNotEmpty) 'extensions': extensions,
+      'multiple': multiple,
+    });
+    return value is List ? value.whereType<String>().toList() : null;
+  }
+
   static Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;

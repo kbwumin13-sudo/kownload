@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:toggle_switch/toggle_switch.dart';
 
+import '../../macos/mac_panel.dart';
 import '../../util/message.dart';
 import '../../util/util.dart';
 
@@ -115,7 +116,11 @@ class _DirectorySelectorState extends State<DirectorySelector> {
             icon: Icon(
                 Util.isMacos() ? CupertinoIcons.folder : Icons.folder_open),
             onPressed: () async {
-              var dir = await FilePicker.platform.getDirectoryPath();
+              final current = widget.controller.text.trim();
+              var dir = Util.isMacos()
+                  ? await MacPanel.chooseDirectory(
+                      initialDirectory: current.isEmpty ? null : current)
+                  : await FilePicker.platform.getDirectoryPath();
               if (dir != null) {
                 widget.controller.text = dir;
                 if (Util.isMacos() && widget.inlineActions) {

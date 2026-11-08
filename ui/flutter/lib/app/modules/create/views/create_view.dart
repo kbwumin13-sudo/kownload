@@ -390,8 +390,16 @@ class _CreateViewState extends State<CreateView> {
       padding: Util.isMacos() ? EdgeInsets.zero : null,
       icon: Icon(Util.isMacos() ? CupertinoIcons.folder : Icons.folder_open),
       onPressed: () async {
-        var pr = await MacPanel.transient(() => FilePicker.platform
-            .pickFiles(type: FileType.custom, allowedExtensions: ["torrent"]));
+        if (Util.isMacos()) {
+          final paths =
+              await MacPanel.chooseFiles(extensions: const ['torrent']);
+          if (paths != null && paths.isNotEmpty) {
+            _urlController.text = paths.first;
+          }
+          return;
+        }
+        var pr = await FilePicker.platform
+            .pickFiles(type: FileType.custom, allowedExtensions: ["torrent"]);
         if (pr != null) {
           if (!Util.isWeb()) {
             _urlController.text = pr.files[0].path ?? "";
@@ -1520,15 +1528,13 @@ class _CreateViewState extends State<CreateView> {
                                       _panelIcon(
                                           c, CupertinoIcons.folder, '选择种子',
                                           () async {
-                                        final result = await MacPanel.transient(
-                                            () => FilePicker.platform.pickFiles(
-                                                    type: FileType.custom,
-                                                    allowedExtensions: [
-                                                      'torrent'
-                                                    ]));
-                                        if (mounted && result != null) {
-                                          _urlController.text =
-                                              result.files.single.path ?? '';
+                                        final paths =
+                                            await MacPanel.chooseFiles(
+                                                extensions: const ['torrent']);
+                                        if (mounted &&
+                                            paths != null &&
+                                            paths.isNotEmpty) {
+                                          _urlController.text = paths.first;
                                           _originalRequest = null;
                                           MacPanel.cancelAutoHide();
                                           _inputFocus.requestFocus();
