@@ -36,8 +36,27 @@ private final class InputController: NSViewController {
 private final class TestWindow: MainFlutterWindow {
   var testKey = true
   var testSheet: NSWindow?
+  var testVisible: Bool?
   override var isKeyWindow: Bool { testKey }
   override var attachedSheet: NSWindow? { testSheet }
+  override var isVisible: Bool { testVisible ?? super.isVisible }
+}
+// The harness runs while someone uses this Mac: record activation and Dock
+// policy requests instead of taking focus or showing a Dock icon.
+private final class TestApplication: NSApplication {
+  var testActive = false
+  var testPolicy: NSApplication.ActivationPolicy = .accessory
+  private(set) var activationRequests = 0
+  override var isActive: Bool { testActive }
+  override func activationPolicy() -> NSApplication.ActivationPolicy { testPolicy }
+  override func setActivationPolicy(_ policy: NSApplication.ActivationPolicy) -> Bool {
+    testPolicy = policy
+    return true
+  }
+  override func activate(ignoringOtherApps flag: Bool) { activationRequests += 1 }
+  @available(macOS 14.0, *)
+  override func activate() { activationRequests += 1 }
+  override func unhide(_ sender: Any?) {}
 }
 
 @main
@@ -53,11 +72,14 @@ struct PanelHostTest {
       preconditionFailure("Invalid metadata must be rejected")
     } catch {}
     print("PASS: browser profile metadata excludes credentials and rejects invalid data")
-    _ = NSApplication.shared
+    // First use of the shared application, so NSApp is the recording subclass.
+    let testApp = TestApplication.shared as! TestApplication
     NSApp.setActivationPolicy(.accessory)
     let window = TestWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
       styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: true)
     window.isReleasedWhenClosed = false
+    // Transparent, so ordering it in never covers the user's windows.
+    window.alphaValue = 0
     let metadataDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! FileManager.default.createDirectory(at: metadataDirectory, withIntermediateDirectories: true)
     let metadataURL = metadataDirectory.appendingPathComponent("Local State")
@@ -110,6 +132,39 @@ struct PanelHostTest {
     precondition(DockPreference.launchPolicy(UserDefaults(suiteName: dockSuite)!) == .regular,
                  "A new launch reads the stored choice")
     dockDefaults.removePersistentDomain(forName: dockSuite)
+    // Menu bar: after an active app changes policy, macOS keeps the previous
+    // menus until the app is activated again, so the host hands activation off
+    // and back only while the menu bar does not match.
+    func settle() { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.35)) }
+    let me = ProcessInfo.processInfo.processIdentifier
+    var menuBarOwner: pid_t? = me + 1
+    var handoffs = 0
+    window.menuBarOwner = { menuBarOwner }
+    window.menuBarHandoff = { handoffs += 1 }
+    window.testVisible = true
+    testApp.testActive = true
+    precondition(call("setShowInDock", ["show": true]) as? Bool == true)
+    settle()
+    precondition(handoffs == 1, "Joining the Dock while another app's menus are shown reclaims the menu bar once")
+    menuBarOwner = me
+    precondition(!window.refreshMenuBar() && handoffs == 1, "Nothing is done once kownload's menus are shown")
+    precondition(call("setShowInDock", ["show": false]) as? Bool == false)
+    settle()
+    precondition(handoffs == 2, "Leaving the Dock while kownload's menus are still shown hands the menu bar back")
+    menuBarOwner = me + 1
+    precondition(!window.refreshMenuBar() && handoffs == 2, "Nothing is done once another app's menus are shown")
+    precondition(call("setShowInDock", ["show": false]) as? Bool == false)
+    settle()
+    precondition(handoffs == 2, "Choosing the current state changes nothing")
+    testApp.testActive = false
+    let requestsBefore = testApp.activationRequests
+    precondition(call("setShowInDock", ["show": true]) as? Bool == true)
+    settle()
+    precondition(handoffs == 2 && testApp.activationRequests == requestsBefore,
+                 "An inactive kownload never moves the user's focus")
+    precondition(call("setShowInDock", ["show": false]) as? Bool == false)
+    window.testVisible = nil
+    window.menuBarHandoff = {}
     if let storedDock = storedDock {
       UserDefaults.standard.set(storedDock, forKey: DockPreference.key)
     } else {
@@ -117,6 +172,7 @@ struct PanelHostTest {
     }
     drain()
     print("PASS: Dock choice defaults off, applies immediately, persists for the next launch and rejects invalid input")
+    print("PASS: a stale menu bar after a Dock change is reclaimed only while kownload is active")
     func appearance(_ method: String, _ arguments: Any? = nil) {
       var called = false
       window.handleAppearanceCall(FlutterMethodCall(methodName: method, arguments: arguments)) { _ in called = true }

@@ -112,6 +112,9 @@ class MainFlutterWindow: NSWindow {
   private let hotKey = PanelHotKey()
   // Also used by the native harness without starting a Flutter engine.
   var sendPanelEvent: ((String, Any?) -> Void)?
+  // Replaced in the native harness, which must never move the user's focus.
+  var menuBarOwner: () -> pid_t? = { NSWorkspace.shared.menuBarOwningApplication?.processIdentifier }
+  lazy var menuBarHandoff: () -> Void = { [weak self] in self?.reactivateThroughDock() }
 
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { presentation == .settings }
@@ -548,20 +551,40 @@ class MainFlutterWindow: NSWindow {
     }
   }
 
-  /// Applies the Dock choice immediately. Changing the activation policy can
-  /// deactivate the app, so the window the user is working in is brought back
-  /// to the front with focus. Returns whether the Dock icon is now shown.
+  /// Applies the Dock choice immediately. Returns whether the Dock icon is now
+  /// shown.
   @discardableResult
   func applyDockPolicy(_ show: Bool) -> Bool {
     let target = DockPreference.policy(showInDock: show)
-    if NSApp.activationPolicy() != target, NSApp.setActivationPolicy(target) {
-      DispatchQueue.main.async { [weak self] in
-        guard let self = self, self.isVisible else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        self.makeKeyAndOrderFront(nil)
-      }
+    if NSApp.activationPolicy() != target, NSApp.setActivationPolicy(target), NSApp.isActive {
+      // An app that changes policy while active keeps the previous menu bar
+      // (another app's menus after joining the Dock, kownload's after leaving
+      // it) until it is activated again. Check once the change has settled.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.refreshMenuBar() }
     }
     return NSApp.activationPolicy() == .regular
+  }
+
+  /// Hands activation off and back when the menu bar does not match the
+  /// activation policy. Returns whether a handoff started.
+  @discardableResult
+  func refreshMenuBar() -> Bool {
+    guard isVisible, NSApp.isActive else { return false }
+    let ownsMenuBar = menuBarOwner() == ProcessInfo.processInfo.processIdentifier
+    guard ownsMenuBar != (NSApp.activationPolicy() == .regular) else { return false }
+    menuBarHandoff()
+    return true
+  }
+
+  /// The Dock has no windows to bring forward, so activating it and then
+  /// kownload again leaves the window order unchanged.
+  private func reactivateThroughDock() {
+    guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first,
+          dock.activate(options: []) else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+      NSApp.activate(ignoringOtherApps: true)
+      self?.makeKeyAndOrderFront(nil)
+    }
   }
 
   func handleAppearanceCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
