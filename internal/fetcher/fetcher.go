@@ -38,9 +38,18 @@ type ContextResolver interface {
 	ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) error
 }
 
+// TaskResolver resolves the metadata of a created task. Protocols implement it
+// when metadata can take arbitrarily long to arrive, such as magnet links:
+// ResolveContext may bound an interactive resolve, while a created task waits
+// until ctx, its run, is canceled by Pause, Delete or shutdown.
+type TaskResolver interface {
+	ResolveTask(ctx context.Context, req *base.Request, opts *base.Options) error
+}
+
 // StartPreparer restores protocol readiness for tasks whose metadata is already
 // persisted. Preparation runs without task status/data locks so CancelResolve
 // can interrupt it; Start can then perform its normal synchronous transition.
+// Like ResolveTask, it waits as long as ctx allows.
 type StartPreparer interface {
 	PrepareContext(ctx context.Context, req *base.Request, opts *base.Options) error
 }

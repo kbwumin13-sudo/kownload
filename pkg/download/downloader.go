@@ -1730,7 +1730,10 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.dataLock.RUnlock()
 		if resolveMeta.Res == nil {
 			var resolveErr error
-			if resolver, ok := task.fetcher.(fetcher.ContextResolver); ok {
+			if resolver, ok := task.fetcher.(fetcher.TaskResolver); ok {
+				// A created task has no resolve deadline; Pause and Delete end the wait.
+				resolveErr = resolver.ResolveTask(runCtx, resolveMeta.Req, resolveMeta.Opts)
+			} else if resolver, ok := task.fetcher.(fetcher.ContextResolver); ok {
 				resolveErr = resolver.ResolveContext(runCtx, resolveMeta.Req, resolveMeta.Opts)
 			} else {
 				resolveErr = task.fetcher.Resolve(resolveMeta.Req, resolveMeta.Opts)

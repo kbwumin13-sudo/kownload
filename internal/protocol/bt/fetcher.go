@@ -32,9 +32,17 @@ var (
 	closeCtx    context.Context
 	closeFunc   func()
 	torrentRefs = make(map[*torrent.Torrent]*torrentRef)
+	// configureClient lets tests keep every client this package creates off
+	// the network. Production leaves it nil.
+	configureClient func(*torrent.ClientConfig)
 )
 
-const metadataTimeout = 45 * time.Second
+// resolveTimeout bounds only the interactive resolve behind the create panel,
+// so a magnet nobody seeds cannot spin there forever. Created tasks and seeding
+// wait for metadata until they are paused, deleted or shut down.
+var resolveTimeout = 45 * time.Second
+
+var errMetadataNotReady = errors.New("种子信息尚未就绪")
 
 type metadataResolveError struct{ cause error }
 
@@ -104,6 +112,9 @@ func (f *Fetcher) initClientLocked() (err error) {
 	cfg.HTTPProxy = f.ctl.GetProxy(f.meta.Req.Proxy)
 	dnsResolver := &DnsCacheResolver{RefreshTimeout: 5 * time.Minute}
 	cfg.TrackerDialContext = dnsResolver.DialContext
+	if configureClient != nil {
+		configureClient(cfg)
+	}
 	client, err = torrent.NewClient(cfg)
 	if err != nil {
 		return
@@ -118,55 +129,75 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 	return f.ResolveContext(context.Background(), req, opts)
 }
 
+// ResolveContext is the interactive resolve: it gives up after resolveTimeout.
 func (f *Fetcher) ResolveContext(parent context.Context, req *base.Request, opts *base.Options) error {
-	ctx, cancel := context.WithTimeout(parent, metadataTimeout)
+	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
 	defer cancel()
-	f.opMu.Lock()
-	defer f.opMu.Unlock()
+	return f.resolve(ctx, cancel, req, opts)
+}
+
+// ResolveTask resolves a created task, such as a magnet added for direct
+// download. Finding a peer that has the metadata can take minutes, so there is
+// no deadline: Pause (ctx or CancelResolve) and Delete (Close) end the wait.
+func (f *Fetcher) ResolveTask(parent context.Context, req *base.Request, opts *base.Options) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	return f.resolve(ctx, cancel, req, opts)
+}
+
+func (f *Fetcher) resolve(ctx context.Context, cancel context.CancelFunc, req *base.Request, opts *base.Options) error {
 	f.setResolveCancel(cancel)
 	defer f.setResolveCancel(nil)
+	f.opMu.Lock()
 	f.meta.Req = req
 	f.meta.Opts = opts
 	if f.meta.Opts == nil {
 		f.meta.Opts = &base.Options{}
 	}
-	if err := f.addTorrent(ctx, req); err != nil {
+	t, err := f.acquireLocked(ctx, req)
+	f.opMu.Unlock()
+	if err != nil {
 		return err
 	}
-	f.updateRes()
-	return nil
+	return f.awaitInfo(ctx, t, f.updateRes)
 }
 
-func (f *Fetcher) PrepareContext(ctx context.Context, req *base.Request, opts *base.Options) error {
+// PrepareContext restores a task whose metadata is already persisted. A magnet
+// task fetches its info from peers again, without a deadline.
+func (f *Fetcher) PrepareContext(parent context.Context, req *base.Request, opts *base.Options) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	f.setResolveCancel(cancel)
+	defer f.setResolveCancel(nil)
 	f.opMu.Lock()
-	defer f.opMu.Unlock()
 	if f.torrentReady.Load() {
+		f.opMu.Unlock()
 		return nil
+	}
+	if f.torrentDropCtx.Err() != nil {
+		f.opMu.Unlock()
+		return context.Canceled
 	}
 	f.meta.Req = req
 	f.meta.Opts = opts
-	return f.prepareLocked(ctx)
-}
-
-func (f *Fetcher) prepareLocked(parent context.Context) error {
-	if f.torrentDropCtx.Err() != nil {
-		return context.Canceled
+	t, err := f.acquireLocked(ctx, req)
+	f.opMu.Unlock()
+	if err != nil {
+		return err
 	}
-	if !f.torrentReady.Load() {
-		ctx, cancel := context.WithTimeout(parent, metadataTimeout)
-		defer cancel()
-		f.setResolveCancel(cancel)
-		defer f.setResolveCancel(nil)
-		return f.addTorrent(ctx, f.meta.Req)
-	}
-	return nil
+	return f.awaitInfo(ctx, t, nil)
 }
 
 func (f *Fetcher) Start() (err error) {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
-	if err = f.prepareLocked(context.Background()); err != nil {
-		return
+	if f.torrentDropCtx.Err() != nil {
+		return context.Canceled
+	}
+	// The downloader resolves or prepares first, without its task locks. Start
+	// runs under those locks, so it must never wait for peers.
+	if !f.torrentReady.Load() {
+		return errMetadataNotReady
 	}
 
 	files := f.torrent.Files()
@@ -412,17 +443,22 @@ func (f *Fetcher) updateRes() {
 	}
 }
 
-func (f *Fetcher) Upload() (err error) {
+// Upload resumes seeding a finished task. A magnet task fetches its info from
+// peers again; that wait has no deadline and runs in the background, because
+// the downloader calls Upload while holding the task's locks. Close or client
+// shutdown ends it.
+func (f *Fetcher) Upload() error {
 	f.opMu.Lock()
 	defer f.opMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
-	defer cancel()
-	f.setResolveCancel(cancel)
-	defer f.setResolveCancel(nil)
-	if err = f.addTorrent(ctx, f.meta.Req); err != nil {
-		return
+	t, err := f.acquireLocked(f.torrentDropCtx, f.meta.Req)
+	if err != nil {
+		return err
 	}
-	go f.doUpload(true)
+	go func() {
+		if f.awaitInfo(f.torrentDropCtx, t, nil) == nil {
+			f.doUpload(true)
+		}
+	}()
 	return nil
 }
 
@@ -512,7 +548,10 @@ func (f *Fetcher) WaitUpload() (err error) {
 	return nil
 }
 
-func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error) {
+// acquireLocked adds req's torrent to the shared client and takes this
+// fetcher's reference to it. The caller holds opMu; waiting for the metadata
+// is left to awaitInfo.
+func (f *Fetcher) acquireLocked(ctx context.Context, req *base.Request) (t *torrent.Torrent, err error) {
 	defer func() {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			err = &metadataResolveError{cause: err}
@@ -522,7 +561,7 @@ func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error)
 		return
 	}
 	if f.torrentDropCtx.Err() != nil {
-		return context.Canceled
+		return nil, context.Canceled
 	}
 	if err = base.ParseReqExtra[bt.ReqExtra](req); err != nil {
 		return
@@ -561,12 +600,12 @@ func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error)
 		// Hotfix for https://github.com/anacrolix/torrent/issues/992, ignore "expected EOF" error
 		// TODO remove this after the issue is fixed
 		if err != nil && !strings.Contains(err.Error(), "expected EOF") {
-			return err
+			return nil, err
 		}
 
 		info, er := metaInfo.UnmarshalInfo()
 		if er != nil {
-			return er
+			return nil, er
 		}
 
 		if info.Private != nil && *info.Private {
@@ -593,30 +632,26 @@ func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error)
 		},
 	})
 	var added bool
-	f.torrent, added, err = client.AddTorrentSpec(spec)
+	t, added, err = client.AddTorrentSpec(spec)
 	if err != nil {
 		if len(client.Torrents()) == 0 {
 			_ = closeClientLocked()
 		}
 		lock.Unlock()
-		return
+		return nil, err
 	}
-	ref := torrentRefs[f.torrent]
+	ref := torrentRefs[t]
 	if ref == nil {
 		ref = &torrentRef{owned: added}
-		torrentRefs[f.torrent] = ref
+		torrentRefs[t] = ref
 	}
 	ref.count++
 	// Acquire first: a repeated resolve/upload of the same hash must retain
 	// its metadata even if this fetcher was previously the only owner.
 	releaseTorrentRefLocked(f.heldTorrent)
-	f.heldTorrent = f.torrent
+	f.heldTorrent = t
+	f.torrent = t
 	lock.Unlock()
-	defer func() {
-		if err != nil {
-			_ = f.releaseTorrent()
-		}
-	}()
 
 	// Do not add external tracker to a private torrent.
 	if !privateTorrent {
@@ -640,26 +675,61 @@ func (f *Fetcher) addTorrent(ctx context.Context, req *base.Request) (err error)
 			for tracker := range trackers {
 				announceList = append(announceList, []string{tracker})
 			}
-			f.torrent.AddTrackers(announceList)
+			t.AddTrackers(announceList)
 		}
 	}
+	return t, nil
+}
+
+// awaitInfo waits for t's metadata without holding opMu, so Pause, Close and
+// Start never queue behind a slow magnet; peers found meanwhile stay with t.
+// On success ready runs under opMu before the fetcher is marked ready, so
+// Wait and Progress never see half-written metadata. On failure this
+// fetcher's reference is released.
+func (f *Fetcher) awaitInfo(ctx context.Context, t *torrent.Torrent, ready func()) (err error) {
+	defer func() {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			err = &metadataResolveError{cause: err}
+		}
+	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
 	case <-f.torrentDropCtx.Done():
-		return context.Canceled
-	case <-f.torrent.Closed():
-		return errors.New("torrent closed while resolving metadata")
-	case <-f.torrent.GotInfo():
+	case <-t.Closed():
+	case <-t.GotInfo():
 	}
-	if err = ctx.Err(); err != nil {
-		return
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	// Several cases can be ready at once: Close also drops the torrent, and a
+	// cancellation racing with the metadata wins.
+	switch {
+	case ctx.Err() != nil:
+		err = ctx.Err()
+	case f.torrentDropCtx.Err() != nil:
+		err = context.Canceled
+	case f.heldTorrent != t:
+		// A newer acquisition by this fetcher replaced the reference.
+		err = context.Canceled
+	default:
+		select {
+		case <-t.GotInfo():
+		default:
+			err = errors.New("torrent closed while resolving metadata")
+		}
 	}
-	if f.torrentDropCtx.Err() != nil {
-		return context.Canceled
+	if f.heldTorrent != t {
+		// Close or the newer acquisition already released this reference.
+		return err
+	}
+	if err != nil {
+		_ = f.releaseTorrent()
+		return err
+	}
+	if ready != nil {
+		ready()
 	}
 	f.torrentReady.Store(true)
-	return
+	return nil
 }
 
 func (f *Fetcher) seedRadio() float64 {
