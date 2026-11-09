@@ -70,8 +70,13 @@ Protocol? _parseProtocol(String url) {
 }
 
 class _CreateViewState extends State<CreateView> {
-  Future<String> _createTask(CreateTask task) =>
-      (widget.taskCreator ?? createTask)(task);
+  final _createdIds = <String>[];
+  Future<String> _createTask(CreateTask task) async {
+    final id = await (widget.taskCreator ?? createTask)(task);
+    if (MacPanel.isBrowserInput(_panelRequest)) _createdIds.add(id);
+    return id;
+  }
+
   CreateController get controller => Get.find<CreateController>();
   NetdiskApi? get netdiskApi => widget.netdiskApi;
   NetdiskBrowserTool? get netdiskBrowserTool => widget.netdiskBrowserTool;
@@ -1242,6 +1247,9 @@ class _CreateViewState extends State<CreateView> {
       await Get.rootDelegate.offNamed(Routes.TASK);
       return;
     }
+    final browser = MacPanel.isBrowserInput(_panelRequest);
+    final ids = _createdIds.toList();
+    _createdIds.clear();
     _urlController.clear();
     _originalRequest = null;
     _credentialOrigin = null;
@@ -1250,7 +1258,11 @@ class _CreateViewState extends State<CreateView> {
     controller.clearFileDataUri();
     controller.showAdvanced.value = false;
     _resetTaskParameters();
-    MacPanel.submitted();
+    if (browser && ids.isNotEmpty) {
+      await MacPanel.showBrowserResult(ids, null);
+    } else {
+      MacPanel.submitted();
+    }
     if (Get.isRegistered<MacTaskListController>()) {
       Get.find<MacTaskListController>().getTasksState();
     }
@@ -2324,8 +2336,10 @@ class _CreateViewState extends State<CreateView> {
                                         selectFiles: [],
                                         extra: optExtra));
                               }).toList();
-                              await createTaskBatch(
+                              final ids = await createTaskBatch(
                                   CreateTaskBatch(reqs: reqs));
+                              if (MacPanel.isBrowserInput(_panelRequest))
+                                _createdIds.addAll(ids);
                             } else {
                               await _createTask(CreateTask(
                                   rid: rr.id,

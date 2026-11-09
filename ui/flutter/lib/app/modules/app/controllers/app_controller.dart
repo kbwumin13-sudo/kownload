@@ -366,6 +366,10 @@ class AppController extends GetxController with WindowListener, TrayListener {
         ),
         showCreate: (params) async {
           final task = CreateTask.fromJson(params);
+          if (Util.isMacos()) {
+            await MacPanel.showPanel(task: task, fromBrowser: true);
+            return;
+          }
           await windowManager.show();
           _handleToCreate0(task);
         },

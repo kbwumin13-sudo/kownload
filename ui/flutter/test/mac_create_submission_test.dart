@@ -48,6 +48,7 @@ class _Tasks extends MacTaskListController {
   // ignore: must_call_super
   @override
   void onInit() {}
+  // ignore: must_call_super
   @override
   void onClose() {}
 }
@@ -120,6 +121,64 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
     expect(MacPanel.visible.value, isTrue);
     expect(tester.takeException(), isNull);
+  });
+  testWidgets(
+      'browser prefill stays on ongoing after confirm and shows submit errors',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    Database.instance.box = _Box()..onboardingCompleted = true;
+    final app = _App();
+    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+    app.downloaderConfig.value.extra.defaultDirectDownload = true;
+    Get.put<AppController>(app);
+    Get.put(CreateController());
+    MacPanel.presentation.value = 'panel';
+    MacPanel.browserResult.value = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await MacPanel.showPanel(
+        task: CreateTask(req: Request(url: 'https://fixture.test/confirmed')),
+        fromBrowser: true);
+    await tester.binding.setSurfaceSize(const Size(640, 760));
+    var reject = false;
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      MacPanel.browserResult.value = null;
+      MacPanel.incoming.value = null;
+      MacPanel.cancelAutoHide();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+      Get.reset();
+      Get.routerDelegate = null;
+      Get.routeInformationParser = null;
+      await tester.binding.setSurfaceSize(null);
+    });
+    await tester.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(
+          name: '/',
+          page: () => CreateView(taskCreator: (_) async {
+                if (reject) throw StateError('测试提交失败');
+                return 'browser-confirmed';
+              })),
+    ]));
+    await tester.pumpAndSettle();
+    expect(find.text('https://fixture.test/confirmed'), findsOneWidget);
+    await tester.tap(find.byTooltip('开始下载'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 3));
+    expect(MacPanel.visible.value, isTrue);
+    expect(MacPanel.browserResult.value!.taskIds, ['browser-confirmed']);
+    expect(MacPanel.notice.value, isNull);
+    reject = true;
+    await MacPanel.showPanel(
+        task: CreateTask(req: Request(url: 'https://fixture.test/fail')),
+        fromBrowser: true);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('开始下载'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('测试提交失败'), findsOneWidget);
+    expect(MacPanel.visible.value, isTrue);
   });
   testWidgets('magnet timeout preserves the draft and allows another resolve',
       (tester) async {

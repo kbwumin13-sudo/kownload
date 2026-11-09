@@ -25,6 +25,9 @@ class MacPanel {
   static final hotKeyError = ValueNotifier<String?>(null);
   static final notice = ValueNotifier<String?>(null);
   static final browserResult = ValueNotifier<BrowserPanelResult?>(null);
+  static final _browserInputs = Expando<bool>('browser input');
+  static bool isBrowserInput(CreateTask? task) =>
+      task != null && _browserInputs[task] == true;
   static double _height = 260;
   static double get height => _height;
   static Timer? _dismiss;
@@ -142,11 +145,15 @@ class MacPanel {
     return true;
   }
 
-  static Future<void> showPanel({CreateTask? task}) async {
+  static Future<void> showPanel(
+      {CreateTask? task, bool fromBrowser = false}) async {
     cancelAutoHide();
     if (presentation.value == 'settings') await rememberSettingsSize();
     presentation.value = 'panel';
-    if (task != null) incoming.value = task;
+    if (task != null) {
+      _browserInputs[task] = fromBrowser;
+      incoming.value = task;
+    }
     await _invoke('setPresentation',
         {'mode': 'panel', 'width': 640, 'height': _height, 'show': true});
     visible.value = true;
