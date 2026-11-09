@@ -3,6 +3,7 @@ package nativehost
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -127,6 +128,26 @@ func TestLegacyEnvelopeAndValidation(t *testing.T) {
 	f.wakeError = errors.New("private")
 	if r := runFixture(f, "create"); r.Error != "wakeup_failed" {
 		t.Fatal(r)
+	}
+}
+
+func TestOfficialExtensionBase64Create(t *testing.T) {
+	params := `{"req":{"url":"https://fixture.test/file","extra":{"header":{"Accept-Encoding":"identity"}}}}`
+	for _, silent := range []bool{false, true} {
+		f := &fixture{status: 200, body: `{"code":0,"data":"t1","submission":{"state":"created","taskIds":["t1"]}}`}
+		encoded, _ := json.Marshal(base64.StdEncoding.EncodeToString([]byte(params)))
+		body, _ := json.Marshal(Request{Method: "create", Meta: map[string]any{"silent": silent}, Params: encoded})
+		r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), body)
+		if r.Code != 0 || f.calls != 1 || string(f.last.Params) != params || f.last.Meta["silent"] != silent {
+			t.Fatalf("official request not forwarded: %+v", r)
+		}
+	}
+	for _, params := range []string{`"invalid*base64"`, `"bnVsbA=="`, `"W10="`, `"/w=="`} {
+		f := &fixture{}
+		r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), []byte(`{"method":"create","params":`+params+`}`))
+		if r.Error != "invalid_request" || f.calls != 0 {
+			t.Fatalf("invalid legacy payload forwarded: %+v", r)
+		}
 	}
 }
 

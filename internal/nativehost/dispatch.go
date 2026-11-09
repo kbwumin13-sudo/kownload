@@ -2,6 +2,7 @@ package nativehost
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/url"
 	"regexp"
@@ -81,6 +82,19 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 		}
 		return success
 	case "create", "forward":
+		// The official Gopeed extension sends create params as a base64 JSON
+		// string. Normalize this legacy envelope before validating/forwarding;
+		// forward requests still require the structured REST envelope.
+		if req.Method == "create" {
+			var encoded string
+			if json.Unmarshal(req.Params, &encoded) == nil {
+				decoded, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil || !utf8.Valid(decoded) {
+					return failure(req.OperationID, "invalid_request", nil, nil)
+				}
+				req.Params = decoded
+			}
+		}
 		var object map[string]json.RawMessage
 		if json.Unmarshal(req.Params, &object) != nil || object == nil {
 			return failure(req.OperationID, "invalid_request", nil, nil)
