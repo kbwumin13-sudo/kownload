@@ -15,20 +15,26 @@ typedef BrowserForward = Future<Response<dynamic>> Function(
 class BrowserRpcReply {
   final int status;
   final Map<String, dynamic> body;
-  const BrowserRpcReply(this.status, this.body);
+  // Local UI detail only. Never serialized into native messaging receipts.
+  final String? panelError;
+  const BrowserRpcReply(this.status, this.body, {this.panelError});
   factory BrowserRpcReply.failure(
     String? id,
     String kind, {
     int status = 500,
     int code = 1000,
+    String? panelError,
   }) =>
-      BrowserRpcReply(status, {
-        'code': code,
-        'msg': '请求未完成（$kind）',
-        'data': null,
-        if (id != null && _operationId.hasMatch(id)) 'operationId': id,
-        'error': kind,
-      });
+      BrowserRpcReply(
+          status,
+          {
+            'code': code,
+            'msg': '请求未完成（$kind）',
+            'data': null,
+            if (id != null && _operationId.hasMatch(id)) 'operationId': id,
+            'error': kind,
+          },
+          panelError: panelError);
 }
 
 class _CreateReceipt {
@@ -44,12 +50,51 @@ class BrowserSubmissionRpc {
   final BrowserForward send;
   final Future<void> Function(Map<String, dynamic>) showCreate;
   final void Function(Map<String, dynamic>) log;
+  final Future<void> Function(List<String> taskIds, String? error)? showResult;
   final _creates = <String, _CreateReceipt>{};
   BrowserSubmissionRpc({
     required this.send,
     required this.showCreate,
     required this.log,
+    this.showResult,
   });
+
+  static bool _creating(Map<String, dynamic> body) =>
+      body['method'] == 'POST' &&
+      const ['/api/v1/tasks', '/api/v1/tasks/batch']
+          .contains(Uri.tryParse(body['path'] as String? ?? '')?.path);
+
+  Future<BrowserRpcReply> _present(BrowserRpcReply reply) async {
+    final submission = reply.body['submission'];
+    final ids = submission is Map && submission['state'] == 'created'
+        ? (submission['taskIds'] as List).cast<String>()
+        : <String>[];
+    try {
+      await showResult?.call(
+          ids,
+          ids.isEmpty
+              ? reply.panelError ?? '添加下载失败：${reply.body['msg']}'
+              : null);
+    } catch (_) {
+      // A presentation failure must not change an authoritative receipt.
+      log({'stage': 'flutter_panel_failed'});
+    }
+    return reply;
+  }
+
+  static String? _localError(dynamic value) {
+    final message = value is Map ? value['msg'] : null;
+    if (message is! String || message.trim().isEmpty) return null;
+    // Backend errors can contain signed URLs or request headers. Show the
+    // cause locally without copying credentials into the visible panel.
+    final safe = message
+        .replaceAll(RegExp(r'https?://[^\s\x22\x27]+'), '[链接]')
+        .replaceAll(
+            RegExp(r'(cookie|authorization)\s*[:=][^\r\n]*',
+                caseSensitive: false),
+            '[凭据]');
+    return '添加下载失败：${safe.length > 240 ? safe.substring(0, 240) : safe}';
+  }
 
   void _trace(
     String? id,
@@ -146,11 +191,13 @@ class BrowserSubmissionRpc {
       }
       return _create(params, operationId, confirm, watch, domain);
     } on FormatException {
-      return BrowserRpcReply.failure(
+      final reply = BrowserRpcReply.failure(
         operationId,
         'invalid_request',
         status: 400,
+        panelError: '添加下载失败：下载请求格式无效。',
       );
+      return confirm ? reply : await _present(reply);
     } catch (_) {
       _trace(
         operationId,
@@ -182,16 +229,18 @@ class BrowserSubmissionRpc {
           'submission': {'state': 'accepted', 'taskIds': <String>[]},
         });
       }
-      return await _forward(
+      return await _present(await _forward(
         {'method': 'POST', 'path': '/api/v1/tasks', 'data': params},
         id,
         const Duration(seconds: 10),
         watch,
         domain,
-      );
+      ));
     } catch (_) {
       _trace(id, 'flutter_create_failed', watch, domain, 'request_failed');
-      return BrowserRpcReply.failure(id, 'request_failed');
+      final reply = BrowserRpcReply.failure(id, 'request_failed',
+          panelError: '添加下载失败：无法连接下载服务，请稍后重试。');
+      return confirm ? reply : await _present(reply);
     }
   }
 
@@ -226,13 +275,14 @@ class BrowserSubmissionRpc {
         throw const FormatException('invalid_request');
       }
       _trace(operationId, 'flutter_forward_received', watch, domain);
-      return await _forward(
+      final reply = await _forward(
         body,
         operationId,
         const Duration(seconds: 60),
         watch,
         domain,
       );
+      return _creating(body) ? await _present(reply) : reply;
     } on FormatException {
       return BrowserRpcReply.failure(
         operationId,
@@ -247,7 +297,9 @@ class BrowserSubmissionRpc {
         domain,
         'request_failed',
       );
-      return BrowserRpcReply.failure(operationId, 'request_failed');
+      final reply = BrowserRpcReply.failure(operationId, 'request_failed',
+          panelError: '添加下载失败：无法连接下载服务，请稍后重试。');
+      return _creating(body) ? await _present(reply) : reply;
     }
   }
 
@@ -314,6 +366,7 @@ class BrowserSubmissionRpc {
         kind,
         status: status,
         code: code ?? 1000,
+        panelError: _localError(value),
       );
     }
     final envelope = Map<String, dynamic>.from(value);

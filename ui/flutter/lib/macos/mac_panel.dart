@@ -6,6 +6,13 @@ import '../api/model/create_task.dart';
 import '../app/routes/app_pages.dart';
 import '../database/database.dart';
 
+class BrowserPanelResult {
+  final List<String> taskIds;
+  final String? error;
+  BrowserPanelResult(List<String> taskIds, this.error)
+      : taskIds = List.unmodifiable(taskIds);
+}
+
 /// One native window and one engine serve both the launcher and management UI.
 class MacPanel {
   static const channel = MethodChannel('gopeed/macos_panel');
@@ -17,9 +24,11 @@ class MacPanel {
   static final hotKeyLabel = ValueNotifier<String>('⌃⌥D');
   static final hotKeyError = ValueNotifier<String?>(null);
   static final notice = ValueNotifier<String?>(null);
+  static final browserResult = ValueNotifier<BrowserPanelResult?>(null);
   static double _height = 260;
   static double get height => _height;
   static Timer? _dismiss;
+  static Future<void>? _browserShow;
   static bool _initialized = false;
   static bool _settingsInitialized = false;
   static int _transientCount = 0;
@@ -79,6 +88,7 @@ class MacPanel {
     channel.setMethodCallHandler((call) async {
       if (call.method == 'visibility') {
         visible.value = call.arguments['visible'] == true;
+        if (!visible.value) browserResult.value = null;
       } else if (call.method == 'focusInput') {
         focusRequests.value++;
       } else if (call.method == 'command') {
@@ -143,6 +153,19 @@ class MacPanel {
     focusRequests.value++;
   }
 
+  /// Browser submissions remain visible until the user dismisses the panel.
+  /// Updating an already visible panel avoids reapplying the native window
+  /// presentation (and stealing focus again for each task in a batch).
+  static Future<void> showBrowserResult(
+      List<String> taskIds, String? error) async {
+    cancelAutoHide();
+    browserResult.value = BrowserPanelResult(taskIds, error);
+    if (!visible.value || presentation.value != 'panel') {
+      await (_browserShow ??=
+          showPanel().whenComplete(() => _browserShow = null));
+    }
+  }
+
   static Future<void> showSettings({String section = 'general'}) async {
     cancelAutoHide();
     settingsSection.value = section;
@@ -195,6 +218,7 @@ class MacPanel {
 
   static Future<void> hide() async {
     cancelAutoHide();
+    browserResult.value = null;
     await _invoke('hide');
     visible.value = false;
   }

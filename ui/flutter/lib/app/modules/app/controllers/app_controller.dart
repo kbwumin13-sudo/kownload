@@ -42,6 +42,7 @@ import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
 import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_onboarding.dart';
+import '../../task/controllers/task_controller.dart';
 
 const unixSocketPath = 'gopeed.sock';
 
@@ -369,6 +370,13 @@ class AppController extends GetxController with WindowListener, TrayListener {
           _handleToCreate0(task);
         },
         log: (event) => logger.i(jsonEncode(event)),
+        showResult: (ids, error) async {
+          if (!Util.isMacos() || !MacOnboarding.completed) return;
+          if (Get.isRegistered<MacTaskListController>()) {
+            unawaited(Get.find<MacTaskListController>().getTasksState());
+          }
+          await MacPanel.showBrowserResult(ids, error);
+        },
       );
       await startRpcServer({
         "/create": (ctx) => browserRpc.handle(
@@ -387,7 +395,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
   /// The native host has a 60-second deadline. Do not leave a task submission
   /// pending while the user reads the tutorial, then create it after a timeout.
   Future<Response> forwardBrowserRequest(Map<String, dynamic> body,
-      {String? operationId, Duration? receiveTimeout, bool preserveStatus = false}) async {
+      {String? operationId,
+      Duration? receiveTimeout,
+      bool preserveStatus = false}) async {
     final method = (body['method'] as String?)?.toUpperCase() ?? 'GET';
     final target = (body['path'] as String?) ?? '/';
     final endpoint = Uri.tryParse(target)?.path.replaceAll(RegExp(r'/+$'), '');
@@ -403,7 +413,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
         method: method,
         data: body['data'],
         queryParameters: body['query'] as Map<String, dynamic>?,
-        operationId: operationId, receiveTimeout: receiveTimeout, preserveStatus: preserveStatus);
+        operationId: operationId,
+        receiveTimeout: receiveTimeout,
+        preserveStatus: preserveStatus);
   }
 
   Future<void> _showIncomingDownloadSetup() async {

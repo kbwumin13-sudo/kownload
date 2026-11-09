@@ -92,11 +92,24 @@ class _CreateViewState extends State<CreateView> {
     if (Util.isMacos()) {
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
+      MacPanel.browserResult.addListener(_receiveBrowserResult);
       _panelRequest = MacPanel.incoming.value;
       _pendingWorker = ever(Get.find<AppController>().pendingUpdateTask, (_) {
         if (mounted) setState(() => _initialNetdiskHandled = false);
       });
     }
+  }
+
+  void _receiveBrowserResult() {
+    final result = MacPanel.browserResult.value;
+    if (!mounted) return;
+    setState(() {
+      if (result != null) {
+        _panelShowCompleted.value = false;
+        _panelError.value = result.error;
+        controller.showAdvanced.value = false;
+      }
+    });
   }
 
   void _focusInput() {
@@ -134,6 +147,7 @@ class _CreateViewState extends State<CreateView> {
     _pendingWorker?.dispose();
     MacPanel.focusRequests.removeListener(_focusInput);
     MacPanel.incoming.removeListener(_receiveInput);
+    MacPanel.browserResult.removeListener(_receiveBrowserResult);
     _inputFocus.dispose();
     for (final field in [
       _urlController,
@@ -1325,10 +1339,16 @@ class _CreateViewState extends State<CreateView> {
                       allTasks.where((t) => t.status == Status.done).length;
                   final active = allTasks.length - completed;
                   final showCompleted = _panelShowCompleted.value;
-                  final tasks = allTasks
-                      .where((t) => (t.status == Status.done) == showCompleted)
-                      .take(3)
-                      .toList();
+                  final recent =
+                      MacPanel.browserResult.value?.taskIds ?? const <String>[];
+                  final tasks = <Task>[
+                    if (!showCompleted)
+                      for (final id in recent)
+                        ...allTasks.where((t) => t.id == id),
+                    ...allTasks.where((t) =>
+                        (showCompleted || !recent.contains(t.id)) &&
+                        (t.status == Status.done) == showCompleted),
+                  ].take(3).toList();
                   final error = _panelError.value;
                   final hasInput = input.text.trim().isNotEmpty ||
                       controller.fileDataUri.isNotEmpty ||

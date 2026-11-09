@@ -3,12 +3,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:get/get.dart';
+import 'package:get/get.dart' hide Progress;
 import 'package:hive/hive.dart';
 import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/create_task.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/options.dart';
+import 'package:gopeed/api/model/task.dart';
+import 'package:gopeed/api/model/meta.dart';
+import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
 import 'package:gopeed/api/model/resolve_result.dart';
 import 'package:gopeed/api/model/resolve_task.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
@@ -40,7 +43,84 @@ class _Box extends Fake implements Box {
   }
 }
 
+class _Tasks extends MacTaskListController {
+  // This fixture has no polling timer.
+  // ignore: must_call_super
+  @override
+  void onInit() {}
+  @override
+  void onClose() {}
+}
+
+Task _task(String id, Status status) => Task(
+      id: id,
+      name: '$id.bin',
+      status: status,
+      uploading: false,
+      meta:
+          Meta(req: Request(url: 'https://fixture.test/$id'), opts: Options()),
+      progress: Progress(
+          used: 0, speed: 0, downloaded: 0, uploadSpeed: 0, uploaded: 0),
+      createdAt: DateTime(2026),
+      updatedAt: DateTime(2026),
+    );
+
 void main() {
+  testWidgets(
+      'browser result selects ongoing and reveals queued or completed tasks',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    Database.instance.box = _Box()..onboardingCompleted = true;
+    final app = _App();
+    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+    Get.put<AppController>(app);
+    Get.put(CreateController());
+    final tasks = Get.put<MacTaskListController>(_Tasks());
+    tasks.tasks.assignAll([
+      for (var i = 0; i < 3; i++) _task('existing-$i', Status.running),
+      _task('new-queued', Status.wait),
+      _task('new-done', Status.done),
+    ]);
+    MacPanel.presentation.value = 'panel';
+    MacPanel.incoming.value = null;
+    MacPanel.browserResult.value = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await tester.binding.setSurfaceSize(const Size(640, 760));
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      MacPanel.browserResult.value = null;
+      MacPanel.cancelAutoHide();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+      Get.reset();
+      Get.routerDelegate = null;
+      Get.routeInformationParser = null;
+      await tester.binding.setSurfaceSize(null);
+    });
+    await tester.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(name: '/', page: () => const CreateView()),
+    ]));
+    await tester.pumpAndSettle();
+    expect(find.text('new-queued.bin'), findsNothing);
+    await tester.tap(find.textContaining('已完成').first);
+    await tester.pumpAndSettle();
+    expect(find.text('new-done.bin'), findsOneWidget);
+    await MacPanel.showBrowserResult(['new-queued'], null);
+    await tester.pumpAndSettle();
+    expect(find.text('new-queued.bin'), findsOneWidget);
+    expect(find.text('new-done.bin'), findsNothing);
+    await MacPanel.showBrowserResult(['new-done'], null);
+    await tester.pumpAndSettle();
+    expect(find.text('new-done.bin'), findsOneWidget);
+    await MacPanel.showBrowserResult([], '添加下载失败：测试原因');
+    await tester.pumpAndSettle();
+    expect(find.text('添加下载失败：测试原因'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 3));
+    expect(MacPanel.visible.value, isTrue);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('magnet timeout preserves the draft and allows another resolve',
       (tester) async {
     if (!Platform.isMacOS) return;

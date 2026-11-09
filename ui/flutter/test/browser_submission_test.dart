@@ -24,6 +24,87 @@ class _RealHttp extends HttpOverrides {}
 void main() {
   const body =
       '{"req":{"url":"https://fixture.test/file?signature=synthetic"}}';
+  test('browser results show once per silent receipt and once per batch',
+      () async {
+    final results = <List<String>>[];
+    final errors = <String?>[];
+    var batch = false;
+    final rpc = BrowserSubmissionRpc(
+      send: (_, id, __) async => response(batch
+          ? {
+              'code': 0,
+              'data': ['a', 'b'],
+              'submission': {
+                'state': 'created',
+                'taskIds': ['a', 'b']
+              },
+            }
+          : created(id!)),
+      showCreate: (_) async {},
+      log: (_) {},
+      showResult: (ids, error) async {
+        results.add(ids);
+        errors.add(error);
+      },
+    );
+    await rpc.create(body, operationId: 'silent-panel', confirm: false);
+    await rpc.create(body, operationId: 'silent-panel', confirm: false);
+    await rpc.create(body, operationId: 'confirm-panel', confirm: true);
+    expect(results, [
+      ['task-one']
+    ]);
+    batch = true;
+    await rpc.forward({'method': 'POST', 'path': '/api/v1/tasks/batch'});
+    expect(results, [
+      ['task-one'],
+      ['a', 'b']
+    ]);
+    expect(errors, [null, null]);
+    await rpc.forward({'method': 'GET', 'path': '/api/v1/tasks'});
+    expect(results, hasLength(2));
+  });
+  test('local failure cause is shown but not exposed in native receipts',
+      () async {
+    final errors = <String?>[];
+    final rpc = BrowserSubmissionRpc(
+      send: (_, __, ___) async => response({
+        'code': 1000,
+        'msg': 'unsupported protocol https://fixture.test/secret?token=hidden'
+      }),
+      showCreate: (_) async {},
+      log: (_) {},
+      showResult: (ids, error) async {
+        expect(ids, isEmpty);
+        errors.add(error);
+      },
+    );
+    final reply = await rpc.create(body, confirm: false);
+    expect(errors.single, contains('unsupported protocol'));
+    expect(errors.single, isNot(contains('hidden')));
+    expect(jsonEncode(reply.body), isNot(contains('unsupported')));
+    final disconnected = BrowserSubmissionRpc(
+      send: (_, __, ___) async => throw StateError('socket unavailable'),
+      showCreate: (_) async {},
+      log: (_) {},
+      showResult: (ids, error) async {
+        errors.add(error);
+      },
+    );
+    await disconnected.create(body, confirm: false);
+    expect(errors.last, contains('无法连接下载服务'));
+  });
+  test('panel failure cannot change a created receipt', () async {
+    final rpc = BrowserSubmissionRpc(
+      send: (_, id, __) async => response(created(id!)),
+      showCreate: (_) async {},
+      log: (_) {},
+      showResult: (_, __) async => throw StateError('window unavailable'),
+    );
+    expect(
+        (await rpc.create(body, operationId: 'panel-failure', confirm: false))
+            .body['submission']['state'],
+        'created');
+  });
   test('accepted coalesces confirmation and logs domains only', () async {
     var opens = 0;
     final events = <Map<String, dynamic>>[];
