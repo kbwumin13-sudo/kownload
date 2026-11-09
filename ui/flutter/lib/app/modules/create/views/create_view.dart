@@ -73,7 +73,7 @@ class _CreateViewState extends State<CreateView> {
   final _createdIds = <String>[];
   Future<String> _createTask(CreateTask task) async {
     final id = await (widget.taskCreator ?? createTask)(task);
-    if (MacPanel.isBrowserInput(_panelRequest)) _createdIds.add(id);
+    if (Util.isMacos()) _createdIds.add(id);
     return id;
   }
 
@@ -97,7 +97,7 @@ class _CreateViewState extends State<CreateView> {
     if (Util.isMacos()) {
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
-      MacPanel.browserResult.addListener(_receiveBrowserResult);
+      MacPanel.taskResult.addListener(_receiveTaskResult);
       _panelRequest = MacPanel.incoming.value;
       _pendingWorker = ever(Get.find<AppController>().pendingUpdateTask, (_) {
         if (mounted) setState(() => _initialNetdiskHandled = false);
@@ -105,8 +105,8 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
-  void _receiveBrowserResult() {
-    final result = MacPanel.browserResult.value;
+  void _receiveTaskResult() {
+    final result = MacPanel.taskResult.value;
     if (!mounted) return;
     setState(() {
       if (result != null) {
@@ -152,7 +152,7 @@ class _CreateViewState extends State<CreateView> {
     _pendingWorker?.dispose();
     MacPanel.focusRequests.removeListener(_focusInput);
     MacPanel.incoming.removeListener(_receiveInput);
-    MacPanel.browserResult.removeListener(_receiveBrowserResult);
+    MacPanel.taskResult.removeListener(_receiveTaskResult);
     _inputFocus.dispose();
     for (final field in [
       _urlController,
@@ -1247,7 +1247,6 @@ class _CreateViewState extends State<CreateView> {
       await Get.rootDelegate.offNamed(Routes.TASK);
       return;
     }
-    final browser = MacPanel.isBrowserInput(_panelRequest);
     final ids = _createdIds.toList();
     _createdIds.clear();
     _urlController.clear();
@@ -1258,8 +1257,8 @@ class _CreateViewState extends State<CreateView> {
     controller.clearFileDataUri();
     controller.showAdvanced.value = false;
     _resetTaskParameters();
-    if (browser && ids.isNotEmpty) {
-      await MacPanel.showBrowserResult(ids, null);
+    if (ids.isNotEmpty) {
+      await MacPanel.showTaskResult(ids, null);
     } else {
       MacPanel.submitted();
     }
@@ -1352,7 +1351,7 @@ class _CreateViewState extends State<CreateView> {
                   final active = allTasks.length - completed;
                   final showCompleted = _panelShowCompleted.value;
                   final recent =
-                      MacPanel.browserResult.value?.taskIds ?? const <String>[];
+                      MacPanel.taskResult.value?.taskIds ?? const <String>[];
                   final tasks = <Task>[
                     if (!showCompleted)
                       for (final id in recent)
@@ -1939,6 +1938,7 @@ class _CreateViewState extends State<CreateView> {
       return;
     }
     controller.isConfirming.value = true;
+    _createdIds.clear();
     _panelError.value = null;
     MacPanel.cancelAutoHide();
     try {
@@ -2338,8 +2338,7 @@ class _CreateViewState extends State<CreateView> {
                               }).toList();
                               final ids = await createTaskBatch(
                                   CreateTaskBatch(reqs: reqs));
-                              if (MacPanel.isBrowserInput(_panelRequest))
-                                _createdIds.addAll(ids);
+                              if (Util.isMacos()) _createdIds.addAll(ids);
                             } else {
                               await _createTask(CreateTask(
                                   rid: rr.id,

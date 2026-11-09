@@ -367,7 +367,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
         showCreate: (params) async {
           final task = CreateTask.fromJson(params);
           if (Util.isMacos()) {
-            await MacPanel.showPanel(task: task, fromBrowser: true);
+            await MacPanel.showPanel(task: task);
             return;
           }
           await windowManager.show();
@@ -379,7 +379,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
           if (Get.isRegistered<MacTaskListController>()) {
             unawaited(Get.find<MacTaskListController>().getTasksState());
           }
-          await MacPanel.showBrowserResult(ids, error);
+          await MacPanel.showTaskResult(ids, error);
         },
       );
       await startRpcServer({

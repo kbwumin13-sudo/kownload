@@ -42,16 +42,16 @@ void main() {
   testWidgets('browser result stays open and visible updates do not flash',
       (tester) async {
     MacPanel.submitted();
-    await MacPanel.showBrowserResult(['a', 'b'], null);
-    expect(MacPanel.browserResult.value!.taskIds, ['a', 'b']);
+    await MacPanel.showTaskResult(['a', 'b'], null);
+    expect(MacPanel.taskResult.value!.taskIds, ['a', 'b']);
     await tester.pump(const Duration(seconds: 3));
     expect(MacPanel.visible.value, isTrue);
     expect(calls.where((c) => c.method == 'hide'), isEmpty);
-    await MacPanel.showBrowserResult([], '失败原因');
-    expect(MacPanel.browserResult.value!.error, '失败原因');
+    await MacPanel.showTaskResult([], '失败原因');
+    expect(MacPanel.taskResult.value!.error, '失败原因');
     expect(calls.where((c) => c.method == 'setPresentation'), hasLength(1));
     await MacPanel.hide();
-    expect(MacPanel.browserResult.value, isNull);
+    expect(MacPanel.taskResult.value, isNull);
   });
   test('conflicting shortcut preserves the working label', () async {
     MacPanel.hotKeyLabel.value = '⌃⌥D';
