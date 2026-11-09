@@ -55,6 +55,9 @@ func TestRefreshStopsBeforeConsumingDirectResponse(t *testing.T) {
 			requests := 0
 			client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 				requests++
+				if r.UserAgent() != "DownloadBrowser/1.0" {
+					t.Fatal("public resolver changed the download User-Agent")
+				}
 				if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
 					t.Fatal("public source received credentials")
 				}
@@ -66,7 +69,7 @@ func TestRefreshStopsBeforeConsumingDirectResponse(t *testing.T) {
 				}
 				return &http.Response{StatusCode: tc.status, Header: http.Header{"Location": []string{tc.location}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 			})}
-			url, err := source.Refresh(context.Background(), client)
+			url, err := source.Refresh(context.Background(), client, "DownloadBrowser/1.0")
 			if (err != nil) != tc.reject {
 				t.Fatalf("refresh error=%v", err)
 			}

@@ -604,3 +604,78 @@ func TestPublicLinkRefreshLimitEndsWithRefusal(t *testing.T) {
 		t.Fatal("refused run changed the file")
 	}
 }
+
+// Mail.ru signs public CDN links for the User-Agent used to obtain them.
+// A valid, freshly issued link still returns 403 when the downloader uses a
+// different agent. Exercise both initial resolution and renewal after expiry.
+func TestPublicLinkRefreshUsesDownloadUserAgent(t *testing.T) {
+	for _, captured := range []bool{false, true} {
+		for _, agent := range []string{"default", "  CapturedBrowser/1.0  ", ""} {
+			t.Run(fmt.Sprintf("captured=%t/agent=%q", captured, agent), func(t *testing.T) {
+				payload := rangeProbePayload(2 << 20)
+				links := &mailruLinks{payload: payload, first: 1}
+				var issued sync.Map
+				var expired atomic.Bool
+				var resumed atomic.Int32
+				proxy := publicLinkProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasPrefix(r.URL.Path, "/public/synthetic/g/no/") {
+						issued.Store(links.dispatches.Load(), r.UserAgent())
+					}
+					if strings.HasPrefix(r.URL.Path, "/public/get/") {
+						var gen int32
+						fmt.Sscanf(r.URL.Path, "/public/get/synthetic/%d/file", &gen)
+						want, ok := issued.Load(gen)
+						if !ok || r.UserAgent() != want || gen == 1 && expired.Load() {
+							w.WriteHeader(http.StatusForbidden)
+							return
+						}
+						if gen > 1 && r.Header.Get("Range") != "" {
+							resumed.Add(1)
+						}
+						if r.Header.Get("Range") == "" {
+							// Keep resolution's prefetch incomplete so Start must
+							// request the now-expired link and exercise renewal.
+							w.Header().Set("ETag", `"stable"`)
+							w.Header().Set("Accept-Ranges", "bytes")
+							w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+							w.Write(payload[:4096])
+							w.(http.Flusher).Flush()
+							<-r.Context().Done()
+							return
+						}
+					}
+					links.ServeHTTP(w, r)
+				}))
+				f := buildFetcher()
+				f.ctl.GetProxy = func(*base.RequestProxy) func(*http.Request) (*url.URL, error) { return http.ProxyURL(proxy) }
+				defer f.Close()
+				headers := map[string]string{"Referer": "https://cloud.mail.ru/public/aaaa/bbbb"}
+				if agent != "default" {
+					headers["uSeR-aGeNt"] = agent
+				}
+				raw := "https://cloud.mail.ru/public/aaaa/bbbb"
+				if captured {
+					// A browser-captured URL has already expired at first use.
+					raw = "https://cloclo2.datacloudmail.ru/public/get/synthetic/0/file"
+				}
+				if err := f.Resolve(&base.Request{URL: raw, Extra: &fhttp.ReqExtra{Header: headers}, SkipVerifyCert: true}, &base.Options{Path: t.TempDir(), Name: "synthetic.bin", Extra: &fhttp.OptsExtra{Connections: 4}}); err != nil {
+					t.Fatalf("fresh UA-bound link could not resolve: %v", err)
+				}
+				expired.Store(true)
+				f.publicMu.Lock()
+				f.publicRefreshedAt = time.Now().Add(-publicRefreshInterval)
+				f.publicMu.Unlock()
+				if err := f.Start(); err != nil {
+					t.Fatal(err)
+				}
+				if err := waitDone(t, f, 15*time.Second); err != nil {
+					t.Fatalf("UA-bound renewal failed: %v", err)
+				}
+				checkFile(t, f.Meta().SingleFilepath(), payload)
+				if links.dispatches.Load() != 2 || resumed.Load() == 0 {
+					t.Fatalf("dispatches=%d resumed=%d, want one initial link and one renewed range", links.dispatches.Load(), resumed.Load())
+				}
+			})
+		}
+	}
+}

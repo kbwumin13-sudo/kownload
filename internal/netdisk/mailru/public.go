@@ -69,7 +69,9 @@ func ClassifyError(status int) bool { return transfer.IsExpiredLinkStatus(status
 
 func (s Source) Page() string { return "https://cloud.mail.ru/public/" + s.ShareID }
 
-func (s Source) Refresh(ctx context.Context, original *http.Client) (string, error) {
+// The CDN token is bound to the User-Agent used for the public redirect.
+// Use the download request's effective value, including an explicitly empty one.
+func (s Source) Refresh(ctx context.Context, original *http.Client, userAgent string) (string, error) {
 	if checked, ok := share(s.Page()); !ok || checked != s {
 		return "", errors.New("invalid Mail.ru public source")
 	}
@@ -81,7 +83,7 @@ func (s Source) Refresh(ctx context.Context, original *http.Client) (string, err
 		if err != nil {
 			return nil, errors.New("invalid Mail.ru public resolver response")
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0")
+		req.Header.Set("User-Agent", userAgent)
 		resp, err := client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {

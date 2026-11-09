@@ -100,7 +100,14 @@ func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) erro
 	client.Timeout = 25 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	link, err := source.Refresh(ctx, client)
+	// Derive the effective UA through the same defaults, header overrides and
+	// whitespace normalization as the byte request. Mail.ru binds the CDN token
+	// to this value; a different resolver UA produces an immediately refused link.
+	download, err := f.buildRequest(ctx, f.meta.Req)
+	if err != nil {
+		return err
+	}
+	link, err := source.Refresh(ctx, client, download.UserAgent())
 	if err != nil {
 		return err
 	}
