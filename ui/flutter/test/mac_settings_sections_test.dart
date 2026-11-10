@@ -202,6 +202,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+      'browser preferences retain each profile and save independently of engine config',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'general');
+    await app.browserIntegration.command({
+      'action': 'sync',
+      'clientId': 'chrome-one',
+      'browser': 'chrome',
+      'downloadsPermission': true,
+      'version': '0.4.3',
+      'legacySettings': {
+        'downloadCapture': {'enabled': true, 'confirm': false},
+        'showAll': true
+      },
+    });
+    await app.browserIntegration.command({
+      'action': 'sync',
+      'clientId': 'edge-one',
+      'browser': 'edge',
+      'legacySettings': {
+        'downloadCapture': {'enabled': false, 'confirm': true},
+        'showAll': false
+      },
+    });
+    await _reveal(tester, '普通下载');
+    DropdownButton<String> mode() =>
+        tester.widget<DropdownButton<String>>(find.byWidgetPredicate((w) =>
+            w is DropdownButton<String> &&
+            w.items!.any((i) => i.value == 'confirm')));
+    expect(mode().value, 'direct');
+    mode().onChanged!('confirm');
+    await tester.pumpAndSettle();
+    expect(app.browserIntegration.clients.first.preferences.confirmDownloads,
+        true);
+    expect(
+        app.browserIntegration.clients.first.preferences.captureEnabled, true);
+    expect(app.browserIntegration.clients.first.preferences.showAll, true);
+    final browsers = tester.widget<DropdownButton<String>>(
+        find.byWidgetPredicate(
+            (w) => w is DropdownButton<String> && w.value == 'chrome-one'));
+    browsers.onChanged!('edge-one');
+    await tester.pumpAndSettle();
+    expect(mode().value, 'browser');
+    expect(app.browserIntegration.clients.last.preferences.showAll, false);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('dock switch starts off and applies each change through the host',
       (tester) async {
     if (!Platform.isMacOS) return;

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart' hide Progress;
 import 'package:hive/hive.dart';
@@ -24,6 +25,13 @@ import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
 
 class _App extends AppController {
+  final browserResults = <Map<String, dynamic>>[];
+  @override
+  void completeBrowserConfirmation(String id,
+      {List<String> taskIds = const [], bool cancelled = false}) {
+    browserResults.add({'id': id, 'taskIds': taskIds, 'cancelled': cancelled});
+  }
+
   @override
   void onReady() {}
   @override
@@ -67,6 +75,81 @@ Task _task(String id, Status status) => Task(
     );
 
 void main() {
+  testWidgets(
+      'native panel confirms the original operation and queues a second capture',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    Database.instance.box = _Box()..onboardingCompleted = true;
+    final app = Get.put<AppController>(_App()) as _App;
+    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+    app.downloaderConfig.value.extra.defaultDirectDownload = true;
+    Get.put(CreateController());
+    final one = CreateTask(req: Request(url: 'https://example.test/one'))
+      ..browserOperationId = 'browser-one';
+    final two = CreateTask(req: Request(url: 'https://example.test/two'))
+      ..browserOperationId = 'browser-two';
+    MacPanel.presentation.value = 'panel';
+    MacPanel.incoming.value = one;
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await tester.binding.setSurfaceSize(const Size(640, 760));
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      MacPanel.incoming.value = null;
+      MacPanel.taskResult.value = null;
+      MacPanel.cancelAutoHide();
+      Get.reset();
+      Get.routerDelegate = null;
+      Get.routeInformationParser = null;
+      await tester.binding.setSurfaceSize(null);
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+    });
+    final requests = <CreateTask>[];
+    await tester.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(
+          name: '/',
+          page: () => CreateView(taskCreator: (task) async {
+                requests.add(task);
+                return 'created-${requests.length}';
+              })),
+    ]));
+    await tester.pumpAndSettle();
+    await MacPanel.showPanel(task: two);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('panel-download-input')))
+            .controller!
+            .text,
+        one.req!.url);
+    expect(app.browserResults, isEmpty);
+    await tester.tap(find.byTooltip('开始下载'));
+    await tester.pumpAndSettle();
+    expect(requests, hasLength(1));
+    expect(requests.single.req!.url, one.req!.url);
+    expect(requests.single.toJson(), isNot(contains('browserOperationId')));
+    expect(app.browserResults.single, {
+      'id': 'browser-one',
+      'taskIds': ['created-1'],
+      'cancelled': false
+    });
+    expect(
+        tester
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('panel-download-input')))
+            .controller!
+            .text,
+        two.req!.url);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(app.browserResults.last,
+        {'id': 'browser-two', 'taskIds': [], 'cancelled': true});
+    expect(requests, hasLength(1));
+  });
+
   testWidgets(
       'browser result selects ongoing and reveals queued or completed tasks',
       (tester) async {

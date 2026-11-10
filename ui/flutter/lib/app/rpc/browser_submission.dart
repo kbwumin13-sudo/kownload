@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:dio/dio.dart';
 
@@ -41,6 +43,10 @@ class _CreateReceipt {
   final DateTime expires;
   late Future<BrowserRpcReply> reply;
   bool complete = false;
+  Map<String, dynamic>? confirmation;
+  bool browserCapture = false;
+  Completer<bool>? gate;
+  String? confirmToken;
   _CreateReceipt(this.expires);
 }
 
@@ -51,13 +57,116 @@ class BrowserSubmissionRpc {
   final Future<void> Function(Map<String, dynamic>) showCreate;
   final void Function(Map<String, dynamic>) log;
   final Future<void> Function(List<String> taskIds, String? error)? showResult;
+  final Future<void> Function(Map<String, dynamic>, String?, bool)?
+      showConfirmation;
+  final Map<String, bool>? Function(String, String)? capturePreferences;
   final _creates = <String, _CreateReceipt>{};
   BrowserSubmissionRpc({
     required this.send,
     required this.showCreate,
     required this.log,
     this.showResult,
+    this.showConfirmation,
+    this.capturePreferences,
   });
+
+  Map<String, dynamic> confirmationStatus(String id) {
+    final value = _creates[id]?.confirmation;
+    return value == null
+        ? {'state': 'unknown', 'taskIds': <String>[]}
+        : {...value, 'taskIds': List<String>.from(value['taskIds'])};
+  }
+
+  Future<bool> requestCommit(String id) async {
+    final receipt = _creates[id];
+    if (receipt == null || receipt.confirmation?['state'] != 'accepted')
+      return false;
+    if (!receipt.browserCapture) return true;
+    if (receipt.gate != null) return receipt.gate!.future;
+    final token = base64UrlEncode(
+            List<int>.generate(24, (_) => Random.secure().nextInt(256)))
+        .replaceAll('=', '');
+    final gate = receipt.gate = Completer<bool>();
+    receipt.confirmToken = token;
+    receipt.confirmation!
+        .addAll({'commitRequested': true, 'confirmToken': token});
+    try {
+      return await gate.future.timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      if (!gate.isCompleted) gate.complete(false);
+      if (identical(receipt.gate, gate)) {
+        receipt.gate = null;
+        receipt.confirmToken = null;
+        receipt.confirmation!.remove('confirmToken');
+        receipt.confirmation!.remove('commitRequested');
+      }
+      return false;
+    }
+  }
+
+  Map<String, dynamic> decideConfirmation(
+      String id, String token, String decision, Map browserState) {
+    final receipt = _creates[id];
+    final gate = receipt?.gate;
+    if (receipt == null ||
+        gate == null ||
+        gate.isCompleted ||
+        token != receipt.confirmToken ||
+        receipt.confirmation?['state'] != 'accepted') {
+      return confirmationStatus(id);
+    }
+    if (decision == 'commit') {
+      if (browserState['state'] != 'in_progress' ||
+          browserState['paused'] != true) {
+        throw const FormatException('invalid_request');
+      }
+      receipt.confirmation!['commitRequested'] = false;
+      receipt.confirmation!['commitStarted'] = true;
+      gate.complete(true);
+    } else if (decision == 'browser_completed' ||
+        decision == 'browser_retained') {
+      if (decision == 'browser_completed' &&
+          browserState['state'] != 'complete') {
+        throw const FormatException('invalid_request');
+      }
+      receipt.confirmation = {'state': decision, 'taskIds': <String>[]};
+      gate.complete(false);
+    } else {
+      throw const FormatException('invalid_request');
+    }
+    return confirmationStatus(id);
+  }
+
+  /// Called by the existing create UI, never by a second download pipeline.
+  void completeConfirmation(String id,
+      {List<String> taskIds = const [], bool cancelled = false}) {
+    final receipt = _creates[id];
+    if (receipt == null || receipt.confirmation == null) return;
+    if (taskIds.isNotEmpty &&
+        taskIds.every((value) => value.trim().isNotEmpty)) {
+      final ids = <String>{
+        ...List<String>.from(receipt.confirmation!['taskIds']),
+        ...taskIds
+      }.toList();
+      receipt.confirmation = {'state': 'created', 'taskIds': ids};
+      receipt.reply = Future.value(_confirmedReply(id, ids));
+    } else if (cancelled &&
+        receipt.confirmation!['state'] == 'accepted' &&
+        receipt.confirmation!['commitStarted'] != true) {
+      receipt.confirmation = {'state': 'cancelled', 'taskIds': <String>[]};
+      if (receipt.gate != null && !receipt.gate!.isCompleted)
+        receipt.gate!.complete(false);
+    }
+  }
+
+  BrowserRpcReply _confirmedReply(String id, List<String> ids) =>
+      BrowserRpcReply(200, {
+        'code': 0,
+        'msg': '',
+        'operationId': id,
+        'data': ids.length == 1 ? ids.single : ids,
+        'submission': {'state': 'created', 'taskIds': ids},
+      });
 
   static bool _creating(Map<String, dynamic> body) =>
       body['method'] == 'POST' &&
@@ -145,6 +254,7 @@ class BrowserSubmissionRpc {
     String text, {
     String? operationId,
     required bool confirm,
+    bool browserCapture = false,
   }) async {
     final watch = Stopwatch()..start();
     var domain = '';
@@ -171,6 +281,7 @@ class BrowserSubmissionRpc {
           _creates.remove(finished);
         }
         final receipt = _CreateReceipt(now.add(const Duration(hours: 24)));
+        receipt.browserCapture = browserCapture;
         _creates[operationId] = receipt;
         receipt.reply = _create(
           params,
@@ -219,7 +330,21 @@ class BrowserSubmissionRpc {
   ) async {
     try {
       if (confirm) {
-        await showCreate(params);
+        if (id != null)
+          _creates[id]?.confirmation = {
+            'state': 'accepted',
+            'taskIds': <String>[]
+          };
+        if (showConfirmation != null) {
+          await showConfirmation!(
+              params, id, id != null && _creates[id]?.browserCapture == true);
+        } else {
+          await showCreate(params);
+        }
+        final result = id == null ? null : _creates[id]?.confirmation;
+        if (result?['state'] == 'created') {
+          return _confirmedReply(id!, List<String>.from(result!['taskIds']));
+        }
         _trace(id, 'flutter_accepted', watch, domain);
         return BrowserRpcReply(202, {
           'code': 0,
@@ -402,10 +527,28 @@ class BrowserSubmissionRpc {
         if (meta is! Map || meta['silent'] != null && meta['silent'] is! bool) {
           throw const FormatException('invalid_request');
         }
+        final capture = meta['source'] == 'browser-capture';
+        Map<String, bool>? preferences;
+        if (capture && capturePreferences != null) {
+          if (meta['clientId'] is! String || meta['browser'] is! String) {
+            throw const FormatException('invalid_request');
+          }
+          preferences = capturePreferences!(meta['clientId'], meta['browser']);
+          if (preferences?['enabled'] != true) {
+            final rejected =
+                BrowserRpcReply.failure(id, 'business_error', status: 409);
+            await ctx.writeJSON(rejected.body, statusCode: rejected.status);
+            return;
+          }
+        }
         reply = await this.create(
           await ctx.readText(),
           operationId: id,
-          confirm: forceConfirmation || meta['silent'] != true,
+          confirm: forceConfirmation ||
+              (preferences == null
+                  ? meta['silent'] != true
+                  : preferences['confirm'] != false),
+          browserCapture: capture,
         );
       } else {
         reply = await forward(await ctx.readJSON(), operationId: id);

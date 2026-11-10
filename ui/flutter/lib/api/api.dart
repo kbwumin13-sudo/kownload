@@ -151,9 +151,15 @@ Future<ResolveResult> resolve(ResolveTask resolveTask) async {
               : '解析下载链接超时，请检查网络或稍后重试');
 }
 
-Future<String> createTask(CreateTask createTask) async {
+Future<String> createTask(CreateTask createTask, {String? operationId}) async {
   return _parse<String>(
-      () => _client.dio.post("api/v1/tasks", data: createTask),
+      () => _client.dio.post("api/v1/tasks",
+          data: createTask,
+          options: operationId == null
+              ? null
+              : Options(headers: {
+                  'X-Kownload-Operation-Id': operationId,
+                })),
       (data) => data as String);
 }
 
@@ -318,9 +324,8 @@ Future<Response> forward(
     options: Options(
       method: method,
       receiveTimeout: receiveTimeout,
-      headers: operationId == null
-          ? null
-          : {'X-Kownload-Operation-Id': operationId},
+      headers:
+          operationId == null ? null : {'X-Kownload-Operation-Id': operationId},
       followRedirects: preserveStatus ? false : null,
       validateStatus: preserveStatus ? (_) => true : null,
     ),
