@@ -24,6 +24,118 @@ class _RealHttp extends HttpOverrides {}
 void main() {
   const body =
       '{"req":{"url":"https://fixture.test/file?signature=synthetic"}}';
+  test(
+      'App confirmation reaches created through the existing operation, without resubmitting',
+      () async {
+    var opened = 0;
+    var sends = 0;
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async {
+          sends++;
+          throw StateError('unexpected second pipeline');
+        },
+        showCreate: (_) async {},
+        log: (_) {},
+        showConfirmation: (_, id, capture) async {
+          expect(id, 'app-confirm');
+          opened++;
+        });
+    await rpc.create(body, operationId: 'app-confirm', confirm: true);
+    expect(rpc.confirmationStatus('app-confirm'),
+        {'state': 'accepted', 'taskIds': []});
+    rpc.completeConfirmation('app-confirm', taskIds: ['created-one']);
+    final reply =
+        await rpc.create(body, operationId: 'app-confirm', confirm: true);
+    expect(reply.body['submission'], {
+      'state': 'created',
+      'taskIds': ['created-one']
+    });
+    expect(reply.body['data'], 'created-one');
+    expect(rpc.confirmationStatus('app-confirm')['state'], 'created');
+    rpc.completeConfirmation('app-confirm', cancelled: true);
+    expect(rpc.confirmationStatus('app-confirm')['state'], 'created');
+    expect(opened, 1);
+    expect(sends, 0);
+  });
+
+  test('only explicit cancellation marks an accepted confirmation cancelled',
+      () async {
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {},
+        log: (_) {});
+    expect(rpc.confirmationStatus('unknown')['state'], 'unknown');
+    await rpc.create(body, operationId: 'cancel-one', confirm: true);
+    expect(rpc.confirmationStatus('cancel-one')['state'], 'accepted');
+    rpc.completeConfirmation('cancel-one', cancelled: true);
+    expect(rpc.confirmationStatus('cancel-one'),
+        {'state': 'cancelled', 'taskIds': []});
+    await rpc.create(body, operationId: 'cancel-one', confirm: true);
+    expect(rpc.confirmationStatus('cancel-one')['state'], 'cancelled');
+  });
+
+  test(
+      'browser capture waits for a fresh token decision and preserves real browser state',
+      () async {
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {},
+        log: (_) {});
+    await rpc.create(body,
+        operationId: 'gated', confirm: true, browserCapture: true);
+    var released = false;
+    final gate = rpc.requestCommit('gated').then((value) {
+      released = true;
+      return value;
+    });
+    final waiting = rpc.confirmationStatus('gated');
+    expect(waiting['commitRequested'], true);
+    final token = waiting['confirmToken'] as String;
+    rpc.decideConfirmation('gated', 'wrong-token', 'commit',
+        {'state': 'in_progress', 'paused': true});
+    await Future<void>.delayed(Duration.zero);
+    expect(released, false);
+    expect(
+        () => rpc.decideConfirmation('gated', token, 'browser_completed', {
+              'state': 'in_progress',
+              'paused': true,
+              'received': 10,
+              'total': 10
+            }),
+        throwsFormatException);
+    rpc.decideConfirmation('gated', token, 'commit',
+        {'state': 'in_progress', 'paused': true, 'received': 10, 'total': 10});
+    expect(await gate, true,
+        reason: 'fully buffered is not the complete terminal state');
+    expect(rpc.confirmationStatus('gated')['state'], 'accepted');
+    expect(rpc.confirmationStatus('gated')['commitStarted'], true);
+    rpc.completeConfirmation('gated', cancelled: true);
+    expect(rpc.confirmationStatus('gated')['state'], 'accepted');
+    rpc.completeConfirmation('gated', taskIds: ['final-task']);
+    expect(
+        rpc.decideConfirmation('gated', token, 'commit',
+            {'state': 'in_progress', 'paused': true})['state'],
+        'created');
+  });
+
+  test('a browser-complete gate never releases a second download', () async {
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {},
+        log: (_) {});
+    await rpc.create(body,
+        operationId: 'complete-browser', confirm: true, browserCapture: true);
+    final gate = rpc.requestCommit('complete-browser');
+    final token =
+        rpc.confirmationStatus('complete-browser')['confirmToken'] as String;
+    rpc.decideConfirmation('complete-browser', token, 'browser_completed',
+        {'state': 'complete', 'paused': true});
+    expect(await gate, false);
+    expect(rpc.confirmationStatus('complete-browser'),
+        {'state': 'browser_completed', 'taskIds': []});
+    expect(await rpc.requestCommit('complete-browser'), false);
+  });
+
   test('browser results show once per silent receipt and once per batch',
       () async {
     final results = <List<String>>[];
@@ -270,6 +382,63 @@ void main() {
         (await rpc.create(body, operationId: 'bad/id', confirm: true)).status,
         400);
   });
+  test(
+      'the next browser capture reads canonical App mode without reloading the helper',
+      () async {
+    var enabled = true;
+    var confirm = true;
+    var opens = 0;
+    var sends = 0;
+    final rpc = BrowserSubmissionRpc(
+      capturePreferences: (_, __) => {'enabled': enabled, 'confirm': confirm},
+      send: (_, id, __) async {
+        sends++;
+        return response(created(id!));
+      },
+      showCreate: (_) async {
+        opens++;
+      },
+      log: (_) {},
+    );
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((r) => rpc.handle(RpcContext(r, r.response), create: true));
+    final client = _RealHttp().createHttpClient(null);
+    Future<int> capture(String id, bool silent) async {
+      final request = await client
+          .postUrl(Uri.parse('http://127.0.0.1:${server.port}/create'));
+      request.headers.set(operationHeader, id);
+      request.headers.set(
+          'X-Kownload-Host-Meta',
+          jsonEncode({
+            'source': 'browser-capture',
+            'clientId': 'chrome-one',
+            'browser': 'chrome',
+            'silent': silent,
+          }));
+      request.write(body);
+      final result = await request.close();
+      await result.drain<void>();
+      return result.statusCode;
+    }
+
+    try {
+      expect(await capture('canonical-confirm', true), 202);
+      expect(opens, 1);
+      expect(sends, 0);
+      enabled = false;
+      expect(await capture('canonical-off', true), 409);
+      expect(sends, 0);
+      enabled = true;
+      confirm = false;
+      expect(await capture('canonical-direct', false), 200);
+      expect(sends, 1);
+      expect(opens, 1);
+    } finally {
+      client.close(force: true);
+      await server.close(force: true);
+    }
+  });
+
   test('HTTP RPC fixture preserves accepted and upstream 500', () async {
     final rpc = BrowserSubmissionRpc(
         send: (_, __, ___) async => response(

@@ -72,8 +72,22 @@ Protocol? _parseProtocol(String url) {
 class _CreateViewState extends State<CreateView> {
   final _createdIds = <String>[];
   Future<String> _createTask(CreateTask task) async {
-    final id = await (widget.taskCreator ?? createTask)(task);
-    if (Util.isMacos()) _createdIds.add(id);
+    final operation = _panelRequest?.browserOperationId;
+    final matches =
+        _panelRequest?.req?.url.trim() == _urlController.text.trim();
+    if (operation != null && matches && _panelRequest?.browserCapture == true) {
+      await Get.find<AppController>().authorizeBrowserConfirmation(operation);
+    }
+    final id = await (widget.taskCreator != null
+        ? widget.taskCreator!(task)
+        : createTask(task, operationId: matches ? operation : null));
+    if (Util.isMacos()) {
+      _createdIds.add(id);
+      if (operation != null && matches) {
+        Get.find<AppController>()
+            .completeBrowserConfirmation(operation, taskIds: [id]);
+      }
+    }
     return id;
   }
 
@@ -133,7 +147,8 @@ class _CreateViewState extends State<CreateView> {
     if (task == null) return;
     if (controller.isConfirming.value ||
         _netdiskOpen.value ||
-        _onboarding != null) {
+        _onboarding != null ||
+        _panelRequest?.browserOperationId != null) {
       _queuedInputs.add(task);
       return;
     }
@@ -236,9 +251,24 @@ class _CreateViewState extends State<CreateView> {
 
   Future<void> _cancelCreate() async {
     if (Util.isMacos()) {
+      if (controller.isConfirming.value) return;
       if (controller.showAdvanced.value) {
         controller.showAdvanced.value = false;
       } else {
+        final operation = _panelRequest?.browserOperationId;
+        if (operation != null) {
+          Get.find<AppController>()
+              .completeBrowserConfirmation(operation, cancelled: true);
+          if (identical(MacPanel.incoming.value, _panelRequest))
+            MacPanel.incoming.value = null;
+          _panelRequest = null;
+          _urlController.clear();
+          _resetTaskParameters();
+          if (_queuedInputs.isNotEmpty) {
+            _drainQueuedInputs();
+            return;
+          }
+        }
         await MacPanel.hide();
       }
       return;
@@ -1252,6 +1282,8 @@ class _CreateViewState extends State<CreateView> {
     _urlController.clear();
     _originalRequest = null;
     _credentialOrigin = null;
+    if (identical(MacPanel.incoming.value, _panelRequest))
+      MacPanel.incoming.value = null;
     _panelRequest = null;
     _netdiskRequest.value = null;
     controller.clearFileDataUri();
@@ -1308,6 +1340,7 @@ class _CreateViewState extends State<CreateView> {
         controller.isConfirming.value ||
         _netdiskOpen.value ||
         _onboarding != null ||
+        _panelRequest?.browserOperationId != null ||
         _queuedInputs.isEmpty) return;
     final next = _queuedInputs.removeAt(0);
     MacPanel.cancelAutoHide();

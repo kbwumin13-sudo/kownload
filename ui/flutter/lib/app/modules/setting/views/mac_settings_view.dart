@@ -15,6 +15,7 @@ import '../../../../util/release_updates.dart';
 import '../../../../util/util.dart';
 import '../../../views/directory_selector.dart';
 import '../../app/controllers/app_controller.dart';
+import '../../../services/browser_integration.dart';
 import '../controllers/setting_controller.dart';
 
 /// The macOS preferences expose everyday choices while preserving the full
@@ -43,6 +44,11 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   bool? _showInDock;
   bool _dockChanging = false;
   String? _dockNotice;
+  String? _browserClientId;
+  bool _browserSaving = false;
+  String? _browserSaveError;
+  final _browserGroupKey = GlobalKey();
+  bool _browserFocused = false;
 
   @override
   void initState() {
@@ -51,6 +57,26 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         TextEditingController(text: _app.downloaderConfig.value.downloadDir);
     _loadRoutes();
     _loadDock();
+    _app.browserIntegration.addListener(_browserChanged);
+  }
+
+  void _browserChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _changeBrowser(String clientId, Map patch) async {
+    if (_browserSaving) return;
+    setState(() {
+      _browserSaving = true;
+      _browserSaveError = null;
+    });
+    try {
+      await _app.browserIntegration.update(clientId, patch);
+    } catch (_) {
+      if (mounted) setState(() => _browserSaveError = '更改未保存，请重试。');
+    } finally {
+      if (mounted) setState(() => _browserSaving = false);
+    }
   }
 
   Future<void> _loadRoutes() async {
@@ -107,7 +133,8 @@ class _MacSettingsViewState extends State<MacSettingsView> {
             title: const Text('连接浏览器助手'),
             content: const SizedBox(
               width: 440,
-              child: Text('将在 Chrome 和 Edge 的 NativeMessagingHosts 目录写入 kownload 的连接清单，'
+              child: Text(
+                  '将在 Chrome 和 Edge 的 NativeMessagingHosts 目录写入 kownload 的连接清单，'
                   '并把旧名称 com.gopeed.gopeed 改为指向本应用。原文件会先私密备份到数据目录，'
                   '回退脚本可以恢复。已加载的下载助手不需要重新安装。'),
             ),
@@ -145,6 +172,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
 
   @override
   void dispose() {
+    _app.browserIntegration.removeListener(_browserChanged);
     _directory.dispose();
     super.dispose();
   }
@@ -227,6 +255,16 @@ class _MacSettingsViewState extends State<MacSettingsView> {
       builder: (context, requestedSection, _) {
         // Old deep links continue to land on ordinary preferences.
         final download = requestedSection == 'download';
+        if (requestedSection != 'browser') _browserFocused = false;
+        if (requestedSection == 'browser' && !_browserFocused) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            final target = _browserGroupKey.currentContext;
+            if (mounted && target != null) {
+              _browserFocused = true;
+              Scrollable.ensureVisible(target);
+            }
+          });
+        }
         return Scaffold(
           backgroundColor: c.background,
           body: Align(
@@ -294,10 +332,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                 child: const Text('登录项…'))),
         _row(context, '在程序坞中显示 kownload',
             detail: _dockNotice ?? '关闭时只在菜单栏显示，不出现在程序坞和 ⌘Tab 中。',
-            control: _switch(
-                context,
-                '在程序坞中显示 kownload',
-                _showInDock ?? false,
+            control: _switch(context, '在程序坞中显示 kownload', _showInDock ?? false,
                 _showInDock == null || _dockChanging ? null : _changeDock)),
         ListTileTheme(
           data: ListTileThemeData(
@@ -342,15 +377,18 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                   Get.updateLocale(toLocale(value));
                 })),
       ]),
-      _group(context, '浏览器助手', [
-        _row(context, '浏览器连接',
-            detail: _browserNotice == null
-                ? _routeText()
-                : '${_routeText()}\n$_browserNotice',
-            control: MacButton(
-                onPressed: _connecting ? null : _connectBrowsers,
-                child: const Text('连接…'))),
-      ]),
+      KeyedSubtree(
+          key: _browserGroupKey,
+          child: _group(context, '浏览器助手', [
+            _row(context, '浏览器连接',
+                detail: _browserNotice == null
+                    ? _routeText()
+                    : '${_routeText()}\n$_browserNotice',
+                control: MacButton(
+                    onPressed: _connecting ? null : _connectBrowsers,
+                    child: const Text('连接…'))),
+            ..._browserPreferences(context),
+          ])),
       Obx(() {
         final latest = _settings.latestVersion.value;
         return _group(context, '关于', [
@@ -375,6 +413,129 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         ]);
       }),
     ];
+  }
+
+  List<Widget> _browserPreferences(BuildContext context) {
+    final integration = _app.browserIntegration;
+    final clients = integration.clients;
+    if (clients.isEmpty) {
+      return [
+        _row(context, '下载接管与媒体嗅探',
+            detail: '在 Chrome 或 Edge 打开下载助手并同步后，可在这里调整各自的偏好。')
+      ];
+    }
+    final client = clients.where((c) => c.id == _browserClientId).firstOrNull ??
+        clients.first;
+    final prefs = client.preferences;
+    final status = integration.statuses[client.id];
+    final mode = !prefs.captureEnabled
+        ? 'browser'
+        : prefs.confirmDownloads
+            ? 'confirm'
+            : 'direct';
+    final labels = <String, String>{};
+    for (final browser in const ['chrome', 'edge']) {
+      final matches = clients.where((c) => c.browser == browser).toList();
+      for (var i = 0; i < matches.length; i++) {
+        labels[matches[i].id] =
+            '${matches[i].name}${matches.length > 1 ? ' · 资料 ${i + 1}' : ''}';
+      }
+    }
+    final connection = status == null
+        ? '尚未收到助手同步。'
+        : '最近同步 ${status.seen.hour.toString().padLeft(2, '0')}:${status.seen.minute.toString().padLeft(2, '0')}'
+            '${status.version.isEmpty ? '' : ' · 助手 ${status.version}'}'
+            '${status.downloadsPermission ? '' : ' · 浏览器下载权限尚未授权'}';
+    return [
+      _row(context, '偏好所属浏览器',
+          detail: '每个浏览器资料分别保留。',
+          control: _menu<String>(
+              value: client.id,
+              options: labels,
+              onChanged: (id) => setState(() => _browserClientId = id))),
+      _row(context, '助手状态', detail: connection),
+      _row(context, '普通下载',
+          detail: '网页临时生成的文件等无法接管的下载仍由浏览器处理。',
+          control: _menu<String>(
+              value: mode,
+              width: 166,
+              options: const {
+                'browser': '由浏览器下载',
+                'confirm': '在 kownload 中确认',
+                'direct': '直接交给 kownload'
+              },
+              onChanged: (value) {
+                if (_browserSaving) return;
+                _changeBrowser(client.id, {
+                  'downloadCapture': {
+                    'enabled': value != 'browser',
+                    if (value != 'browser') 'confirm': value == 'confirm',
+                  }
+                });
+              })),
+      _row(context, '网页媒体嗅探',
+          detail: '在网页播放器旁显示下载入口，保留视频、图片和音频候选。',
+          control: _switch(
+              context,
+              '网页媒体嗅探',
+              prefs.sniffEnabled,
+              _browserSaving
+                  ? null
+                  : (value) => _changeBrowser(client.id, {
+                        'sniffing': {'enabled': value}
+                      }))),
+      _row(context, '显示小图',
+          detail: '在资源列表中保留小尺寸图片。',
+          control: _switch(
+              context,
+              '显示小图',
+              prefs.showAll,
+              _browserSaving
+                  ? null
+                  : (value) => _changeBrowser(client.id, {
+                        'sniffing': {'showAll': value}
+                      }))),
+      if (prefs.disabledSites.isNotEmpty)
+        _row(context, '已关闭嗅探的网站',
+            detail: '${prefs.disabledSites.length} 个网站',
+            control: MacButton(
+                onPressed:
+                    _browserSaving ? null : () => _showDisabledSites(client),
+                child: const Text('管理…'))),
+      if (_browserSaving || _browserSaveError != null)
+        _row(context, _browserSaveError ?? '正在保存浏览器偏好…'),
+    ];
+  }
+
+  Future<void> _showDisabledSites(BrowserClient client) async {
+    final host = await MacPanel.transient(() => showDialog<String>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('已关闭嗅探的网站'),
+            content: SizedBox(
+                width: 360,
+                child: ListView(shrinkWrap: true, children: [
+                  for (final host in client.preferences.disabledSites.keys)
+                    ListTile(
+                        title: Text(host),
+                        trailing: TextButton(
+                            onPressed: () =>
+                                Navigator.of(dialogContext).pop(host),
+                            child: const Text('重新启用'))),
+                ])),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('完成'))
+            ],
+          ),
+        ));
+    if (host != null && mounted)
+      await _changeBrowser(client.id, {
+        'sniffing': {
+          'disabledSites': {host: false}
+        }
+      });
   }
 
   List<Widget> _download(BuildContext context) {

@@ -7,6 +7,11 @@ part 'create_task.g.dart';
 
 @JsonSerializable(explicitToJson: true)
 class CreateTask {
+  /// Transient App confirmation identity; never sent to the download engine.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  String? browserOperationId;
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  bool browserCapture = false;
   String? rid;
   Request? req;
   Options? opts;

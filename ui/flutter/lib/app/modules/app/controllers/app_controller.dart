@@ -38,6 +38,7 @@ import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
+import '../../../services/browser_integration.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
 import '../../../../macos/mac_panel.dart';
@@ -84,6 +85,32 @@ class AppController extends GetxController with WindowListener, TrayListener {
   final startConfig = StartConfig().obs;
   final runningPort = 0.obs;
   final downloaderConfig = DownloaderConfig().obs;
+  BrowserSubmissionRpc? _browserRpc;
+  late final browserIntegration = BrowserIntegration.database(
+    openSettings: () => MacPanel.showSettings(section: 'browser'),
+    submission: (id) =>
+        _browserRpc?.confirmationStatus(id) ??
+        {'state': 'unknown', 'taskIds': <String>[]},
+    decideSubmission: (id, token, decision, browserState) =>
+        _browserRpc?.decideConfirmation(id, token, decision, browserState) ??
+        {'state': 'unknown', 'taskIds': <String>[]},
+  );
+
+  void completeBrowserConfirmation(String id,
+      {List<String> taskIds = const [], bool cancelled = false}) {
+    _browserRpc?.completeConfirmation(id,
+        taskIds: taskIds, cancelled: cancelled);
+  }
+
+  Future<void> authorizeBrowserConfirmation(String id) async {
+    if (await _browserRpc?.requestCommit(id) == true) return;
+    final state = _browserRpc?.confirmationStatus(id)['state'];
+    throw StateError(switch (state) {
+      'browser_completed' => '浏览器已完成下载，未新建 kownload 任务。',
+      'browser_retained' => '此下载仍由浏览器处理，未新建 kownload 任务。',
+      _ => '未收到浏览器的确认，请检查原下载后重试。',
+    });
+  }
 
   /// The task that is pending URL update via listen mode.
   /// Stored here in AppController to persist across page navigations.
@@ -357,7 +384,18 @@ class AppController extends GetxController with WindowListener, TrayListener {
       return;
     }
     try {
-      final browserRpc = BrowserSubmissionRpc(
+      final browserRpc = _browserRpc = BrowserSubmissionRpc(
+        capturePreferences: (clientId, browser) {
+          final client = browserIntegration.clients
+              .where((c) => c.id == clientId && c.browser == browser)
+              .firstOrNull;
+          return client == null
+              ? null
+              : {
+                  'enabled': client.preferences.captureEnabled,
+                  'confirm': client.preferences.confirmDownloads,
+                };
+        },
         send: (body, operationId, budget) => forwardBrowserRequest(
           body,
           operationId: operationId,
@@ -372,6 +410,17 @@ class AppController extends GetxController with WindowListener, TrayListener {
           }
           await windowManager.show();
           _handleToCreate0(task);
+        },
+        showConfirmation: (params, operationId, browserCapture) async {
+          final task = CreateTask.fromJson(params)
+            ..browserOperationId = operationId
+            ..browserCapture = browserCapture;
+          if (Util.isMacos()) {
+            await MacPanel.showPanel(task: task);
+          } else {
+            await windowManager.show();
+            _handleToCreate0(task);
+          }
         },
         log: (event) => logger.i(jsonEncode(event)),
         showResult: (ids, error) async {
@@ -390,6 +439,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
                   (Util.isMacos() && !MacOnboarding.completed),
             ),
         "/forward": (ctx) => browserRpc.handle(ctx, create: false),
+        "/browser": browserIntegration.handle,
       });
     } catch (e) {
       logger.w("start rpc server fail", e, StackTrace.current);
