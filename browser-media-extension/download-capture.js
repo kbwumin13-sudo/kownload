@@ -1,202 +1,224 @@
 // Independently implemented against Chrome downloads and our Native contract.
-import {newOperationId,nativeSubmission,safeHeader,protectedHeaders} from './lib.js';
+import {newOperationId,nativeSubmission,safeHeader,protectedHeaders,createAppBridge} from './lib.js';
 
-const SETTING = 'downloadCapture';
-const PENDING = 'downloadCapturePending';
-const httpURL = value => { try { return /^https?:$/.test(new URL(value).protocol); } catch { return false; } };
+const PENDING='downloadCapturePending';
+const httpURL=value=>{try{return /^https?:$/.test(new URL(value).protocol);}catch{return false;}};
+const validId=value=>typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+const rejected=reply=>reply?.code !== 0 && (
+  ['invalid_request','unknown_method','wakeup_failed','ipc_unavailable'].includes(reply?.error) ||
+  reply?.error==='business_error' && Number.isInteger(reply.businessCode) && reply.businessCode !== 0
+);
 
-export function installDownloadCapture(browser,send) {
+export function installDownloadCapture(browser,send,{appBridge=createAppBridge(browser,send),pollMs=1000}={}) {
   if (!browser.permissions) return;
-  const jobs = new Map(),requests = new Map(),earlyPauses = new Map();
-  let requestsBlockedUntil = 0;
-  let activeConfig;
-  const restored = browser.storage.session.get(PENDING).then(saved => {
-    for (const job of Object.values(saved[PENDING] || {})) {
-      // Credentials deliberately do not survive a worker restart. Requests
-      // known to be unsubmitted can still resume/cancel in their browser.
-      jobs.set(job.id,{...job,state:['waiting','expired','deciding'].includes(job.state) ? 'expired' : 'uncertain'});
-    }
+  const jobs=new Map(),requests=new Map(),earlyPauses=new Map();
+  let listening=false,granted=false,activeConfig,requestsBlockedUntil=0;
+  browser.storage.local.get('downloadCapture').then(saved=>{activeConfig=saved.downloadCapture;});
+  browser.storage.onChanged?.addListener((changes,area)=>{
+    if(area==='local' && changes.downloadCapture) activeConfig=changes.downloadCapture.newValue;
   });
-  let configReady = browser.storage.local.get(SETTING).then(value => activeConfig=value[SETTING] || {enabled:false});
-  browser.storage.onChanged?.addListener((changes,area) => {
-    if (area === 'local' && changes[SETTING]) {
-      activeConfig=changes[SETTING].newValue || {enabled:false};configReady = Promise.resolve(activeConfig);
-      if (!changes[SETTING].newValue?.enabled) requests.clear();
-    }
-  });
-  let listening = false;
-  const persist = async () => {
-    const pending = Object.fromEntries([...jobs].filter(([,j]) => ['waiting','expired','deciding','sending','uncertain','accepted'].includes(j.state)).map(([id,j]) => [id,{id,name:j.name,state:j.state,operationId:j.operationId,...(Number.isInteger(j.tabId) ? {tabId:j.tabId} : {})}]));
-    await browser.storage.session.set({[PENDING]:pending});
-  };
-  const changed = async job => {
+  const persist=()=>browser.storage.session.set({[PENDING]:Object.fromEntries([...jobs].filter(([,job])=>!job.resolved).map(([id,job])=>[id,{
+    id,name:job.name,operationId:job.operationId,state:job.state,posted:!!job.posted,...(job.taskIds ? {taskIds:job.taskIds} : {})
+  }]))});
+  function release(job) {
+    clearTimeout(job.timer);delete job.timer;
+    job.releaseFilename?.();delete job.releaseFilename;
+    job.releaseNative?.();delete job.releaseNative;
+  }
+  async function state(job,value,{resolved=false}={}) {
+    job.state=value;job.resolved=resolved;
+    if (value !== 'preparing' && value !== 'sending') {delete job.url;delete job.header;}
     await persist();
-    if (['uncertain','accepted'].includes(job.state)) {
+    if(resolved || value==='uncertain') release(job);
+    if(value==='uncertain') {
       await browser.action.setBadgeText({text:'!'});
-      await browser.action.setTitle({title:'下载器尚未确认接收，请打开下载接管页面查看'});
+      await browser.action.setTitle({title:'下载状态未确认，请在 kownload 检查；不会重复提交'});
     }
-  };
-  const terminal = async (job,state) => {
-    job.state=state;delete job.header;delete job.url;
-    if (['created','browser','cancelled'].includes(state)) {
-      job.releaseFilename?.();delete job.releaseFilename;
-    }
-    await changed(job);
-  };
-  async function finish(job,action) {
-    if (!['waiting','expired'].includes(job.state) || !['submit','cancel','resume'].includes(action) || job.state === 'expired' && action === 'submit') return;
-    const previousState = job.state;
-    job.state = 'deciding';
-    if (action !== 'submit') {
-      try {
-        const current = (await browser.downloads.search({id:job.id}))[0];
-        if (current?.state === 'complete') { await terminal(job,'browser');return; }
-        if (action === 'cancel') await browser.downloads.cancel(job.id);
-        else await browser.downloads.resume(job.id);
-        await terminal(job,action === 'cancel' ? 'cancelled' : 'browser');
-      } catch (error) { job.state=previousState;throw error; }
-      return;
-    }
-    // A failed preflight cannot have submitted a task. Keep the browser's
-    // original request (including POST data/cookies) available for fallback.
-    let current;
+    const finished=[...jobs].filter(([,item])=>item.resolved);
+    for(const [id] of finished.slice(0,-20)) jobs.delete(id);
+  }
+  async function current(job) {
+    const item=(await browser.downloads.search({id:job.id}))[0];
+    return {item,report:{state:item?.state || 'unknown',paused:item?.paused===true,received:item?.bytesReceived ?? 0,total:item?.totalBytes ?? -1}};
+  }
+  async function returnToBrowser(job) {
+    job.posted=false;job.state='preparing';delete job.url;delete job.header;
     try {
-      const ping = await send({method:'ping'});
-      if (ping?.code !== 0 || ping.data !== true) throw new Error('unavailable');
-      current = (await browser.downloads.search({id:job.id}))[0];
+      let item;
+      try {({item}=await current(job));} catch {await browser.downloads.resume(job.id);}
+      if(item?.state==='in_progress' && item.paused !== false) await browser.downloads.resume(job.id);
+      await state(job,'browser',{resolved:true});
+    } catch {release(job);await persist().catch(()=>{});await browser.action.setBadgeText({text:'!'});}
+  }
+  async function cancelFromApp(job) {
+    job.state='cancelled';job.posted=false;delete job.url;delete job.header;
+    await persist();
+    try {
+      const {item}=await current(job);
+      // A genuine App cancellation never deletes a file the browser completed.
+      if(item?.state==='in_progress') await browser.downloads.cancel(job.id);
+      await state(job,'cancelled',{resolved:true});
+    } catch {release(job);await persist().catch(()=>{});}
+  }
+  async function created(job,ids) {
+    if(!Array.isArray(ids) || !ids.length || ids.some(id=>typeof id!=='string' || !id.trim())) throw new Error('invalid_receipt');
+    job.taskIds=[...new Set(ids)];
+    // Persist the authoritative creation before attempting browser cleanup.
+    job.state='created';delete job.url;delete job.header;await persist().catch(()=>{});
+    try {
+      const {item,report}=await current(job);
+      if(item?.state==='in_progress') await browser.downloads.cancel(job.id);
+      else if(item?.state==='complete') {
+        // The App task already exists; preserve both facts and the browser file.
+        await appBridge.request('submission',{operationId:job.operationId,browserState:report}).catch(()=>{});
+        job.browserCompleted=true;
+      }
+      await state(job,'created',{resolved:true});
     } catch {
-      await browser.downloads.resume(job.id);
-      await terminal(job,'browser');
-      return;
+      // Cancellation failure cannot turn a created task back into "unknown".
+      release(job);await persist().catch(()=>{});
+      await browser.action.setBadgeText({text:'!'});
     }
-    if (!current || current.state !== 'in_progress') { await terminal(job,current?.state === 'complete' ? 'browser' : 'cancelled');return; }
-    if (current.paused === false) { await terminal(job,'browser');return; }
-    job.state = 'sending';
-    await changed(job);
+  }
+  function schedule(job) {
+    clearTimeout(job.timer);
+    if(pollMs>0 && !job.resolved && ['accepted','authorizing'].includes(job.state)) job.timer=setTimeout(()=>{void poll(job);},pollMs);
+  }
+  async function receipt(job,data) {
+    if(data?.operationId && data.operationId!==job.operationId) throw new Error('invalid_receipt');
+    if(data?.state==='created') {await created(job,data.taskIds);return;}
+    if(!Array.isArray(data?.taskIds) || data.taskIds.length) throw new Error('invalid_receipt');
+    if(data.state==='cancelled') {await cancelFromApp(job);return;}
+    if(['browser_completed','browser_retained'].includes(data.state)) {await returnToBrowser(job);return;}
+    if(data.state==='unknown') {await state(job,'uncertain');return;}
+    if(data.state!=='accepted') throw new Error('invalid_receipt');
+    await state(job,data.commitStarted ? 'authorizing' : 'accepted');
+    if(data.commitRequested) {
+      if(!validId(data.confirmToken)) throw new Error('invalid_receipt');
+      const {report}=await current(job);
+      const decision=report.state==='complete' ? 'browser_completed' : report.state==='in_progress' && report.paused ? 'commit' : 'browser_retained';
+      // Approval only releases the App's existing CreateView submission. It
+      // never repeats create or sends an alternate task request.
+      await state(job,'authorizing');
+      const answer=await appBridge.request('submission',{operationId:job.operationId,confirmToken:data.confirmToken,decision,browserState:report});
+      if(answer?.state!=='accepted') {await receipt(job,answer);return;}
+    }
+    schedule(job);
+  }
+  async function poll(job) {
+    if(job.polling || job.resolved) return;
+    job.polling=true;
+    try {
+      const {report}=await current(job);
+      const data=await appBridge.request('submission',{operationId:job.operationId,browserState:report,...(report.state==='complete' && job.state!=='authorizing' ? {decision:'browser_completed'} : {})});
+      await receipt(job,data);
+    } catch {await state(job,'uncertain').catch(()=>{});}
+    finally {job.polling=false;}
+  }
+  async function submit(job) {
+    try {
+      const ping=await appBridge.send({method:'ping'});
+      if(ping?.code!==0 || ping.data!==true) {await returnToBrowser(job);return;}
+    } catch {await returnToBrowser(job);return;}
+    const {item}=await current(job);
+    if(!item || item.state!=='in_progress' || item.paused===false) {await returnToBrowser(job);return;}
+    await state(job,'sending');job.posted=true;await persist();
     let reply;
     try {
-      job.posted = true;
-      reply = await send({method:'forward',operationId:job.operationId,params:{method:'POST',path:'/api/v1/tasks',data:{req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}}}});
-      const receipt = nativeSubmission(reply,job.operationId);
-      if (receipt.state === 'accepted') { await terminal(job,'accepted');return; }
-      job.taskIds = receipt.taskIds;
-      // Browser cancellation happens only after an authoritative created ACK.
-      await browser.downloads.cancel(job.id);
-      await terminal(job,'created');
+      reply=await appBridge.send({method:'create',operationId:job.operationId,meta:{silent:!job.confirm,source:'browser-capture',...await appBridge.identity()},params:{req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}}});
+      const answer=nativeSubmission(reply,job.operationId);
+      if(answer.state==='created') await created(job,answer.taskIds);
+      else {await state(job,'accepted');schedule(job);}
     } catch {
-      // These host outcomes reject before a task can be submitted, or are
-      // explicit business rejections. A lost/malformed reply is not a failure
-      // receipt: resuming it blindly could download the same file twice.
-      const rejected = reply?.code !== 0 && (
-        ['invalid_request','unknown_method','wakeup_failed','ipc_unavailable'].includes(reply?.error) ||
-        reply?.error === 'business_error' && Number.isInteger(reply.businessCode) && reply.businessCode !== 0
-      );
-      if (rejected) {
-        await browser.downloads.resume(job.id);
-        await terminal(job,'browser');
-      } else await terminal(job,'uncertain');
+      if(rejected(reply)) await returnToBrowser(job);
+      else {
+        // A lost acknowledgement can be queried once, never replayed.
+        await state(job,'recovering');
+        await poll(job);
+        if(job.state==='uncertain') release(job);
+      }
     }
   }
+  const restored=browser.storage.session.get(PENDING).then(saved=>{
+    for(const item of Object.values(saved[PENDING] || {})) {
+      if(!Number.isInteger(item.id) || !validId(item.operationId)) continue;
+      jobs.set(item.id,{...item,resolved:false,posted:typeof item.posted==='boolean' ? item.posted : ['sending','accepted','authorizing','recovering','uncertain','created'].includes(item.state)});
+    }
+  });
+  void restored.then(async()=>{
+    for(const job of [...jobs.values()]) {
+      try {
+        if(job.state==='created') {await created(job,job.taskIds);continue;}
+        if(job.state==='cancelled') {await cancelFromApp(job);continue;}
+        if(!job.posted) {await returnToBrowser(job);continue;}
+        job.releaseNative=appBridge.acquire();
+        await appBridge.settings();
+        await poll(job);
+      } catch {await state(job,'uncertain').catch(()=>{});}
+    }
+  });
   async function capture(item,releaseFilename) {
     await restored;
-    const config = await configReady;
-    const url = item.finalUrl || item.url;
-    if (!config?.enabled || !httpURL(url) || item.incognito || item.byExtensionId || jobs.has(item.id)) return;
-    const observed = requests.get(url);
-    if (observed && observed.method !== 'GET') return;
-    // Requests without an observed GET may contain POST bodies that cannot be
-    // reconstructed by a download manager. Leave them in the browser.
-    if (!observed || observed.ambiguous || observed.expires < Date.now() || requestsBlockedUntil > Date.now()) return;
+    const url=item.finalUrl || item.url,observed=requests.get(url);
+    if(!httpURL(url) || item.incognito || item.byExtensionId || jobs.has(item.id) || !observed || observed.method!=='GET' || observed.ambiguous || observed.expires<Date.now() || requestsBlockedUntil>Date.now()) return;
     requests.delete(url);
-    const early = earlyPauses.get(item.id);earlyPauses.delete(item.id);
-    try { if (early) { if (!await early) return; } else await browser.downloads.pause(item.id); } catch { return; }
-    const job = {id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,state:'waiting',operationId:newOperationId(),releaseFilename};
+    const early=earlyPauses.get(item.id);earlyPauses.delete(item.id);
+    try {if(early){if(!await early)return;}else await browser.downloads.pause(item.id);}catch{return;}
+    const job={id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,operationId:newOperationId(),state:'preparing',posted:false,resolved:false,releaseFilename};
+    jobs.set(item.id,job);
     try {
-      const current = (await browser.downloads.search({id:item.id}))[0];
-      if (!current || current.state !== 'in_progress') return;
-      jobs.set(item.id,job);
-      await changed(job);
-      // Confirmation belongs to this browser request. The app receives only a
-      // direct task submission, never a confirmation ACK mistaken for creation.
-      if (config.confirm !== false) {
-        const tab = await browser.tabs.create({url:browser.runtime.getURL(`download-confirm.html?id=${item.id}`)});
-        job.tabId = tab.id;
-        await changed(job);
-      } else await finish(job,'submit');
+      job.releaseNative=appBridge.acquire();
+      const settings=await appBridge.settings();
+      activeConfig=settings.downloadCapture;
+      if(!activeConfig.enabled){await returnToBrowser(job);return;}
+      job.confirm=activeConfig.confirm;
+      await persist();
+      await submit(job);
     } catch {
-      if (!job.posted) await browser.downloads.resume(item.id).catch(() => {});
-      jobs.delete(item.id);
+      if(!job.posted) await returnToBrowser(job).catch(()=>{});
+      else await state(job,'uncertain').catch(()=>{});
+    } finally {
+      if(job.resolved || job.state==='uncertain') release(job);
     }
-    // Retain active/uncertain operations, with only a short terminal history.
-    const completed = [...jobs].filter(([,j]) => ['created','browser','cancelled'].includes(j.state));
-    for (const [id] of completed.slice(0,-20)) jobs.delete(id);
   }
   function attach() {
-    if (listening || !browser.downloads?.onDeterminingFilename) return;
-    listening = true;
-    browser.downloads.onCreated?.addListener(item => {
-      // Filename determination can arrive after a small response is already
-      // fully buffered. Stop its network transfer at the first download event.
-      if (activeConfig?.enabled === false || !httpURL(item.finalUrl || item.url) || item.incognito || item.byExtensionId || item.state && item.state !== 'in_progress') return;
-      try { earlyPauses.set(item.id,Promise.resolve(browser.downloads.pause(item.id)).then(()=>true,()=>false)); } catch {}
+    if(listening || !browser.downloads?.onDeterminingFilename) return;
+    listening=true;
+    browser.downloads.onCreated?.addListener(item=>{
+      if(activeConfig?.enabled===false || !httpURL(item.finalUrl || item.url) || item.incognito || item.byExtensionId || item.state && item.state!=='in_progress') return;
+      try {earlyPauses.set(item.id,Promise.resolve(browser.downloads.pause(item.id)).then(()=>true,()=>false));}catch{}
     });
-    browser.downloads.onChanged?.addListener(delta => {
-      if (delta.state?.current && delta.state.current !== 'in_progress') earlyPauses.delete(delta.id);
+    browser.downloads.onChanged?.addListener(delta=>{
+      if(delta.state?.current && delta.state.current!=='in_progress') earlyPauses.delete(delta.id);
     });
-    browser.downloads.onDeterminingFilename.addListener((item,suggest) => {
-      // pause() alone cannot prevent a fully buffered response from completing.
-      // Keep filename completion pending through confirmation and submission.
-      let released = false;
-      const release = () => { if (!released) { released = true;suggest(); } };
-      void capture(item,release).finally(async () => {
-        const job = jobs.get(item.id);
-        const early = earlyPauses.get(item.id);earlyPauses.delete(item.id);
-        if (early && await early && !job) await browser.downloads.resume(item.id).catch(()=>{});
-        if (!job || ['created','browser','cancelled'].includes(job.state)) release();
-      }).catch(() => {});
+    browser.downloads.onDeterminingFilename.addListener((item,suggest)=>{
+      let released=false;
+      const releaseFilename=()=>{if(!released){released=true;suggest();}};
+      void capture(item,releaseFilename).finally(async()=>{
+        const job=jobs.get(item.id),early=earlyPauses.get(item.id);earlyPauses.delete(item.id);
+        if(early && await early && !job) await browser.downloads.resume(item.id).catch(()=>{});
+        if(!job || job.resolved || job.state==='uncertain') releaseFilename();
+      }).catch(()=>{releaseFilename();});
       return true;
     });
   }
-  browser.webRequest.onBeforeSendHeaders.addListener(event => { void configReady.then(config => {
-    if (!config?.enabled) return;
-    if (event.tabId < 0 || event.incognito || !httpURL(event.url) || typeof event.requestId !== 'string' || !event.requestId || requestsBlockedUntil > Date.now()) return;
-    const header = {...safeHeader(event.requestHeaders),...protectedHeaders(event.requestHeaders)};
-    const cookie = event.requestHeaders?.find(h => h.name.toLowerCase() === 'cookie')?.value;
-    if (cookie && !/[\r\n]/.test(cookie)) header.Cookie = cookie;
-    header['Accept-Encoding'] = 'identity';
-    for (const [url,request] of requests) if (request.expires < Date.now()) requests.delete(url);
-    const previous = requests.get(event.url);
-    const sameRequest = previous && previous.requestId === event.requestId && previous.tabId === event.tabId && previous.frameId === event.frameId && previous.documentId === event.documentId;
-    const ambiguous = previous && (previous.ambiguous || !sameRequest);
-    if (!previous && requests.size >= 200) {
-      // Do not evict one side of an ambiguous pair and then trust the other.
-      requests.clear();requestsBlockedUntil = Date.now()+60000;return;
-    }
-    requests.set(event.url,{requestId:event.requestId,tabId:event.tabId,frameId:event.frameId,documentId:event.documentId,method:event.method,...(!ambiguous ? {header} : {}),ambiguous:!!ambiguous,expires:Date.now()+60000});
-  }); },{urls:['<all_urls>']},['requestHeaders','extraHeaders']);
-  browser.permissions.contains({permissions:['downloads']}).then(granted => { if (granted) attach(); });
-  browser.permissions.onAdded.addListener(permissions => { if (permissions.permissions?.includes('downloads')) attach(); });
-  async function leaveConfirmation(id,url) {
-    await restored;
-    for (const job of jobs.values()) {
-      if (job.tabId === id && ['waiting','expired'].includes(job.state) && url !== browser.runtime.getURL(`download-confirm.html?id=${job.id}`)) await finish(job,'resume');
-    }
-  }
-  browser.tabs.onRemoved.addListener(id => { void leaveConfirmation(id).catch(() => {}); });
-  browser.webNavigation?.onCommitted?.addListener(event => {
-    if (event.frameId === 0) void leaveConfirmation(event.tabId,event.url).catch(() => {});
-  });
-  browser.runtime.onMessage.addListener((message,sender,respond) => {
-    if (message?.type !== 'DOWNLOAD_CAPTURE' || !sender.url?.startsWith(browser.runtime.getURL(''))) return;
-    void (async () => {
-      await restored;
-      const job = jobs.get(Number(message.id));
-      if (message.action !== 'status' && job) await finish(job,message.action);
-      const current = (await browser.downloads.search({id:Number(message.id)}))[0];
-      if (job && ['waiting','expired'].includes(job.state) && (current?.state === 'complete' || current?.state === 'interrupted' || current?.paused === false)) await terminal(job,'browser');
-      respond({ok:true,job:job ? {id:job.id,name:job.name,state:job.state,taskIds:job.taskIds} : null,browser:current ? {state:current.state,paused:current.paused,received:current.bytesReceived,total:current.totalBytes} : null});
-    })().catch(() => respond({ok:false}));
-    return true;
-  });
-  return {capture,finish,jobs};
+  const permissionsReady=browser.permissions.contains({permissions:['downloads']}).then(value=>{granted=value;if(value)attach();return value;});
+  browser.permissions.onAdded.addListener(value=>{if(value.permissions?.includes('downloads')){granted=true;attach();}});
+  browser.permissions.onRemoved?.addListener(value=>{if(value.permissions?.includes('downloads')){granted=false;requests.clear();}});
+  browser.webRequest.onBeforeSendHeaders.addListener(event=>{void permissionsReady.then(()=>{
+    if(!granted || event.tabId<0 || event.incognito || !httpURL(event.url) || typeof event.requestId!=='string' || !event.requestId || requestsBlockedUntil>Date.now()) return;
+    // Navigation/file requests can become downloads. Image/XHR/script traffic
+    // has its own media pipeline and must not displace ordinary request records.
+    if(event.type && !['main_frame','sub_frame','other'].includes(event.type)) return;
+    const header={...safeHeader(event.requestHeaders),...protectedHeaders(event.requestHeaders)};
+    const cookie=event.requestHeaders?.find(h=>h.name.toLowerCase()==='cookie')?.value;
+    if(cookie && !/[\r\n]/.test(cookie)) header.Cookie=cookie;
+    header['Accept-Encoding']='identity';
+    for(const [url,request] of requests) if(request.expires<Date.now()) requests.delete(url);
+    const previous=requests.get(event.url),same=previous && previous.requestId===event.requestId && previous.tabId===event.tabId && previous.frameId===event.frameId && previous.documentId===event.documentId;
+    const ambiguous=previous && (previous.ambiguous || !same);
+    if(!previous && requests.size>=200){requests.clear();requestsBlockedUntil=Date.now()+60000;return;}
+    requests.set(event.url,{requestId:event.requestId,tabId:event.tabId,frameId:event.frameId,documentId:event.documentId,method:event.method,...(!ambiguous?{header}:{}),ambiguous:!!ambiguous,expires:Date.now()+60000});
+  });},{urls:['<all_urls>']},['requestHeaders','extraHeaders']);
+  return {capture,poll,jobs,ready:restored};
 }

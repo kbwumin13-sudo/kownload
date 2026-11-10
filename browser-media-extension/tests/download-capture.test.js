@@ -2,166 +2,150 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {installDownloadCapture} from '../download-capture.js';
 
-function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,tabFails=false,searchFails=false,session={}}={}) {
-  const events={},calls=[],messages=[],saved=structuredClone(session);
-  const event = name => ({addListener:fn => { (events[name] ||= []).push(fn); }});
-  const browser={
-    permissions:{contains:async()=>true,onAdded:event('permission')},
-    storage:{local:{get:async()=>({downloadCapture:{enabled,confirm}})},session:{set:async v=>Object.assign(saved,structuredClone(v)),get:async()=>structuredClone(saved)},onChanged:event('storage')},
-    downloads:{onCreated:event('created'),onChanged:event('changed'),onDeterminingFilename:event('download'),pause:async id=>calls.push(['pause',id]),resume:async id=>calls.push(['resume',id]),cancel:async id=>calls.push(['cancel',id]),search:async()=>{if(searchFails)throw Error('search');return[{id:7,state:'in_progress'}];}},
-    tabs:{create:async()=>{if(tabFails)throw Error('tab');return{id:18};},onRemoved:event('removed')},
-    action:{setBadgeText:async()=>{},setTitle:async()=>{}},
-    webNavigation:{onCommitted:event('navigation')},webRequest:{onBeforeSendHeaders:event('headers')},runtime:{getURL:p=>'chrome-extension://ours/'+p,onMessage:event('message')}
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,receipt={state:'unknown',taskIds:[]},session={}}={}) {
+  const events={},calls=[],messages=[],rpc=[],saved=structuredClone(session);
+  const event=name=>({addListener:fn=>{(events[name] ||= []).push(fn);}});
+  const f={events,calls,messages,rpc,saved,settings:{downloadCapture:{enabled,confirm}},receipt,leases:0,settingsReads:0,itemState:{id:7,state:'in_progress',paused:true,bytesReceived:0,totalBytes:20}};
+  f.browser={
+    permissions:{contains:async()=>true,onAdded:event('permission'),onRemoved:event('removedPermission')},
+    storage:{local:{get:async()=>({downloadCapture:{enabled,confirm}})},session:{get:async()=>structuredClone(saved),set:async value=>Object.assign(saved,structuredClone(value))},onChanged:event('storage')},
+    downloads:{onCreated:event('created'),onChanged:event('changed'),onDeterminingFilename:event('download'),pause:async id=>calls.push(['pause',id]),resume:async id=>calls.push(['resume',id]),cancel:async id=>calls.push(['cancel',id]),search:async()=>{if(f.searchError)throw Error('query');return f.itemState ? [structuredClone(f.itemState)] : [];}},
+    webRequest:{onBeforeSendHeaders:event('headers')},action:{setBadgeText:async()=>{},setTitle:async()=>{}}
   };
-  const send=async message=>{
+  f.send=async message=>{
     messages.push(message);
     if(message.method==='ping'){if(ping instanceof Error)throw ping;return ping;}
     if(reply instanceof Error)throw reply;
     if(typeof reply==='function')return reply(message);
     return reply || {code:0,httpStatus:200,businessCode:0,operationId:message.operationId,data:{code:0,operationId:message.operationId,data:'task-one',submission:{state:'created',taskIds:['task-one']}}};
   };
-  const controller=installDownloadCapture(browser,send);
-  const item={id:7,url:'https://files.test/a.bin',finalUrl:'https://files.test/a.bin',filename:'/downloads/a.bin'};
-  async function capture(overrides={},method='GET') {
-    for(const fn of events.headers)fn({url:item.finalUrl,tabId:1,requestId:'request-one',method,requestHeaders:[{name:'Cookie',value:'private-cookie'},{name:'Authorization',value:'private-token'},{name:'Referer',value:'https://page.test/'}]});
-    await Promise.resolve();await controller.capture({...item,...overrides});
-  }
-  return {browser,controller,capture,item,calls,messages,saved,events};
+  f.bridge={
+    settings:async()=>{f.settingsReads++;if(f.settingsError)throw Error('unavailable');return structuredClone(f.settings);},
+    identity:async()=>({clientId:'client-one',browser:'chrome'}),
+    send:f.send,acquire:()=>{f.leases++;let released=false;return()=>{if(!released){released=true;f.leases--;}};},
+    request:async(action,params)=>{rpc.push({action,...structuredClone(params)});if(f.receipt instanceof Error)throw f.receipt;return typeof f.receipt==='function' ? f.receipt(params) : structuredClone(f.receipt);}
+  };
+  f.controller=installDownloadCapture(f.browser,f.send,{appBridge:f.bridge,pollMs:0});
+  f.item={id:7,url:'https://files.test/a.bin',finalUrl:'https://files.test/a.bin',filename:'/downloads/a.bin'};
+  f.observe=async(overrides={})=>{
+    for(const fn of events.headers)fn({url:f.item.finalUrl,tabId:1,frameId:0,requestId:'request-one',type:'main_frame',method:'GET',requestHeaders:[{name:'Cookie',value:'synthetic-cookie'},{name:'Authorization',value:'synthetic-token'},{name:'Referer',value:'https://page.test/'}],...overrides});
+    await tick();
+  };
+  f.capture=async(overrides={},method='GET')=>{await f.observe({method});await f.controller.capture({...f.item,...overrides});};
+  return f;
 }
-test('created ACK cancels the browser only after the task exists, without a second submission',async()=>{
-  const f=fixture();await f.capture();assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);assert.equal(f.messages.filter(m=>m.method==='forward').length,1);assert.equal(f.controller.jobs.get(7).state,'created');
-  await f.capture();assert.equal(f.messages.length,2);
-  assert.equal(JSON.stringify(f.saved).includes('private-cookie'),false);assert.equal(JSON.stringify(f.saved).includes('private-token'),false);
-  assert.equal(f.messages[1].params.data.req.extra.header.Cookie,'private-cookie');
-  assert.equal(f.controller.jobs.get(7).header,undefined);assert.equal(f.controller.jobs.get(7).url,undefined);
+const accepted=message=>({code:0,httpStatus:202,businessCode:0,operationId:message.operationId,data:{code:0,operationId:message.operationId,data:null,submission:{state:'accepted',taskIds:[]}}});
+const submissions=f=>f.messages.filter(message=>message.method==='create');
+
+test('automatic capture uses current App settings and cancels only after a valid created receipt',async()=>{
+  const f=fixture();await f.capture();assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);assert.equal(submissions(f).length,1);
+  const message=submissions(f)[0];assert.equal(message.meta.source,'browser-capture');assert.equal(message.meta.silent,true);assert.equal(message.meta.clientId,'client-one');
+  assert.equal(message.params.req.extra.header.Cookie,'synthetic-cookie');assert.equal(message.params.req.extra.header.Authorization,'synthetic-token');
+  assert.equal(f.controller.jobs.get(7).state,'created');assert.equal(f.leases,0);
+  assert.equal(JSON.stringify(f.saved).includes('synthetic-cookie'),false);assert.equal(JSON.stringify(f.saved).includes('https://files.test'),false);
+  await f.capture();assert.equal(submissions(f).length,1);
 });
-test('explicit host rejection resumes the original browser request',async()=>{
-  const f=fixture({reply:{code:1,error:'ipc_unavailable',httpStatus:null,businessCode:null}});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.controller.jobs.get(7).state,'browser');
+test('App mode changes apply to the next capture even while the extension cache says disabled',async()=>{
+  const f=fixture({enabled:false});f.settings.downloadCapture={enabled:true,confirm:true};f.messages.length=0;
+  await f.capture();assert.equal(submissions(f).length,1);assert.equal(submissions(f)[0].meta.silent,false);assert.equal(f.settingsReads,1);
 });
-test('filename completion stays pending throughout confirmation and releases on explicit cancellation',async()=>{
-  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
-  let releasePause,suggested=false;
-  f.browser.downloads.pause=async id=>{f.calls.push(['pause',id]);await new Promise(resolve=>{releasePause=resolve;});};
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
-  assert.equal(f.events.download[0](f.item,()=>{suggested=true;}),true);
-  await new Promise(resolve=>setImmediate(resolve));assert.equal(suggested,false);
-  releasePause();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(suggested,false);assert.equal(f.controller.jobs.get(7).state,'waiting');
-  await f.controller.finish(f.controller.jobs.get(7),'cancel');assert.equal(suggested,true);
-});
-test('a fully buffered fast file cannot finish before confirmation and create a browser duplicate',async()=>{
-  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
-  let suggested=false;
-  f.browser.downloads.search=async()=>[{id:7,state:suggested ? 'complete' : 'in_progress'}];
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
-  assert.equal(f.events.download[0](f.item,()=>{suggested=true;}),true);
-  await new Promise(resolve=>setImmediate(resolve));assert.equal(suggested,false);
-  await f.controller.finish(f.controller.jobs.get(7),'submit');
-  assert.equal(f.controller.jobs.get(7).state,'created');assert.equal(suggested,true);
-  assert.equal(f.messages.filter(m=>m.method==='forward').length,1);
-  assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
-});
-test('a browser file already completed at confirmation is not reported as user cancellation',async()=>{
-  const f=fixture({confirm:true});await f.capture();
-  f.browser.downloads.search=async()=>[{id:7,state:'complete'}];
-  await f.controller.finish(f.controller.jobs.get(7),'submit');
-  assert.equal(f.controller.jobs.get(7).state,'browser');
-  assert.equal(f.messages.filter(m=>m.method==='forward').length,0);
-});
-for(const ping of [{code:0,data:false},new Error('host disconnected')])test('preflight unavailable/disconnect cannot have submitted a task and resumes the browser',async()=>{
-  const f=fixture({ping});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,1);
-});
-for(const reply of [new Error('reply lost after commit'),{code:0},message=>({code:0,httpStatus:200,businessCode:0,operationId:message.operationId,data:{code:0,operationId:'different',data:'task-one',submission:{state:'created',taskIds:['task-one']}}})])test('unknown receipt never resumes or cancels a possibly accepted download',async()=>{
-  const f=fixture({reply});await f.capture();assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.controller.jobs.get(7).state,'uncertain');assert.equal(f.saved.downloadCapturePending[7].state,'uncertain');
-});
-test('accepted is waiting, never confused with a created task',async()=>{
-  const f=fixture({reply:m=>({code:0,httpStatus:202,businessCode:0,operationId:m.operationId,data:{code:0,operationId:m.operationId,data:null,submission:{state:'accepted',taskIds:[]}}})});await f.capture();assert.equal(f.controller.jobs.get(7).state,'accepted');assert.deepEqual(f.calls,[['pause',7]]);
-});
-test('explicit user cancellation never calls the native host',async()=>{
-  const f=fixture({confirm:true});await f.capture();assert.equal(f.controller.jobs.get(7).state,'waiting');await f.controller.finish(f.controller.jobs.get(7),'cancel');assert.equal(f.messages.length,0);assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
-});
-test('closing confirmation restores the browser before any app submission',async()=>{
-  const f=fixture({confirm:true});await f.capture();f.events.removed[0](18);await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);
-});
-test('duplicate confirmation and unknown actions cannot submit twice',async()=>{
-  const f=fixture({confirm:true});await f.capture();const job=f.controller.jobs.get(7);await f.controller.finish(job,'unexpected');assert.equal(f.messages.length,0);await Promise.all([f.controller.finish(job,'submit'),f.controller.finish(job,'submit')]);assert.equal(f.messages.filter(m=>m.method==='forward').length,1);
-});
-test('confirmation UI failure restores the browser instead of stranding a paused file',async()=>{
-  const f=fixture({confirm:true,tabFails:true});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);
-});
-test('a browser status query failure before confirmation restores the original request',async()=>{
-  const f=fixture({searchFails:true});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);
-});
-test('a browser status query failure after preflight cannot strand an unsubmitted request',async()=>{
-  const f=fixture({confirm:true});await f.capture();f.browser.downloads.search=async()=>{throw Error('search');};await f.controller.finish(f.controller.jobs.get(7),'submit');assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,1);
-});
-test('a worker restart lets an unsubmitted confirmation resume without losing credentials or submitting',async()=>{
-  const original=fixture({confirm:true});await original.capture();
-  const restarted=fixture({session:original.saved});
-  const request=action=>new Promise(resolve=>restarted.events.message[0]({type:'DOWNLOAD_CAPTURE',action,id:7},{url:'chrome-extension://ours/download-confirm.html?id=7',tab:{id:18}},resolve));
-  assert.equal((await request('status')).job.state,'expired');
-  assert.equal((await request('submit')).job.state,'expired');assert.equal(restarted.messages.length,0);
-  assert.equal((await request('resume')).job.state,'browser');assert.deepEqual(restarted.calls,[['resume',7]]);
-});
-test('closing an unsubmitted confirmation after a worker restart restores the browser',async()=>{
-  const original=fixture({confirm:true});await original.capture();const restarted=fixture({session:original.saved});restarted.events.removed[0](18);await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(restarted.calls,[['resume',7]]);assert.equal(restarted.messages.length,0);
-});
-test('leaving an unsubmitted confirmation restores the browser, but its initial navigation does not',async()=>{
-  const f=fixture({confirm:true});await f.capture();f.events.navigation[0]({tabId:18,frameId:0,url:'chrome-extension://ours/download-confirm.html?id=7'});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(f.calls,[['pause',7]]);f.events.navigation[0]({tabId:18,frameId:0,url:'https://page.test/'});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);
-});
-test('default off, blob/data, POST, incognito and extension requests stay in the browser',async()=>{
-  for(const [options,item,method] of [[{enabled:false},{},'GET'],[{}, {url:'blob:https://page.test/one',finalUrl:'blob:https://page.test/one'},'GET'],[{}, {},'POST'],[{}, {incognito:true},'GET'],[{}, {byExtensionId:'other'},'GET']]) {
-    const f=fixture(options);await f.capture(item,method);assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
+test('disabled or unavailable App settings leave the original browser request intact',async()=>{
+  for(const fail of [false,true]) {
+    const f=fixture({enabled:false});f.settingsError=fail;await f.capture();
+    assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(submissions(f).length,0);assert.equal(f.leases,0);
   }
 });
-for (const firstMethod of ['GET','POST']) test(`same-URL ${firstMethod}/GET requests from different tabs cannot borrow the later headers`,async()=>{
-  const f=fixture();
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,frameId:0,requestId:'request-A',method:firstMethod,requestHeaders:[{name:'Authorization',value:'synthetic-A'}]});
-  f.events.headers[0]({url:f.item.finalUrl,tabId:2,frameId:0,requestId:'request-B',method:'GET',requestHeaders:[{name:'Authorization',value:'synthetic-B'}]});
-  await Promise.resolve();await f.controller.capture(f.item);
-  assert.equal(f.messages.length,0);assert.deepEqual(f.calls,[]);
+test('an accepted App confirmation is pending, not a created task or browser cancellation',async()=>{
+  const f=fixture({confirm:true,reply:accepted});await f.capture();
+  assert.equal(f.controller.jobs.get(7).state,'accepted');assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.leases,1);assert.equal(submissions(f).length,1);
+  f.receipt={state:'cancelled',taskIds:[]};await f.controller.poll(f.controller.jobs.get(7));assert.equal(f.leases,0);
 });
-test('a retry of the same identified request retains its final headers',async()=>{
-  const f=fixture();
-  for(const token of ['synthetic-A','synthetic-B']) f.events.headers[0]({url:f.item.finalUrl,tabId:1,frameId:0,requestId:'same-request',method:'GET',requestHeaders:[{name:'Authorization',value:token}]});
-  await Promise.resolve();await f.controller.capture(f.item);
-  assert.equal(f.messages.find(m=>m.method==='forward').params.data.req.extra.header.Authorization,'synthetic-B');
+test('App approval is gated by the current download and does not issue another create',async()=>{
+  const f=fixture({confirm:true,reply:accepted});await f.capture();const job=f.controller.jobs.get(7);
+  f.itemState.bytesReceived=f.itemState.totalBytes;
+  f.receipt=params=>params.decision==='commit' ? {state:'accepted',taskIds:[],commitStarted:true} : {state:'accepted',taskIds:[],commitRequested:true,confirmToken:'token-one'};
+  await f.controller.poll(job);
+  assert.equal(f.rpc.at(-1).decision,'commit');assert.equal(job.state,'authorizing');assert.equal(submissions(f).length,1);
+  f.receipt={state:'created',taskIds:['task-one']};await f.controller.poll(job);assert.equal(job.state,'created');assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
 });
-test('cache overflow cannot erase ambiguity and then attach a different request',async()=>{
-  const f=fixture();
-  for(let i=0;i<201;i++) f.events.headers[0]({url:`https://files.test/${i}`,tabId:1,requestId:`request-${i}`,method:'GET',requestHeaders:[]});
-  await Promise.resolve();await f.capture();assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
+test('a real browser completion during confirmation is reported separately and never re-created',async()=>{
+  const f=fixture({confirm:true,reply:accepted});await f.capture();f.itemState.state='complete';f.itemState.bytesReceived=20;
+  f.receipt={state:'browser_completed',taskIds:[]};await f.controller.poll(f.controller.jobs.get(7));
+  assert.equal(f.rpc[0].decision,'browser_completed');assert.equal(submissions(f).length,1);assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.leases,0);
 });
-test('confirmation status uses the real browser state after a worker restart or external completion',async()=>{
-  const f=fixture({confirm:true});await f.capture();f.browser.downloads.search=async()=>[{id:7,state:'complete',paused:true,bytesReceived:20,totalBytes:20}];
-  const reply=await new Promise(resolve=>f.events.message[0]({type:'DOWNLOAD_CAPTURE',id:7,action:'status'},{url:'chrome-extension://ours/download-confirm.html?id=7'},resolve));
-  assert.equal(reply.job.state,'browser');assert.equal(reply.browser.state,'complete');assert.equal(f.messages.length,0);
+test('only an explicit App cancellation cancels an in-progress browser download',async()=>{
+  const f=fixture({confirm:true,reply:accepted});await f.capture();f.receipt={state:'cancelled',taskIds:[]};
+  await f.controller.poll(f.controller.jobs.get(7));assert.equal(f.controller.jobs.get(7).state,'cancelled');assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
 });
-test('a transient browser query failure leaves an unsubmitted confirmation recoverable',async()=>{
-  const f=fixture({confirm:true});await f.capture();f.browser.downloads.search=async()=>{throw Error('temporary');};
-  await assert.rejects(f.controller.finish(f.controller.jobs.get(7),'resume'));assert.equal(f.controller.jobs.get(7).state,'waiting');
-  f.browser.downloads.search=async()=>[{id:7,state:'in_progress',paused:true}];
-  await f.controller.finish(f.controller.jobs.get(7),'resume');assert.equal(f.controller.jobs.get(7).state,'browser');assert.equal(f.messages.length,0);
+for(const ping of [{code:0,data:false},new Error('host disconnected')])test('pre-submission host unavailability safely resumes the browser',async()=>{
+  const f=fixture({ping});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(submissions(f).length,0);assert.equal(f.leases,0);
 });
-test('safe failures release filename completion exactly once, while an unknown submission remains held',async()=>{
-  for(const [options,released] of [[{ping:new Error('disconnected')},true],[{reply:{code:1,error:'ipc_unavailable'}},true],[{reply:new Error('lost after submission')},false]]) {
-    const f=fixture(options);await new Promise(resolve=>setImmediate(resolve));let suggestions=0;
-    f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
-    assert.equal(f.events.download[0](f.item,()=>{suggestions++;}),true);await new Promise(resolve=>setImmediate(resolve));
-    assert.equal(suggestions,released ? 1 : 0);
-  }
+test('explicit Native rejection safely resumes the original browser request',async()=>{
+  const f=fixture({reply:{code:1,error:'ipc_unavailable'}});await f.capture();
+  assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.controller.jobs.get(7).state,'browser');
 });
-test('the created event pauses immediately, before filename determination or confirmation',async()=>{
-  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
-  f.events.created[0](f.item);assert.deepEqual(f.calls,[['pause',7]]);
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
-  let suggestions=0;f.events.download[0](f.item,()=>{suggestions++;});await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(f.calls,[['pause',7]]);assert.equal(suggestions,0);
-  await f.controller.finish(f.controller.jobs.get(7),'submit');assert.equal(suggestions,1);assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
+test('a lost create reply is queried once by operationId, never replayed or blindly resumed',async()=>{
+  const f=fixture({reply:new Error('lost'),receipt:{state:'unknown',taskIds:[]}});await f.capture();
+  assert.equal(submissions(f).length,1);assert.equal(f.rpc.length,1);assert.equal(f.rpc[0].operationId,submissions(f)[0].operationId);
+  assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.controller.jobs.get(7).state,'uncertain');assert.equal(f.leases,0);
 });
-test('an early-paused POST returns its original request to the browser without native submission',async()=>{
-  const f=fixture();await new Promise(resolve=>setImmediate(resolve));f.events.created[0](f.item);
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'POST',requestHeaders:[]});await Promise.resolve();
-  let suggestions=0;f.events.download[0](f.item,()=>{suggestions++;});await new Promise(resolve=>setImmediate(resolve));
+test('the existing created result can be recovered after its Native reply is lost',async()=>{
+  const f=fixture({reply:new Error('lost'),receipt:{state:'created',taskIds:['real-task']}});await f.capture();
+  assert.equal(submissions(f).length,1);assert.equal(f.controller.jobs.get(7).state,'created');assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
+});
+test('a browser cancellation failure preserves the created fact and task IDs for recovery',async()=>{
+  const f=fixture();f.browser.downloads.cancel=async()=>{throw Error('permission changed');};await f.capture();
+  const job=f.controller.jobs.get(7);assert.equal(job.state,'created');assert.deepEqual(job.taskIds,['task-one']);assert.equal(f.saved.downloadCapturePending[7].state,'created');assert.equal(f.leases,0);
+});
+test('a completed file is not deleted or downgraded when an App-created result arrives',async()=>{
+  const f=fixture({reply:message=>{f.itemState.state='complete';return {code:0,httpStatus:200,businessCode:0,operationId:message.operationId,data:{code:0,operationId:message.operationId,data:'one',submission:{state:'created',taskIds:['one']}}};}});
+  await f.capture();assert.equal(f.controller.jobs.get(7).state,'created');assert.deepEqual(f.calls,[['pause',7]]);
+});
+test('malformed or mismatched creation receipts cannot cause browser cancellation',async()=>{
+  const f=fixture({reply:message=>({code:0,httpStatus:200,businessCode:0,operationId:'other',data:{code:0,operationId:message.operationId,submission:{state:'created',taskIds:['one']}}})});await f.capture();
+  assert.equal(f.controller.jobs.get(7).state,'uncertain');assert.deepEqual(f.calls,[['pause',7]]);
+});
+test('worker recovery queries an already submitted operation without retaining credentials or sending create',async()=>{
+  const f=fixture({session:{downloadCapturePending:{7:{id:7,name:'a.bin',operationId:'persisted-operation',state:'accepted',posted:true}}},receipt:{state:'created',taskIds:['existing']}});
+  await tick();assert.equal(submissions(f).length,0);assert.equal(f.rpc[0].operationId,'persisted-operation');assert.deepEqual(f.calls,[['cancel',7]]);assert.equal(f.leases,0);
+});
+test('worker recovery resumes a definitely unsubmitted request without reconstructing its lost headers',async()=>{
+  const f=fixture({session:{downloadCapturePending:{7:{id:7,name:'a.bin',operationId:'old-operation',state:'waiting',posted:false}}}});
+  await tick();assert.deepEqual(f.calls,[['resume',7]]);assert.equal(f.messages.length,0);
+});
+test('the first created event pauses immediately before filename determination',async()=>{
+  const f=fixture();await tick();f.events.created[0](f.item);assert.deepEqual(f.calls,[['pause',7]]);
+  await f.observe();let suggestions=0;f.events.download[0](f.item,()=>{suggestions++;});await tick();
+  assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);assert.equal(suggestions,1);
+});
+test('a held filename is released once on safe fallback and not before an App decision',async()=>{
+  const f=fixture({reply:accepted});await f.observe();let suggestions=0;
+  assert.equal(f.events.download[0](f.item,()=>{suggestions++;}),true);await tick();assert.equal(suggestions,0);
+  f.receipt={state:'cancelled',taskIds:[]};await f.controller.poll(f.controller.jobs.get(7));assert.equal(suggestions,1);
+});
+test('an early-paused POST resumes the same browser request without Native submission',async()=>{
+  const f=fixture();await tick();f.events.created[0](f.item);await f.observe({method:'POST'});let suggestions=0;
+  f.events.download[0](f.item,()=>{suggestions++;});await tick();
   assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);assert.equal(suggestions,1);
+});
+test('blob, incognito and other-extension downloads stay with their original owner',async()=>{
+  for(const override of [{url:'blob:https://page.test/one',finalUrl:'blob:https://page.test/one'},{incognito:true},{byExtensionId:'other'}]) {
+    const f=fixture();await f.capture(override);assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
+  }
+});
+for(const method of ['GET','POST'])test('ambiguous same-URL '+method+'/GET navigation requests cannot borrow another tab headers',async()=>{
+  const f=fixture();await f.observe({method,requestId:'request-A',tabId:1});await f.observe({requestId:'request-B',tabId:2});
+  await f.controller.capture(f.item);assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
+});
+test('a retry of the same request identity retains its final headers',async()=>{
+  const f=fixture();await f.observe({requestHeaders:[{name:'Authorization',value:'synthetic-A'}]});await f.observe({requestHeaders:[{name:'Authorization',value:'synthetic-B'}]});
+  await f.controller.capture(f.item);assert.equal(submissions(f)[0].params.req.extra.header.Authorization,'synthetic-B');
+});
+test('ordinary association is not displaced by image or XHR resources',async()=>{
+  const f=fixture();await f.observe();await f.observe({type:'image',requestId:'image-other',tabId:2});
+  await f.controller.capture(f.item);assert.equal(submissions(f).length,1);assert.equal(submissions(f)[0].params.req.extra.header.Cookie,'synthetic-cookie');
+});
+test('browser query failure before posting cannot strand an original request',async()=>{
+  const f=fixture();f.searchError=true;await f.capture();assert.equal(submissions(f).length,0);assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.leases,0);
 });

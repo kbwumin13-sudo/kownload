@@ -3,8 +3,8 @@ import {installNetdiskBridge} from './netdisk.js';
 import {installDownloadCapture,createAppBridge} from './lib.js';
 
 installNetdiskBridge(chrome);
-installDownloadCapture(chrome,message => native(message,false,true));
 const appBridge = createAppBridge(chrome,message => native(message,false,true));
+installDownloadCapture(chrome,message => native(message,false,true),{appBridge});
 
 const pendingHeaders = new Map();
 const requestStarts = new Map();

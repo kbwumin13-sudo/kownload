@@ -1,5 +1,6 @@
 import {nativeData,bridgeFailure} from './lib.js';
 import {browserClientId} from './app-identity.js';
+import {createNativeSession} from './native-session.js';
 
 const sites = value => Object.fromEntries(Object.entries(value && typeof value === 'object' && !Array.isArray(value) ? value : {}).filter(([host,disabled]) => host.length <= 253 && typeof disabled === 'boolean'));
 function canonical(data) {
@@ -9,10 +10,20 @@ function canonical(data) {
 }
 
 export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThis.navigator?.userAgent || '') ? 'edge' : 'chrome'}={}) {
-  let latest,writing=Promise.resolve();
+  let latest,writing=Promise.resolve(),channel,leases=0;
+  function acquire() {
+    if ((!channel || channel.closed) && browser.runtime.connectNative) channel=createNativeSession(browser);
+    leases++;
+    let released=false;
+    return ()=>{if(released)return;released=true;if(--leases===0){channel?.close();channel=null;}};
+  }
+  const transmit=message=>{
+    if (leases && browser.runtime.connectNative && (!channel || channel.closed)) channel=createNativeSession(browser);
+    return channel ? channel.send(message) : send(message);
+  };
   const identity=async()=>({clientId:await browserClientId(browser),browser:browserName});
   async function request(action,params={}) {
-    const reply=await send({method:'browser',params:{...params,action,...await identity()}});
+    const reply=await transmit({method:'browser',params:{...params,action,...await identity()}});
     if (reply?.code !== 0) throw bridgeFailure(reply?.error);
     return nativeData(reply);
   }
@@ -36,10 +47,10 @@ export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThi
     return apply(await request('sync',{legacySettings,downloadsPermission,version:browser.runtime.getManifest?.().version || '0.5.0'}));
   }
   async function wake() {
-    const reply=await send({method:'wakeup',meta:{silent:true}});
+    const reply=await transmit({method:'wakeup',meta:{silent:true}});
     if (reply?.code !== 0) throw bridgeFailure(reply?.error);
   }
   async function openSettings() { await wake();await settings();return request('openSettings'); }
   async function updateSettings(patch) { await wake();await settings();return apply(await request('updateSettings',{patch})); }
-  return {identity,request,settings,openSettings,updateSettings};
+  return {identity,request,settings,openSettings,updateSettings,wake,acquire,send:transmit};
 }
