@@ -22,7 +22,7 @@ export function createAppMediaBridge(browser,appBridge,{call,preview,pollMs=500}
   async function allowed(scope) {
     const response = await appBridge.settings();
     const settings = response?.settings || response;
-    if (!settings || settings.sniffing?.enabled === false || settings.sniffing?.disabledSites?.[new URL(scope.sourcePage).hostname]) throw new Error(FAILURE);
+    if (!settings || settings.sniffing?.enabled === false || settings.sniffing?.disabledSites?.[scope.site]) throw new Error(FAILURE);
   }
   function message(s,type,itemId,options) {
     const scope = s.scope;
@@ -156,6 +156,7 @@ export function createAppMediaBridge(browser,appBridge,{call,preview,pollMs=500}
       const current = await frame(scope);
       scope.documentId ||= current.documentId;
       scope.sourcePage ||= current.url;
+      scope.site = input.site || new URL(scope.sourcePage).hostname;
       if (!scope.documentId || scope.mode === 'single' && typeof scope.target !== 'string' || scope.mode === 'identify' && !scope.playerId) throw new Error(FAILURE);
       s.scope = Object.freeze(scope);
       sessions.set(s.id,s);
@@ -164,7 +165,7 @@ export function createAppMediaBridge(browser,appBridge,{call,preview,pollMs=500}
       const items = await summary(await list(s));
       await frame(s.scope);
       if (s.closed) throw new Error(FAILURE);
-      await appBridge.request('mediaOpen',{...identity,sessionId:s.id,view:scope.mode,site:new URL(scope.sourcePage).hostname,items});
+      await appBridge.request('mediaOpen',{...identity,sessionId:s.id,view:scope.mode,site:scope.site,items});
       if (s.closed) {
         await appBridge.request('mediaResult',{sessionId:s.id,closed:true,error:FAILURE}).catch(() => {});
         throw new Error(FAILURE);

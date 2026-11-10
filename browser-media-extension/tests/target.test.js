@@ -17,7 +17,7 @@ function background(extra = {},frame = null) {
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k => [k,event])),
     webNavigation:{onCommitted:event,onHistoryStateUpdated:event,onReferenceFragmentUpdated:event,getFrame:async () => frame},
     runtime:{onMessage:{addListener:fn => {handler = fn;}},sendMessage:async () => {},getURL:path => `chrome-extension://test/${path}`}};
-  vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
+  vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,createAppMediaBridge:()=>({open:async scope=>opened.push(scope),invalidate:async()=>{}}),installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
   return {opened,request:(msg,sender = {}) => new Promise(resolve => handler(msg,sender,resolve))};
 }
 
@@ -32,9 +32,9 @@ test('a player click pins a candidate from its own document and frame even befor
   const reply = await bg.request({type:'PANEL',url:'https://cdn.test/a.mp4',sourcePage:'https://example.test/frame',timeStamp:Date.now()},
     {tab:{id:1,title:'test'},frameId:7,documentId:'doc-seven',url:'https://example.test/frame'});
   assert.equal(reply.ok,true);
-  const url = new URL(bg.opened[0].url);
-  assert.equal(url.searchParams.get('mode'),'single');
-  const target = url.searchParams.get('target');
+  const scope = bg.opened[0];
+  assert.equal(scope.mode,'single');
+  const target = scope.target;
   assert.ok(target);
   const candidates = (await bg.request({type:'LIST',tabId:1,target})).data;
   assert.equal(candidates.length,1);
@@ -113,7 +113,7 @@ async function popup(target = 'a',mode = 'single') {
     const data = msg.type === 'LIST' ? candidates.filter(x => !msg.target || x.id === msg.target) : msg.type === 'CONFIG' ? {} : false;
     return {ok:true,data};
   }}};
-  vm.runInNewContext(fs.readFileSync(new URL('../popup.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,document,chrome,URL,URLSearchParams,location:{search:target === null ? '?tab=1' : `?tab=1&mode=${mode}&target=${target}&frame=0&doc=doc-1&source=https://example.test/watch&player=player-1`},Option:class extends Element {constructor(text,value){super('option');this.textContent = text;this.value = value;}}});
+  vm.runInNewContext(fs.readFileSync(new URL('./fixtures/legacy-popup.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,document,chrome,URL,URLSearchParams,location:{search:target === null ? '?tab=1' : `?tab=1&mode=${mode}&target=${target}&frame=0&doc=doc-1&source=https://example.test/watch&player=player-1`},Option:class extends Element {constructor(text,value){super('option');this.textContent = text;this.value = value;}}});
   await settle();
   return {get,requests};
 }
@@ -138,7 +138,7 @@ test('a MIME-only manifest keeps media inspection when clicked in its own player
   const bg = background({opaque:{id:'opaque',tabId:1,frameId:0,documentId:'doc',sourcePage:'https://example.test/watch',url:'https://cdn.test/opaque?sig=keep',mime:'application/vnd.apple.mpegurl',kind:'video',manifest:true,header:{Referer:'https://example.test/watch'}}});
   await bg.request({type:'PANEL',url:'https://cdn.test/opaque?sig=keep',sourcePage:'https://example.test/watch'},
     {tab:{id:1},frameId:0,documentId:'doc'});
-  const target = new URL(bg.opened[0].url).searchParams.get('target');
+  const target = bg.opened[0].target;
   const item = (await bg.request({type:'LIST',tabId:1,target})).data[0];
   assert.equal(item.manifest,true);
   assert.equal(item.header.Referer,'https://example.test/watch');
@@ -179,9 +179,9 @@ test('X SSR suggestion becomes an unselected identify candidate for its exact fr
   const reply = await bg.request({type:'PANEL',url:'',suggestedPage:source,expectedMediaId:'719944021058060289',sourcePage:source,playerId:'video-1'},
     {tab:{id:1,title:'X'},frameId:0,documentId:'x-doc',url:source});
   assert.equal(reply.ok,true);
-  const opened = new URL(bg.opened[0].url);
-  assert.equal(opened.searchParams.get('mode'),'identify');
-  assert.equal(opened.searchParams.has('target'),false);
+  const opened = bg.opened[0];
+  assert.equal(opened.mode,'identify');
+  assert.equal(Object.hasOwn(opened,'target'),false);
   const items = (await bg.request({type:'LIST',tabId:1,identify:true,frameId:0,documentId:'x-doc',sourcePage:source,playerId:'video-1'})).data;
   assert.equal(items.length,1);
   assert.equal(items[0].sourceType,'page');
@@ -213,7 +213,7 @@ test('X page mode accepts only a status permalink from the same platform, preser
   const reply = await bg.request({type:'PANEL',url:'https://x.com/example/status/12345',sourceType:'page',expectedMediaId:'12345',sourcePage:'https://x.com/home',timeStamp:Date.now()},
     {tab:{id:1,title:'X'},frameId:0,documentId:'x-doc',url:'https://x.com/home'});
   assert.equal(reply.ok,true);
-  const target = new URL(bg.opened[0].url).searchParams.get('target');
+  const target = bg.opened[0].target;
   assert.equal((await bg.request({type:'LIST',tabId:1,target})).data.length,1);
   assert.equal((await bg.request({type:'PANEL',url:'https://x.com/example/status/54321',sourceType:'page',expectedMediaId:'12345',sourcePage:'https://x.com/home'},
     {tab:{id:1},frameId:0,documentId:'x-doc',url:'https://x.com/home'})).ok,false);

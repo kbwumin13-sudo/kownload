@@ -1,10 +1,11 @@
 import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,SUBMIT_RESEND_DELAYS,delay,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
-import {installDownloadCapture,createAppBridge} from './lib.js';
+import {installDownloadCapture,createAppBridge,createAppMediaBridge} from './lib.js';
 
 installNetdiskBridge(chrome);
 const appBridge = createAppBridge(chrome,message => native(message,false,true));
 installDownloadCapture(chrome,message => native(message,false,true),{appBridge});
+const appMedia = createAppMediaBridge(chrome,appBridge,{call:msg => handleMediaMessage(msg,{}),preview:previewRequest});
 
 const pendingHeaders = new Map();
 const requestStarts = new Map();
@@ -46,7 +47,8 @@ async function disabled(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab || !/^https?:/.test(tab.url || '')) return true;
   const host = siteOf(tab?.url);
-  return !!(host && (await chrome.storage.local.get('disabledSites')).disabledSites?.[host]);
+  const cached = await chrome.storage.local.get(['disabledSites','sniffingEnabled']);
+  return cached.sniffingEnabled === false || !!(host && cached.disabledSites?.[host]);
 }
 function cleanUrl(url) { try { const u = new URL(url); return ['http:','https:'].includes(u.protocol) ? u.href : null; } catch { return null; } }
 async function addBatch(items,immediate = false) {
@@ -65,6 +67,7 @@ async function addBatch(items,immediate = false) {
 }
 async function add(item,immediate = false) { return (await addBatch([item],immediate))[0] || null; }
 async function clear(tabId, frameId = null,removed = false) {
+  if (frameId === null || frameId === 0) void appMedia.invalidate(tabId);
   return serial(async () => {
     const state = await read();
     for (const key of Object.keys(state.searches || {})) if (key.startsWith(`${tabId}:`) && (frameId === null || key.startsWith(`${tabId}:${frameId}:`))) delete state.searches[key];
@@ -80,6 +83,7 @@ async function clear(tabId, frameId = null,removed = false) {
   });
 }
 function navigate(event,kind) {
+  if (event.frameId === 0) void appMedia.invalidate(event.tabId);
   return serial(async () => {
     const state = await read();
     for (const [key,s] of Object.entries(state.searches || {})) if (s.tabId === event.tabId && (event.frameId === 0 || s.frameId === event.frameId)) delete state.searches[key];
@@ -192,6 +196,18 @@ async function selectedRequest(item) {
   const scopedHeaders = scopedHeadersFor(item);
   if (item.authRequired && !scopedHeaders.length) throw new Error('此资源的授权已失效，请返回网页重新播放后捕获');
   return {url:item.url,header,cookies:nativeCookies(jar),scopedHeaders,title:item.title || '',sourcePage:item.sourcePage || '',sourceType:item.sourceType || '',expectedMediaId:item.expectedMediaId || '',contextId:[item.tabId,item.frameId,item.documentId,item.pageEpoch || 0,item.playerId || ''].join(':'),context:{storeId,partitionKey}};
+}
+async function previewRequest(item,url) {
+  const previewUrl = cleanUrl(url);
+  if (!previewUrl) return {};
+  // A poster can use a different origin from the video. Resolve cookies and
+  // observed protected headers for this exact preview request, never inherit
+  // the video's Authorization/Cookie or its related media cookie scopes.
+  const saved = requestVault.get(vaultKey(item.tabId,item.frameId,previewUrl));
+  const own = saved?.until > Date.now() && (!saved.documentId || saved.documentId === item.documentId) ? saved.header : {};
+  const req = await selectedRequest({...item,url:previewUrl,header:{...own},authRequired:false,
+    sourceType:'',manifest:false,mediaRequired:false,relatedUrls:[],contextUrls:[]});
+  return {previewUrl,previewHeaders:req.header};
 }
 function mediaExtra(req,options = {}) {
   const header = Object.fromEntries(Object.entries(req.header || {}).filter(([key])=>key.toLowerCase()!=='cookie'));
@@ -322,6 +338,15 @@ async function update(item,options) {
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
   if (msg?.type === 'DOWNLOAD_CAPTURE') return false;
   if (typeof msg?.type==='string' && msg.type.startsWith('NETDISK_')) return false;
+  if (msg?.type === 'APP_MEDIA_OPEN') {
+    if (!sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
+    void (async () => {
+      const [tab] = await chrome.tabs.query({active:true,currentWindow:true});
+      if (!Number.isInteger(tab?.id) || !cleanUrl(tab.url)) throw new Error('请先打开需要下载的网页');
+      return appMedia.open({tabId:tab.id,mode:'all',site:siteOf(tab.url)});
+    })().then(data => sendResponse({ok:true,data}),error => sendResponse({ok:false,error:safeError(error)}));
+    return true;
+  }
   if (msg?.type === 'APP_BRIDGE') {
     if (!sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
     const action = msg.action === 'openSettings' ? () => appBridge.openSettings() : msg.action === 'updateSettings' ? () => appBridge.updateSettings(msg.patch) : msg.action === 'settings' ? () => appBridge.settings() : null;
@@ -329,7 +354,10 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
     void action().then(data => sendResponse({ok:true,data}),error => sendResponse({ok:false,error:safeError(error)}));
     return true;
   }
-  (async () => {
+  void handleMediaMessage(msg,sender).then(data => sendResponse({ok:true,data}),error => sendResponse({ok:false,error:safeError(error)}));
+  return true;
+});
+async function handleMediaMessage(msg,sender) {
     if (msg.type === 'ADD_DOM') {
       const tabId = sender.tab?.id;
       if (!Number.isInteger(tabId)) throw new Error('缺少网页标签');
@@ -361,15 +389,17 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
       return msg.target === undefined ? groupMedia(list) : list;
     }
     if (msg.type === 'SITE') {
-      const sites = (await chrome.storage.local.get('disabledSites')).disabledSites || {};
+      const tab = await chrome.tabs.get(msg.tabId);
+      if (!cleanUrl(tab.url) || siteOf(tab.url) !== msg.host) throw new Error('页面已切换，请重新打开下载助手');
+      const canonical = msg.set === undefined ? await appBridge.settings() :
+        await appBridge.updateSettings({sniffing:{disabledSites:{[msg.host]:!!msg.set}}});
+      const off = !!canonical.sniffing.disabledSites?.[msg.host];
       if (msg.set !== undefined) {
-        if (msg.set) sites[msg.host] = true; else delete sites[msg.host];
-        await chrome.storage.local.set({disabledSites:sites});
-        if (msg.set) await clear(msg.tabId);
+        if (off) await clear(msg.tabId);
         const frames = await chrome.webNavigation.getAllFrames({tabId:msg.tabId}).catch(() => []);
-        for (const frame of frames || []) chrome.tabs.sendMessage(msg.tabId,{type:msg.set ? 'SITE_OFF' : 'RESCAN'},{frameId:frame.frameId}).catch(() => {});
+        for (const frame of frames || []) chrome.tabs.sendMessage(msg.tabId,{type:off ? 'SITE_OFF' : 'RESCAN'},{frameId:frame.frameId}).catch(() => {});
       }
-      return !!sites[msg.host];
+      return off;
     }
     if (msg.type === 'ENABLED') return !(await disabled(sender.tab?.id));
     if (msg.type === 'PANEL') {
@@ -395,8 +425,8 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
             playerId:'',manualFor:msg.playerId,sourceType:'page',expectedMediaId:post[1],header:{}},true);
           if (!candidate) throw new Error('资源已失效，请回到视频重新点击');
         }
-        const params = new URLSearchParams({tab:String(tabId),mode:'identify',frame:String(sender.frameId ?? 0),doc:sender.documentId,source:msg.sourcePage || sender.url || '',player:msg.playerId});
-        await chrome.tabs.create({url:chrome.runtime.getURL(`popup.html?${params}`)});
+        await appMedia.open({tabId,mode:'identify',frameId:sender.frameId ?? 0,documentId:sender.documentId,
+          sourcePage:msg.sourcePage || sender.url || '',playerId:msg.playerId,site:siteOf((await chrome.tabs.get(tabId)).url)});
         return true;
       }
       const state = await read();
@@ -413,8 +443,8 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
       const candidate = await add({tabId,frameId:sender.frameId ?? 0,documentId:sender.documentId || '',url,...type,
         capturedAt:msg.timeStamp || Date.now(),sourcePage:msg.sourcePage || sender.url || '',title:sender.tab.title || '',playerId:msg.playerId || '',sourceType:page ? 'page' : '',expectedMediaId:msg.expectedMediaId || '',header:{}},true);
       if (!candidate) throw new Error('资源已失效，请回到视频重新点击');
-      const params = new URLSearchParams({tab:String(tabId),mode:'single',target:candidate.id});
-      await chrome.tabs.create({url:chrome.runtime.getURL(`popup.html?${params}`)});
+      await appMedia.open({tabId,mode:'single',target:candidate.id,frameId:candidate.frameId,
+        documentId:candidate.documentId,sourcePage:candidate.sourcePage,site:siteOf((await chrome.tabs.get(tabId)).url)});
       return true;
     }
     if (msg.type === 'DEEP_SEARCH') {
@@ -446,6 +476,4 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
       return msg.type === 'CREATE' ? create(item,msg.options) : update(item,msg.options);
     }
     throw new Error('未知请求');
-  })().then(data => sendResponse({ok:true,data}),error => sendResponse({ok:false,error:safeError(error)}));
-  return true;
-});
+}

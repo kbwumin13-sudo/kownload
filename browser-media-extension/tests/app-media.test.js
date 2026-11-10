@@ -106,3 +106,11 @@ test('invalidation during an opening LIST cannot present a stale viewer or creat
  const opening=f.open();await until(()=>started);await f.bridge.invalidate(1);release();await assert.rejects(opening);
  assert.equal(f.releases,1);assert.equal(f.requests.some(r=>r.action==='mediaOpen'),false);
 });
+
+test('embedded players retain the top-site preference and settings label',async t=>{
+ const f=await fixture(t);f.scope.site='outer.test';await f.open();
+ assert.equal(f.requests.find(r=>r.action==='mediaOpen').params.site,'outer.test');
+ f.settings.sniffing.disabledSites['outer.test']=true;
+ assert.equal((await f.send({type:'CREATE',itemId:'a',options:{}})).ok,false);
+ assert.equal(f.calls.filter(c=>c.type==='CREATE').length,0);
+});

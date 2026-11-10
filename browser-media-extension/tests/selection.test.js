@@ -38,11 +38,11 @@ async function popup({formats,kind='video',realBackground=false,accepted=false}=
       const data=m.params?.path==='/api/v1/media/inspect'?info:m.params?.method==='GET'&&m.params.path.startsWith('/api/v1/tasks?')?[{id:'paused-task',status:'pause',protocol:'media',meta:{req:{extra:{sourcePage:'https://page.test/watch'}}}}]:m.params?.path==='/api/v1/config'?{}:'one-task';
       cb(contractReply(m,m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data}}));
     };
-    vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
+    vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,createAppBridge:()=>({settings:async()=>({sniffing:{disabledSites:{}}})}),installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
     // The popup has its own runtime listener; do not replace the worker's handler.
     chrome.runtime.onMessage=event;
   }
-  vm.runInNewContext(fs.readFileSync(new URL('../popup.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,document,chrome,URL,URLSearchParams,location:{search:'?tab=1&mode=single&target=one'},Option:class extends Element{constructor(label,value){super('option');this.textContent=label;this.value=value;}}});
+  vm.runInNewContext(fs.readFileSync(new URL('./fixtures/legacy-popup.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,document,chrome,URL,URLSearchParams,location:{search:'?tab=1&mode=single&target=one'},Option:class extends Element{constructor(label,value){super('option');this.textContent=label;this.value=value;}}});
   await settle();await settle();return {get,requests,nativeRequests,request:chrome.runtime.sendMessage};
 }
 

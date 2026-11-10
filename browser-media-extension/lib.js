@@ -343,3 +343,4 @@ export function mediaContextUrls(info,rootUrl) {
 }
 export {installDownloadCapture} from './download-capture.js';
 export {createAppBridge} from './app-bridge.js';
+export {createAppMediaBridge} from './app-media.js';
