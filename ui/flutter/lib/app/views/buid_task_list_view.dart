@@ -25,6 +25,7 @@ import '../modules/task/controllers/task_downloading_controller.dart';
 import '../modules/task/views/task_view.dart';
 import '../routes/app_pages.dart';
 import 'file_icon.dart';
+import 'mac_task_failure.dart';
 
 /// Compact diagnostics for a running row: streams in use against the limit,
 /// or the rate-limit wait that explains a stall.
@@ -745,7 +746,7 @@ class BuildTaskListView extends GetView {
                                           ? Colors.white
                                           : colors.text,
                                       fontSize: 14,
-                                      fontWeight: FontWeight.w500,
+                                      fontWeight: FontWeight.w400,
                                     ),
                                   ),
                                 ),
@@ -764,29 +765,43 @@ class BuildTaskListView extends GetView {
                               ],
                             ),
                             const SizedBox(height: 3),
-                            Text(
-                              [
-                                status,
-                                getProgressText(),
-                                getPercentText(),
-                                if (isRunning())
-                                  streamsLabel((taskListController
-                                          as MacTaskListController)
-                                      .stats[task.id]),
-                                if (extraction.isNotEmpty) extraction,
-                              ].where((part) => part.isNotEmpty).join(' · '),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: isSelect()
-                                    ? Colors.white.withValues(alpha: .82)
-                                    : task.status == Status.error
-                                        ? CupertinoColors.systemRed
-                                        : colors.secondary,
-                                fontSize: 11,
+                            if (task.status == Status.error)
+                              MacTaskFailure(
+                                  key: ValueKey('failure-${task.id}'),
+                                  taskId: task.id,
+                                  suffix: getProgressText(),
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: isSelect()
+                                          ? Colors.white
+                                          : CupertinoColors.systemRed))
+                            else
+                              Text(
+                                [
+                                  status,
+                                  getProgressText(),
+                                  getPercentText(),
+                                  if (isRunning())
+                                    streamsLabel((taskListController
+                                            as MacTaskListController)
+                                        .stats[task.id]),
+                                  if (extraction.isNotEmpty) extraction,
+                                ].where((part) => part.isNotEmpty).join(' · '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: isSelect()
+                                      ? Colors.white.withValues(alpha: .82)
+                                      : task.status == Status.error
+                                          ? CupertinoColors.systemRed
+                                          : colors.secondary,
+                                  fontSize: 11,
+                                ),
                               ),
-                            ),
-                            if (!isDone()) ...[
+                            if (!isDone() &&
+                                task.handoff?.blocked != true &&
+                                (isRunning() ||
+                                    task.progress.downloaded > 0)) ...[
                               const SizedBox(height: 6),
                               LinearProgressIndicator(
                                 value: getProgress().clamp(0.0, 1.0).toDouble(),

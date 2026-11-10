@@ -556,10 +556,9 @@ class _NetdiskViewState extends State<NetdiskView> {
                           children: [
                             SizedBox(
                                 width: 175,
-                                child: DropdownButton<NetdiskBrowser>(
-                                  isExpanded: true,
+                                child: MacPopupField<NetdiskBrowser>(
                                   value: _browser,
-                                  hint: const Text('选择浏览器'),
+                                  hint: '选择浏览器',
                                   items: _browsers
                                       .map((b) => DropdownMenuItem(
                                           value: b, child: Text(b.name)))
@@ -576,10 +575,9 @@ class _NetdiskViewState extends State<NetdiskView> {
                                 )),
                             SizedBox(
                                 width: 155,
-                                child: DropdownButton<NetdiskBrowserProfile>(
-                                  isExpanded: true,
+                                child: MacPopupField<NetdiskBrowserProfile>(
                                   value: _profile,
-                                  hint: const Text('选择个人资料'),
+                                  hint: '选择个人资料',
                                   items: (_browser?.profiles ?? [])
                                       .map((p) => DropdownMenuItem(
                                           value: p,

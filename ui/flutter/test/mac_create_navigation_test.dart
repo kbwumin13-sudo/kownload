@@ -156,7 +156,7 @@ void main() {
         theme: macTheme(Brightness.dark),
         getPages: [GetPage(name: '/', page: () => const CreateView())]));
     await tester.pumpAndSettle();
-    expect(find.text('进行中 4'), findsOneWidget);
+    expect(find.text('未完成 4'), findsOneWidget);
     expect(find.text('已完成 1'), findsOneWidget);
     expect(find.text('running.zip'), findsOneWidget);
     expect(find.text('failed.zip'), findsOneWidget);

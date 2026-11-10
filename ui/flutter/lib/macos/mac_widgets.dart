@@ -15,7 +15,7 @@ class MacColors {
   Color get sidebar => dark ? const Color(0xff1c1c1e) : const Color(0xffededf0);
   Color get text => dark ? const Color(0xffefeff1) : const Color(0xff242426);
   Color get secondary =>
-      dark ? const Color(0xffb0b0b6) : const Color(0xff626267);
+      dark ? const Color(0xffb0b0b6) : const Color(0xff4c4c50);
   Color get border => (dark ? Colors.white : Colors.black)
       .withValues(alpha: highContrast ? .38 : .10);
   Color get accent => dark ? const Color(0xff0a84ff) : const Color(0xff007aff);
@@ -26,6 +26,9 @@ class MacColors {
           .withValues(alpha: .08);
   Color get windowBottom => windowTop;
   Color get selection => accent.withValues(alpha: dark ? .18 : .085);
+  Color get panelTint => dark
+      ? background.withValues(alpha: .025)
+      : Colors.white.withValues(alpha: highContrast ? .88 : .68);
   Color get separator => border;
   Color get field => (dark ? Colors.white : Colors.black)
       .withValues(alpha: highContrast ? .09 : .035);
@@ -133,7 +136,11 @@ class _MacButtonState extends State<MacButton> {
     final c = MacColors.of(context);
     final foreground = widget.primary ? c.primaryText : c.text;
     final enabled = widget.onPressed != null;
-    final fill = widget.primary && enabled ? c.primaryFill : c.surface;
+    final fill = widget.primary && enabled
+        ? c.primaryFill
+        : enabled
+            ? c.surface
+            : c.field;
     return SizedBox(
       height: MacMetrics.controlHeight,
       child: MouseRegion(
@@ -158,7 +165,7 @@ class _MacButtonState extends State<MacButton> {
             onFocusChange: (value) => setState(() => focused = value),
             style: TextButton.styleFrom(
               foregroundColor: foreground,
-              disabledForegroundColor: c.secondary.withValues(alpha: .55),
+              disabledForegroundColor: c.secondary.withValues(alpha: .42),
               backgroundColor: hover && enabled
                   ? Color.alphaBlend(c.text.withValues(alpha: .04), fill)
                   : fill,
@@ -186,14 +193,14 @@ class _MacButtonState extends State<MacButton> {
                   fontWeight: FontWeight.w500,
                   color: enabled
                       ? foreground
-                      : c.secondary.withValues(alpha: .55)),
+                      : c.secondary.withValues(alpha: .42)),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 if (widget.icon != null) ...[
                   Icon(widget.icon,
                       size: 14,
                       color: enabled
                           ? foreground
-                          : c.secondary.withValues(alpha: .55)),
+                          : c.secondary.withValues(alpha: .42)),
                   const SizedBox(width: 5),
                 ],
                 widget.child,
@@ -202,6 +209,50 @@ class _MacButtonState extends State<MacButton> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Compact popup appearance shared with native forms. Selection remains owned
+/// by the caller, including browser/profile identities.
+class MacPopupField<T> extends StatelessWidget {
+  final T? value;
+  final List<DropdownMenuItem<T>> items;
+  final ValueChanged<T?>? onChanged;
+  final String hint;
+  const MacPopupField(
+      {super.key,
+      this.value,
+      required this.items,
+      this.onChanged,
+      this.hint = '请选择'});
+  @override
+  Widget build(BuildContext context) {
+    final c = MacColors.of(context);
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+          color: c.field,
+          borderRadius: BorderRadius.circular(MacMetrics.controlRadius),
+          border: Border.all(color: c.border, width: c.highContrast ? 1 : .5)),
+      child: DropdownButtonHideUnderline(
+          child: DropdownButton<T>(
+        value: value,
+        items: items,
+        onChanged: onChanged,
+        isExpanded: true,
+        isDense: true,
+        hint: Text(hint, style: TextStyle(color: c.secondary, fontSize: 13)),
+        icon: Icon(CupertinoIcons.chevron_up_chevron_down,
+            size: 11, color: c.secondary),
+        style: TextStyle(
+            fontFamily: '.AppleSystemUIFont',
+            fontSize: 13,
+            fontWeight: FontWeight.w400,
+            height: 1.15,
+            color: c.text),
+      )),
     );
   }
 }

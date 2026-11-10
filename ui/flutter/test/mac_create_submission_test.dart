@@ -417,13 +417,21 @@ void main() {
     Get.put(CreateController());
     final tasks = Get.put<MacTaskListController>(_Tasks());
     tasks.tasks.assignAll([
-      for (var i = 0; i < 3; i++) _task('existing-$i', Status.running),
+      for (var i = 0; i < 3; i++)
+        _task(
+            'existing-$i',
+            i == 0
+                ? Status.running
+                : i == 1
+                    ? Status.pause
+                    : Status.error),
       _task('new-queued', Status.wait),
       _task('new-done', Status.done),
     ]);
     MacPanel.presentation.value = 'panel';
     MacPanel.incoming.value = null;
     MacPanel.taskResult.value = null;
+    MacPanel.notice.value = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
     await tester.binding.setSurfaceSize(const Size(640, 760));
@@ -444,6 +452,8 @@ void main() {
     ]));
     await tester.pumpAndSettle();
     expect(find.text('new-queued.bin'), findsNothing);
+    expect(find.text('未完成 4'), findsOneWidget);
+    expect(find.text('1 个任务运行中'), findsOneWidget);
     await tester.tap(find.textContaining('已完成').first);
     await tester.pumpAndSettle();
     expect(find.text('new-done.bin'), findsOneWidget);

@@ -560,7 +560,9 @@ void main() {
     expect(core.creates, 1);
     expect(find.text('待浏览器交接'), findsOneWidget);
     expect(find.text('已准备，等待浏览器交接'), findsOneWidget);
-    expect(find.textContaining('1 个下载进行中'), findsNothing);
+    expect(find.text('未完成 1'), findsOneWidget);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+    expect(find.textContaining('1 个任务运行中'), findsNothing);
     final before = core.calls.length;
     await tester.tap(find.byTooltip('检查交接'));
     await tester.pumpAndSettle();

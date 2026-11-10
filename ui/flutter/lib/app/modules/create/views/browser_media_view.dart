@@ -46,7 +46,11 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
       _path = TextEditingController(),
       _filter = TextEditingController();
   String _kind = 'all', _notice = '';
-  bool _busy = false, _advanced = false;
+  bool _busy = false, _advanced = false, _recoveryOpen = false;
+  final _footerKey = GlobalKey(),
+      _kindKey = GlobalKey(),
+      _filterKey = GlobalKey();
+  final _itemKeys = <String, GlobalKey>{};
   List<Map<String, dynamic>> _tasks = [];
   String? _taskId, _recoverFor;
   BrowserMediaSession get session => widget.session;
@@ -69,14 +73,47 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
     }
   }
 
-  void _resize() {
-    MacPanel.resize(scoped
-        ? (_advanced
-            ? 580
-            : session.view == 'single'
-                ? 280
-                : 400)
-        : (_advanced ? 740 : 620));
+  void _resize({bool measured = false}) {
+    if (!mounted) return;
+    double height(GlobalKey key, double fallback) {
+      final box = key.currentContext?.findRenderObject();
+      return measured && box is RenderBox && box.hasSize
+          ? box.size.height
+          : fallback;
+    }
+
+    var content = 20.0; // Existing list padding.
+    final rows = _visible;
+    for (final item in rows) {
+      final id = item['id'] as String;
+      final info = _inspected[id];
+      final choice = _records(info?['options'])
+          .where((v) => v['id'] == _formats[id])
+          .firstOrNull;
+      var controls = 0;
+      if (_selected.contains(id) && info != null) {
+        if (_records(info['options']).isNotEmpty) controls++;
+        if (_advanced && choice?['audioOnly'] != true) {
+          if (_records(info['audioTracks']).isNotEmpty) controls++;
+          if (_records(info['subtitles']).isNotEmpty) controls++;
+        }
+        if (_advanced && _records(info['variants']).isNotEmpty) controls++;
+      }
+      content += height(_itemKeys.putIfAbsent(id, () => GlobalKey()),
+              (session.view == 'single' ? 48 : 64) + controls * 40.0) +
+          8;
+      if (content > 740)
+        break; // Preserve lazy scrolling for large candidate lists.
+    }
+    final filters = scoped ? 0 : height(_kindKey, 44) + height(_filterKey, 40);
+    final footer = height(
+        _footerKey,
+        96 +
+            (_advanced ? 88 : 0) +
+            (_recoveryOpen ? 88 : 0) +
+            (_notice.isEmpty ? 0 : 32));
+    MacPanel.resize((44 + filters + content + footer)
+        .clamp(session.view == 'single' ? 240.0 : 320.0, 740.0));
   }
 
   @override
@@ -298,11 +335,20 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
               initialValue: choices.containsKey(value) ? value : null,
               key: ValueKey('$label-$value-${choices.keys.join(',')}'),
               isExpanded: true,
+              isDense: true,
+              iconSize: 16,
+              style: TextStyle(
+                  fontFamily: '.AppleSystemUIFont',
+                  fontSize: 13,
+                  height: 1.15,
+                  fontWeight: FontWeight.w400,
+                  color: MacColors.of(context).text),
               hint: const Text('请选择'),
               decoration: const InputDecoration(
+                  constraints: BoxConstraints(minHeight: 30, maxHeight: 32),
                   isDense: true,
                   contentPadding:
-                      EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
+                      EdgeInsets.symmetric(horizontal: 10, vertical: 6)),
               items: [
                 for (final entry in choices.entries)
                   DropdownMenuItem(
@@ -365,6 +411,9 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
   Widget build(BuildContext context) {
     final c = MacColors.of(context), rows = _visible;
     final chosen = items.where((i) => _selected.contains(i['id'])).toList();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _resize(measured: true);
+    });
     return Material(
         color: c.background,
         child: Column(children: [
@@ -407,6 +456,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
               ]),
           if (!scoped)
             Padding(
+                key: _kindKey,
                 padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
                 child: Row(children: [
                   for (final entry in const {
@@ -418,7 +468,15 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                     Padding(
                         padding: const EdgeInsets.only(right: 6),
                         child: ChoiceChip(
-                            label: Text(entry.value),
+                            label: Text(entry.value,
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w400,
+                                    color: c.text)),
+                            shape: const StadiumBorder(),
+                            side: BorderSide.none,
+                            backgroundColor: c.field,
+                            selectedColor: c.text.withValues(alpha: .09),
                             selected: _kind == entry.key,
                             onSelected: _busy
                                 ? null
@@ -446,6 +504,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                 ])),
           if (!scoped)
             Padding(
+                key: _filterKey,
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
                 child: TextField(
                     controller: _filter,
@@ -467,7 +526,8 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                       shrinkWrap: session.view == 'single',
                       padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
                       itemCount: rows.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 7),
+                      separatorBuilder: (_, __) =>
+                          Divider(height: 8, thickness: .5, color: c.border),
                       itemBuilder: (_, index) {
                         final item = rows[index], id = item['id'] as String;
                         final selected = _selected.contains(id),
@@ -481,22 +541,22 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                           if (variant != null) ...variant
                         };
                         return DecoratedBox(
+                            key: _itemKeys.putIfAbsent(id, () => GlobalKey()),
                             decoration: BoxDecoration(
                                 color: session.view == 'single'
                                     ? Colors.transparent
                                     : selected
-                                        ? c.selection
+                                        ? c.accent.withValues(
+                                            alpha: c.dark ? .10 : .055)
                                         : Colors.transparent,
-                                borderRadius: BorderRadius.circular(8),
+                                borderRadius: BorderRadius.circular(6),
                                 border: Border.all(
-                                    color: session.view == 'single'
-                                        ? Colors.transparent
-                                        : c.border,
-                                    width: .5)),
+                                    color: Colors.transparent, width: .5)),
                             child: Padding(
                                 padding: session.view == 'single'
                                     ? EdgeInsets.zero
-                                    : const EdgeInsets.all(12),
+                                    : const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 8),
                                 child: Column(children: [
                                   Row(children: [
                                     if (session.view != 'single')
@@ -582,6 +642,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                         onPressed: _busy ? null : _deepSearch,
                         child: const Text('增强识别这个视频')))),
           Padding(
+              key: _footerKey,
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
               child: Column(children: [
                 Align(
@@ -619,6 +680,10 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                   ]),
                 if (_advanced && chosen.length == 1)
                   ExpansionTile(
+                      onExpansionChanged: (open) {
+                        _recoveryOpen = open;
+                        _resize();
+                      },
                       tilePadding: EdgeInsets.zero,
                       title: const Text('更新暂停或失败的任务',
                           style: TextStyle(fontSize: 12)),

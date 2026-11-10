@@ -37,6 +37,7 @@ import '../../task/controllers/task_controller.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
+import '../../../views/mac_task_failure.dart';
 import '../../../views/file_tree_view.dart';
 import '../../app/controllers/app_controller.dart';
 import '../../history/views/history_view.dart';
@@ -1545,9 +1546,12 @@ class _CreateViewState extends State<CreateView> {
                   final allTasks = taskList?.tasks.toList() ?? <Task>[];
                   final completed =
                       allTasks.where((t) => t.status == Status.done).length;
-                  final active = allTasks
+                  final active =
+                      allTasks.where((t) => t.status != Status.done).length;
+                  final runningCount = allTasks
                       .where((t) =>
-                          t.status != Status.done && t.handoff?.blocked != true)
+                          t.status == Status.running &&
+                          t.handoff?.blocked != true)
                       .length;
                   final showCompleted = _panelShowCompleted.value;
                   final recent =
@@ -1606,7 +1610,7 @@ class _CreateViewState extends State<CreateView> {
                     child: Material(
                         color: appearance.reduceTransparency
                             ? c.background
-                            : c.background.withValues(alpha: .025),
+                            : c.panelTint,
                         child: Column(children: [
                           if (expanded)
                             Padding(
@@ -1767,7 +1771,7 @@ class _CreateViewState extends State<CreateView> {
                                     child: Row(children: [
                                       _panelFilter(
                                           c,
-                                          '进行中',
+                                          '未完成',
                                           active,
                                           !showCompleted,
                                           () => _panelShowCompleted.value =
@@ -1840,7 +1844,7 @@ class _CreateViewState extends State<CreateView> {
                                         child: Text(
                                             showCompleted
                                                 ? '暂无已完成的下载'
-                                                : '暂无进行中的下载',
+                                                : '暂无未完成的下载',
                                             style: TextStyle(
                                                 fontSize: 12,
                                                 color: c.secondary)))
@@ -1864,9 +1868,11 @@ class _CreateViewState extends State<CreateView> {
                                               valueListenable: MacPanel.notice,
                                               builder: (_, message, __) => Text(
                                                   message ??
-                                                      (active > 0
-                                                          ? '$active 个下载进行中'
-                                                          : '准备下载'),
+                                                      (runningCount > 0
+                                                          ? '$runningCount 个任务运行中'
+                                                          : active > 0
+                                                              ? '当前无运行任务'
+                                                              : '准备下载'),
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,
@@ -1978,33 +1984,43 @@ class _CreateViewState extends State<CreateView> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                         fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                        fontWeight: FontWeight.w400,
                         color: c.text)),
                 const SizedBox(height: 3),
-                Text(
-                    task.handoff?.blocked == true
-                        ? task.handoff!.label
-                        : failed
-                            ? '下载失败 · 查看详情'
-                            : done
-                                ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                                : task.fetchingTorrentInfo
-                                    ? '正在获取种子信息'
-                                    : running
-                                        ? (total > 0
-                                            ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
-                                            : Util.fmtByte(
-                                                task.progress.downloaded))
-                                        : task.status == Status.pause
-                                            ? '已暂停'
-                                            : '等待下载',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        fontSize: 11,
-                        color:
-                            failed ? CupertinoColors.systemRed : c.secondary)),
-                if (!done) ...[
+                if (failed)
+                  MacTaskFailure(
+                      key: ValueKey('failure-${task.id}'),
+                      taskId: task.id,
+                      style: const TextStyle(
+                          fontSize: 11, color: CupertinoColors.systemRed))
+                else
+                  Text(
+                      task.handoff?.blocked == true
+                          ? task.handoff!.label
+                          : failed
+                              ? '下载失败 · 查看详情'
+                              : done
+                                  ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                                  : task.fetchingTorrentInfo
+                                      ? '正在获取种子信息'
+                                      : running
+                                          ? (total > 0
+                                              ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
+                                              : Util.fmtByte(
+                                                  task.progress.downloaded))
+                                          : task.status == Status.pause
+                                              ? '已暂停'
+                                              : '等待下载',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: failed
+                              ? CupertinoColors.systemRed
+                              : c.secondary)),
+                if (!done &&
+                    task.handoff?.blocked != true &&
+                    (running || task.progress.downloaded > 0)) ...[
                   const SizedBox(height: 5),
                   LinearProgressIndicator(
                       minHeight: 2,
@@ -2079,32 +2095,41 @@ class _CreateViewState extends State<CreateView> {
 
   Future<void> _showTaskError(Task task) async {
     var reason = '下载失败。可重试；网盘任务可在任务管理中重新同步登录。';
+    var hasReason = false;
     try {
-      final file = File(path.join(logsDir(), 'core.log'));
-      final handle = await file.open();
-      try {
-        final length = await handle.length();
-        await handle.setPosition(length > 131072 ? length - 131072 : 0);
-        final lines = utf8
-            .decode(await handle.read(131072), allowMalformed: true)
-            .split('\n');
-        for (final line in lines.reversed) {
-          if (!line.contains(task.id)) continue;
-          try {
-            final entry = jsonDecode(line);
-            if (entry is Map && entry['error'] is String) {
-              reason = (entry['error'] as String)
-                  .replaceAll(RegExp(r'https?://\S+'), '[下载地址]')
-                  .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false),
-                      'Bearer …');
-              break;
-            }
-          } catch (_) {}
-        }
-      } finally {
-        await handle.close();
+      final value = (await getTaskStats(task.id)).lastError;
+      if (value != null && value.trim().isNotEmpty) {
+        reason = displayTaskFailure(value);
+        hasReason = true;
       }
     } catch (_) {}
+    if (!hasReason)
+      try {
+        final file = File(path.join(logsDir(), 'core.log'));
+        final handle = await file.open();
+        try {
+          final length = await handle.length();
+          await handle.setPosition(length > 131072 ? length - 131072 : 0);
+          final lines = utf8
+              .decode(await handle.read(131072), allowMalformed: true)
+              .split('\n');
+          for (final line in lines.reversed) {
+            if (!line.contains(task.id)) continue;
+            try {
+              final entry = jsonDecode(line);
+              if (entry is Map && entry['error'] is String) {
+                reason = (entry['error'] as String)
+                    .replaceAll(RegExp(r'https?://\S+'), '[下载地址]')
+                    .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false),
+                        'Bearer …');
+                break;
+              }
+            } catch (_) {}
+          }
+        } finally {
+          await handle.close();
+        }
+      } catch (_) {}
     if (!mounted) return;
     MacPanel.resize(380);
     await showDialog<void>(

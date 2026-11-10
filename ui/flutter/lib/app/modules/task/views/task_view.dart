@@ -453,7 +453,7 @@ class _MacTaskViewState extends State<_MacTaskView> {
   Widget _segments(BuildContext context, bool compact) {
     final c = MacColors.of(context);
     return Row(mainAxisSize: MainAxisSize.min, children: [
-      for (final entry in <int, String>{2: '全部', 0: '进行中', 1: '已完成'}.entries)
+      for (final entry in <int, String>{2: '全部', 0: '未完成', 1: '已完成'}.entries)
         Padding(
           padding: const EdgeInsets.only(right: 4),
           child: Semantics(

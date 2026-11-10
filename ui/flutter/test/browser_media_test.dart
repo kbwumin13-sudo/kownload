@@ -164,18 +164,31 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('音轨'), findsNothing);
     expect(find.text('名称'), findsNothing);
-    expect(MacPanel.height, 280);
+    expect(MacPanel.height, inInclusiveRange(240, 280));
     await tester.tap(find.text('更多选项'));
     await tester.pumpAndSettle();
-    expect(MacPanel.height, 580);
+    expect(MacPanel.height, inInclusiveRange(300, 520));
     final controls = tester
         .widgetList<DropdownButtonFormField<String>>(
             find.byType(DropdownButtonFormField<String>))
         .toList();
     expect(controls, hasLength(3));
+    for (final field
+        in tester.elementList(find.byType(DropdownButtonFormField<String>))) {
+      expect((field.renderObject as RenderBox).size.height,
+          inInclusiveRange(28, 32));
+    }
+    final resizeCalls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async {
+      if (call.method == 'resizePanel') resizeCalls.add(call);
+      return null;
+    });
     controls[1].onChanged!('en');
     controls[2].onChanged!('zh-Hans|auto');
     await tester.pumpAndSettle();
+    expect(resizeCalls, isEmpty,
+        reason: 'unchanged content height must not resize the native window');
     await tester.tap(find.text('下载这个资源'));
     await tester.pump();
     final create = (await poll(media))!;
