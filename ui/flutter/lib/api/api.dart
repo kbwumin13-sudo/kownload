@@ -163,9 +163,16 @@ Future<String> createTask(CreateTask createTask, {String? operationId}) async {
       (data) => data as String);
 }
 
-Future<List<String>> createTaskBatch(CreateTaskBatch createTaskBatch) async {
+Future<List<String>> createTaskBatch(CreateTaskBatch createTaskBatch,
+    {String? operationId}) async {
   return _parse<List<String>>(
-      () => _client.dio.post("api/v1/tasks/batch", data: createTaskBatch),
+      () => _client.dio.post("api/v1/tasks/batch",
+          data: createTaskBatch,
+          options: operationId == null
+              ? null
+              : Options(headers: {
+                  'X-Kownload-Operation-Id': operationId,
+                })),
       (data) => (data as List).map((e) => e as String).toList());
 }
 

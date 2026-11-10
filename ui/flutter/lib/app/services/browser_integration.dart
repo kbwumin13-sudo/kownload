@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../database/database.dart';
 import '../rpc/rpc.dart';
+import 'browser_media.dart';
 
 /// App-owned preferences. Browser instances keep separate choices; credentials
 /// and captured download requests never belong in this store.
@@ -38,7 +39,9 @@ class BrowserPreferences {
     final parsed = Uri.tryParse('https://$value/');
     return parsed != null &&
         parsed.host.isNotEmpty &&
-        parsed.host.toLowerCase() == value.toLowerCase();
+        !parsed.hasPort &&
+        parsed.userInfo.isEmpty &&
+        parsed.authority.toLowerCase() == value.toLowerCase();
   }
 
   factory BrowserPreferences.fromJson(Map value) {
@@ -143,6 +146,8 @@ class BrowserIntegration extends ChangeNotifier {
   final Map<String, dynamic> Function(String)? submission;
   final Map<String, dynamic> Function(String, String, String, Map)?
       decideSubmission;
+  final Future<void> Function()? showMedia;
+  late final media = BrowserMedia(show: showMedia ?? () async {});
   final _clients = <String, BrowserClient>{};
   final statuses = <String, BrowserClientStatus>{};
   Future<void> _queue = Future.value();
@@ -153,13 +158,15 @@ class BrowserIntegration extends ChangeNotifier {
       required this.write,
       this.openSettings,
       this.submission,
-      this.decideSubmission});
+      this.decideSubmission,
+      this.showMedia});
 
   factory BrowserIntegration.database(
           {Future<void> Function()? openSettings,
           Map<String, dynamic> Function(String)? submission,
           Map<String, dynamic> Function(String, String, String, Map)?
-              decideSubmission}) =>
+              decideSubmission,
+          Future<void> Function()? showMedia}) =>
       BrowserIntegration(
         read: () => Database.instance.get<Map<String, dynamic>>(
             storageKey, (value) => Map<String, dynamic>.from(value)),
@@ -168,6 +175,7 @@ class BrowserIntegration extends ChangeNotifier {
         openSettings: openSettings,
         submission: submission,
         decideSubmission: decideSubmission,
+        showMedia: showMedia,
       );
 
   List<BrowserClient> get clients {
@@ -230,6 +238,9 @@ class BrowserIntegration extends ChangeNotifier {
 
   Future<Map<String, dynamic>> command(Map<String, dynamic> request) async {
     final action = request['action'];
+    if (const ['mediaOpen', 'mediaPoll', 'mediaResult'].contains(action)) {
+      return media.handle(request);
+    }
     if (action == 'openSettings') {
       await openSettings?.call();
       return {'opened': true};

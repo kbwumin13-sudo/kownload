@@ -26,6 +26,13 @@ import 'package:gopeed/macos/mac_widgets.dart';
 
 class _App extends AppController {
   final browserResults = <Map<String, dynamic>>[];
+  bool browserCompleted = false;
+  @override
+  Future<void> authorizeBrowserConfirmation(String id) async {
+    if (browserCompleted)
+      throw const BrowserCaptureEnded('浏览器已完成下载，未新建 kownload 任务。');
+  }
+
   @override
   void completeBrowserConfirmation(String id,
       {List<String> taskIds = const [], bool cancelled = false}) {
@@ -148,6 +155,69 @@ void main() {
     expect(app.browserResults.last,
         {'id': 'browser-two', 'taskIds': [], 'cancelled': true});
     expect(requests, hasLength(1));
+  });
+
+  testWidgets(
+      'browser completion clears the capture credentials and operation before manual input',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    Database.instance.box = _Box()..onboardingCompleted = true;
+    final app = Get.put<AppController>(_App()) as _App;
+    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+    app.downloaderConfig.value.extra.defaultDirectDownload = true;
+    app.pendingUpdateTask.value =
+        PendingUpdateTask(id: 'old-task', name: 'old');
+    app.beginBrowserCapture();
+    expect(app.pendingUpdateTask.value, isNull);
+    app.browserCompleted = true;
+    Get.put(CreateController());
+    MacPanel.presentation.value = 'panel';
+    MacPanel.incoming.value = CreateTask(
+        req: Request(url: 'https://fixture.test/captured', extra: {
+      'header': {'Cookie': 'fake-capture-only'}
+    }))
+      ..browserCapture = true
+      ..browserOperationId = 'completed-capture';
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await tester.binding.setSurfaceSize(const Size(640, 760));
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      MacPanel.incoming.value = null;
+      MacPanel.taskResult.value = null;
+      MacPanel.cancelAutoHide();
+      Get.reset();
+      Get.routerDelegate = null;
+      Get.routeInformationParser = null;
+      await tester.binding.setSurfaceSize(null);
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+    });
+    final requests = <CreateTask>[];
+    await tester.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(
+          name: '/',
+          page: () => CreateView(taskCreator: (task) async {
+                requests.add(task);
+                return 'manual-task';
+              }))
+    ]));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('开始下载'));
+    await tester.pumpAndSettle();
+    expect(requests, isEmpty);
+    expect(find.textContaining('浏览器已完成下载'), findsOneWidget);
+    expect(MacPanel.incoming.value, isNull);
+    await tester.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'https://fixture.test/manual');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('开始下载'));
+    await tester.pumpAndSettle();
+    expect(requests, hasLength(1));
+    expect(jsonEncode(requests.single.toJson()),
+        isNot(contains('fake-capture-only')));
+    expect(app.browserResults, isEmpty);
   });
 
   testWidgets(

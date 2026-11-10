@@ -73,6 +73,13 @@ class PendingUpdateTask {
   PendingUpdateTask({required this.id, required this.name});
 }
 
+class BrowserCaptureEnded implements Exception {
+  final String message;
+  const BrowserCaptureEnded(this.message);
+  @override
+  String toString() => message;
+}
+
 class AppController extends GetxController with WindowListener, TrayListener {
   static StartConfig? _defaultStartConfig;
 
@@ -86,7 +93,13 @@ class AppController extends GetxController with WindowListener, TrayListener {
   final runningPort = 0.obs;
   final downloaderConfig = DownloaderConfig().obs;
   BrowserSubmissionRpc? _browserRpc;
-  late final browserIntegration = BrowserIntegration.database(
+  late final BrowserIntegration browserIntegration =
+      BrowserIntegration.database(
+    showMedia: () async {
+      await MacPanel.showPanel();
+      await MacPanel.resize(
+          browserIntegration.media.active?.view == 'single' ? 280 : 620);
+    },
     openSettings: () => MacPanel.showSettings(section: 'browser'),
     submission: (id) =>
         _browserRpc?.confirmationStatus(id) ??
@@ -105,16 +118,24 @@ class AppController extends GetxController with WindowListener, TrayListener {
   Future<void> authorizeBrowserConfirmation(String id) async {
     if (await _browserRpc?.requestCommit(id) == true) return;
     final state = _browserRpc?.confirmationStatus(id)['state'];
-    throw StateError(switch (state) {
-      'browser_completed' => '浏览器已完成下载，未新建 kownload 任务。',
-      'browser_retained' => '此下载仍由浏览器处理，未新建 kownload 任务。',
-      _ => '未收到浏览器的确认，请检查原下载后重试。',
-    });
+    if (state == 'browser_completed' || state == 'browser_retained') {
+      throw BrowserCaptureEnded(state == 'browser_completed'
+          ? '浏览器已完成下载，未新建 kownload 任务。'
+          : '此下载仍由浏览器处理，未新建 kownload 任务。');
+    }
+    throw StateError('未收到浏览器的确认，请检查原下载后重试。');
   }
 
   /// The task that is pending URL update via listen mode.
   /// Stored here in AppController to persist across page navigations.
   final pendingUpdateTask = Rxn<PendingUpdateTask>();
+  final browserCaptureRequests = 0.obs;
+
+  void beginBrowserCapture() {
+    // Clear the UI binding, never update or delete the old task.
+    pendingUpdateTask.value = null;
+    browserCaptureRequests.value++;
+  }
 
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
@@ -385,6 +406,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
     }
     try {
       final browserRpc = _browserRpc = BrowserSubmissionRpc(
+        beginBrowserCapture: beginBrowserCapture,
         capturePreferences: (clientId, browser) {
           final client = browserIntegration.clients
               .where((c) => c.id == clientId && c.browser == browser)
@@ -435,6 +457,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
         "/create": (ctx) => browserRpc.handle(
               ctx,
               create: true,
+              forceCaptureConfirmation:
+                  Util.isMacos() && !MacOnboarding.completed,
               forceConfirmation: pendingUpdateTask.value != null ||
                   (Util.isMacos() && !MacOnboarding.completed),
             ),
