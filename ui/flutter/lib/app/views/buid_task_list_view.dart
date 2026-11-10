@@ -1,5 +1,6 @@
 import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_context_menu/flutter_context_menu.dart';
@@ -779,7 +780,9 @@ class BuildTaskListView extends GetView {
                               style: TextStyle(
                                 color: isSelect()
                                     ? Colors.white.withValues(alpha: .82)
-                                    : colors.secondary,
+                                    : task.status == Status.error
+                                        ? CupertinoColors.systemRed
+                                        : colors.secondary,
                                 fontSize: 11,
                               ),
                             ),
@@ -856,7 +859,11 @@ class BuildTaskListView extends GetView {
                                   ? 'pause'.tr
                                   : 'continue'.tr,
                           icon: Icon(
-                            isRunning() ? Icons.pause : Icons.play_arrow,
+                            task.handoff?.blocked == true
+                                ? Icons.refresh
+                                : isRunning()
+                                    ? Icons.pause
+                                    : Icons.play_arrow,
                             size: 18,
                           ),
                           onPressed: () async {

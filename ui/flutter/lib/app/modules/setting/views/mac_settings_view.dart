@@ -270,12 +270,35 @@ class _MacSettingsViewState extends State<MacSettingsView> {
           body: Align(
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 600),
+              constraints: const BoxConstraints(maxWidth: 640),
               child: ListView(
                 key: ValueKey(
                     'mac-settings-${download ? 'download' : 'general'}'),
-                padding: const EdgeInsets.fromLTRB(20, 24, 20, 28),
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
                 children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: Row(children: [
+                      Image.asset('assets/icon/icon_macos_1024.png',
+                          width: 40, height: 40),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(download ? '下载设置' : '通用设置',
+                                  style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w600,
+                                      color: c.text)),
+                              const SizedBox(height: 4),
+                              Text(download ? '保存位置与下载行为' : '外观、浏览器助手与使用习惯',
+                                  style: TextStyle(
+                                      fontSize: 12, color: c.secondary)),
+                            ]),
+                      ),
+                    ]),
+                  ),
                   if (_saveError != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 16),
@@ -601,15 +624,13 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   Widget _group(BuildContext context, String title, List<Widget> rows) {
     final c = MacColors.of(context);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 22),
+      padding: const EdgeInsets.only(bottom: 20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(
-          padding: const EdgeInsets.only(left: 14, bottom: 7),
+          padding: const EdgeInsets.only(left: 12, bottom: 8),
           child: Text(title,
               style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: c.secondary)),
+                  fontSize: 13, fontWeight: FontWeight.w600, color: c.text)),
         ),
         Container(
           decoration: BoxDecoration(
@@ -638,9 +659,9 @@ class _MacSettingsViewState extends State<MacSettingsView> {
       {String? detail, Widget? control}) {
     final c = MacColors.of(context);
     return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 46),
+      constraints: const BoxConstraints(minHeight: 48),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         child: Row(children: [
           Expanded(
             child:

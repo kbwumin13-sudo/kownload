@@ -1321,12 +1321,22 @@ class _CreateViewState extends State<CreateView> {
                               ),
                               SizedBox(
                                 width: 150,
-                                child: RoundedLoadingButton(
-                                  color: Get.theme.colorScheme.secondary,
-                                  onPressed: _doConfirm,
-                                  controller: _confirmController,
-                                  child: Text('confirm'.tr),
-                                ),
+                                child: Util.isMacos()
+                                    ? Obx(() => MacButton(
+                                        primary: true,
+                                        onPressed: controller.isConfirming.value
+                                            ? null
+                                            : _doConfirm,
+                                        child: controller.isConfirming.value
+                                            ? const CupertinoActivityIndicator(
+                                                radius: 7)
+                                            : Text('confirm'.tr)))
+                                    : RoundedLoadingButton(
+                                        color: Get.theme.colorScheme.secondary,
+                                        onPressed: _doConfirm,
+                                        controller: _confirmController,
+                                        child: Text('confirm'.tr),
+                                      ),
                               ),
                             ],
                           ),
@@ -2028,34 +2038,42 @@ class _CreateViewState extends State<CreateView> {
                           maxLines: 1,
                           style: TextStyle(fontSize: 11, color: c.secondary)),
                   ])),
-          if (failed)
-            _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
-                () => _showTaskError(task)),
-          if (task.handoff?.blocked == true)
-            _panelIcon(c, CupertinoIcons.arrow_clockwise, '检查交接', () async {
-              try {
-                final result =
-                    await Get.find<AppController>().checkBrowserHandoff(task);
-                MacPanel.notice.value = result.message;
-                await list.getTasksState();
-              } catch (e) {
-                _panelError.value = e.toString();
-              }
-            })
-          else if (done)
-            Icon(CupertinoIcons.checkmark_circle, size: 17, color: c.secondary)
-          else
-            _panelIcon(c, running ? CupertinoIcons.pause : CupertinoIcons.play,
-                running ? '暂停' : '继续', () async {
-              try {
-                running
-                    ? await pauseTask(task.id)
-                    : await continueTask(task.id);
-                await list.getTasksState();
-              } catch (e) {
-                _panelError.value = e.toString();
-              }
-            }),
+          SizedBox(
+              width: 56,
+              child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                if (failed)
+                  _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
+                      () => _showTaskError(task)),
+                if (task.handoff?.blocked == true)
+                  _panelIcon(c, CupertinoIcons.arrow_clockwise, '检查交接',
+                      () async {
+                    try {
+                      final result = await Get.find<AppController>()
+                          .checkBrowserHandoff(task);
+                      MacPanel.notice.value = result.message;
+                      await list.getTasksState();
+                    } catch (e) {
+                      _panelError.value = e.toString();
+                    }
+                  })
+                else if (done)
+                  Icon(CupertinoIcons.checkmark_circle,
+                      size: 17, color: c.secondary)
+                else
+                  _panelIcon(
+                      c,
+                      running ? CupertinoIcons.pause : CupertinoIcons.play,
+                      running ? '暂停' : '继续', () async {
+                    try {
+                      running
+                          ? await pauseTask(task.id)
+                          : await continueTask(task.id);
+                      await list.getTasksState();
+                    } catch (e) {
+                      _panelError.value = e.toString();
+                    }
+                  }),
+              ])),
         ]));
   }
 

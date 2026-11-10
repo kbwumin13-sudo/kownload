@@ -302,8 +302,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
               decoration: const InputDecoration(
                   isDense: true,
                   contentPadding:
-                      EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-                  border: OutlineInputBorder()),
+                      EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
               items: [
                 for (final entry in choices.entries)
                   DropdownMenuItem(
@@ -466,7 +465,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                           style: TextStyle(color: c.secondary)))
                   : ListView.separated(
                       shrinkWrap: session.view == 'single',
-                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
                       itemCount: rows.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 7),
                       itemBuilder: (_, index) {
@@ -483,11 +482,21 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                         };
                         return DecoratedBox(
                             decoration: BoxDecoration(
-                                color: selected ? c.selection : c.surface,
+                                color: session.view == 'single'
+                                    ? Colors.transparent
+                                    : selected
+                                        ? c.selection
+                                        : Colors.transparent,
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: c.border, width: .5)),
+                                border: Border.all(
+                                    color: session.view == 'single'
+                                        ? Colors.transparent
+                                        : c.border,
+                                    width: .5)),
                             child: Padding(
-                                padding: const EdgeInsets.all(10),
+                                padding: session.view == 'single'
+                                    ? EdgeInsets.zero
+                                    : const EdgeInsets.all(12),
                                 child: Column(children: [
                                   Row(children: [
                                     if (session.view != 'single')

@@ -49,7 +49,7 @@ class MacToolbar extends StatelessWidget {
     final c = MacColors.of(context);
     return Container(
         decoration: BoxDecoration(
-            color: c.background,
+            color: Colors.transparent,
             border: Border(bottom: BorderSide(color: c.border, width: .5))),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           SizedBox(

@@ -524,7 +524,7 @@ class _NetdiskViewState extends State<NetdiskView> {
       canPop: !_submitting,
       child: Dialog(
         insetPadding: const EdgeInsets.all(24),
-        backgroundColor: c.surface,
+        backgroundColor: c.background,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         clipBehavior: Clip.antiAlias,
         child: SizedBox(
@@ -545,7 +545,7 @@ class _NetdiskViewState extends State<NetdiskView> {
                       icon: const Icon(CupertinoIcons.xmark, size: 16)),
                 ]),
             Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -738,9 +738,9 @@ class _NetdiskViewState extends State<NetdiskView> {
                               }
                               final file = _files[index];
                               return SizedBox(
-                                  height: 42,
+                                  height: 48,
                                   child: Row(children: [
-                                    const SizedBox(width: 12),
+                                    const SizedBox(width: 20),
                                     if (!_resumeOnly)
                                       CupertinoCheckbox(
                                           value:
