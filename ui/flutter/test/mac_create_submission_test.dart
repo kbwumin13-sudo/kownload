@@ -15,6 +15,7 @@ import 'package:gopeed/api/model/meta.dart';
 import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
 import 'package:gopeed/api/model/resolve_result.dart';
 import 'package:gopeed/api/model/resolve_task.dart';
+import 'package:gopeed/api/model/resource.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/app/modules/create/controllers/create_controller.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
@@ -296,6 +297,112 @@ void main() {
         expect(request, contains('fake-B'));
         expect(request, isNot(contains('fake-A')));
         expect(app.browserResults.single['id'], 'B');
+      }
+    });
+
+  for (final phase in ['pending', 'failed', 'dialog'])
+    testWidgets(
+        'capture completion stops pending resolve or owned dialog; phase=$phase',
+        (tester) async {
+      final inDialog = phase == 'dialog';
+      if (!Platform.isMacOS) return;
+      Database.instance.box = _Box()..onboardingCompleted = true;
+      final app = Get.put<AppController>(_App()) as _App;
+      app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+      app.downloaderConfig.value.extra.defaultDirectDownload = false;
+      final controller = Get.put(CreateController());
+      MacPanel.presentation.value = 'panel';
+      MacPanel.incoming.value =
+          CreateTask(req: Request(url: 'https://fixture.test/resolving'))
+            ..browserCapture = true
+            ..browserOperationId = 'resolving';
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+      await tester.binding.setSurfaceSize(const Size(1024, 760));
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        MacPanel.incoming.value = null;
+        MacPanel.taskResult.value = null;
+        MacPanel.cancelAutoHide();
+        Get.reset();
+        Get.routerDelegate = null;
+        Get.routeInformationParser = null;
+        await tester.binding.setSurfaceSize(null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(MacPanel.channel, null);
+      });
+      var resolves = 0, creates = 0;
+      final pending = Completer<ResolveResult>();
+      await tester.pumpWidget(
+          GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+        GetPage(
+            name: '/',
+            page: () => CreateView(taskResolver: (_) {
+                  resolves++;
+                  return pending.future;
+                }, taskCreator: (_) async {
+                  creates++;
+                  return 'unexpected';
+                }))
+      ]));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('开始下载'));
+      await tester.pump();
+      expect(resolves, 1);
+      expect(controller.isConfirming.value, true);
+      final result = ResolveResult(
+          id: 'late',
+          res: Resource(files: [
+            FileInfo(name: 'late-file.bin'),
+            FileInfo(name: 'second-file.bin')
+          ]));
+      if (inDialog) {
+        pending.complete(result);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byType(AlertDialog), findsOneWidget);
+      }
+      app.browserCaptureCompleted('resolving');
+      await tester.pump();
+      expect(MacPanel.incoming.value, isNull);
+      final input = find.byKey(const ValueKey('panel-download-input'));
+      if (!inDialog) {
+        await tester.enterText(input, 'https://fixture.test/new-manual');
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pump();
+        expect(resolves, 1,
+            reason:
+                'the existing confirmation lock blocks a new generation until old resolve exits');
+        expect(creates, 0);
+        expect(controller.isConfirming.value, true);
+        if (phase == 'failed')
+          pending.completeError(StateError('late resolve failure'));
+        else
+          pending.complete(result);
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(creates, 0);
+      expect(app.browserResults, isEmpty);
+      expect(controller.isConfirming.value, false);
+      expect(find.text('late-file.bin'), findsNothing);
+      expect(find.textContaining('浏览器已完成下载'), findsOneWidget);
+      expect(
+          tester
+              .widget<TextFormField>(
+                  find.byKey(const ValueKey('panel-download-input')))
+              .controller!
+              .text,
+          inDialog ? '' : 'https://fixture.test/new-manual');
+      if (!inDialog) {
+        controller.directDownload.value = true;
+        await tester.pump();
+        await tester.tap(find.byTooltip('开始下载'));
+        await tester.pumpAndSettle();
+        expect(creates, 1);
+        expect(resolves, 1);
+        expect(app.browserResults, isEmpty,
+            reason: 'manual create is not bound to the completed capture');
       }
     });
 
