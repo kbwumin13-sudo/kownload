@@ -56,7 +56,8 @@ for(const when of ['prepare','cancel'])test('browser completion at '+when+' reta
  const f=fixture();if(when==='prepare')f.handler=async(action)=>{if(action==='handoffPrepare')f.item.state='complete';};else f.onCancel=()=>{f.item.state='complete';};await f.capture();assert.equal(f.commits().length,0);assert.equal(f.core.state,'aborted');assert.equal(f.core.reason,'browser_completed');assert.equal(f.item.state,'complete');
 });
 for(const state of [{state:'in_progress',paused:true},{state:'interrupted',error:'NETWORK_FAILED'},null])test('cancel callback without fresh USER_CANCELED proof does not commit '+JSON.stringify(state),async()=>{
- const f=fixture();f.onCancel=()=>{f.item=state?{...f.item,...state}:null;};await f.capture();assert.equal(f.commits().length,0);assert.equal(f.job().state,'uncertain');assert.equal(f.calls.some(x=>x[0]==='resume'),false);
+ const f=fixture();f.onCancel=()=>{f.item=state?{...f.item,...state}:null;};await f.capture();assert.equal(f.commits().length,0);
+ if(state?.state==='in_progress'){assert.equal(f.core.state,'aborted');assert.equal(f.calls.some(x=>x[0]==='resume'),true);}else{assert.equal(f.job().state,'uncertain');assert.equal(f.calls.some(x=>x[0]==='resume'),false);}
 });
 test('download identity mismatch cannot cancel another item or commit',async()=>{
  const f=fixture();f.handler=async action=>{if(action==='handoffPrepare')f.item.startTime='2026-11-12T00:00:00Z';};await f.capture();assert.equal(f.commits().length,0);assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.core.state,'aborted');
@@ -113,4 +114,8 @@ test('legitimate NanoID task starting with minus or underscore can complete hand
  for(const id of ['-task_one','_task-two']) {
   const f=fixture();f.handler=async(action,params)=>{if(['handoffPrepare','handoffCommit'].includes(action))return {version:1,operationId:params.operationId,state:action==='handoffPrepare'?'prepared':'committed',taskId:id,taskIds:[id],download:binding};};await f.capture();assert.equal(f.job().state,'committed');assert.equal(f.commits()[0].taskId,id);
  }
+});
+
+test('cancel error with fresh matching active original aborts held task and resumes browser',async()=>{
+ const f=fixture();f.cancelError=true;await f.capture();assert.equal(f.core.state,'aborted');assert.equal(f.commits().length,0);assert.deepEqual(f.calls,[['pause',7],['cancel',7],['resume',7]]);
 });

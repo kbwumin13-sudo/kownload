@@ -255,7 +255,7 @@ test('isolated bootstrap rejects synthetic clicks, forwards only fixed messages 
 });
 test('manifest fixes identity/version, top document_start isolated bootstrap; media capture unchanged',()=>{
   const manifest=JSON.parse(fs.readFileSync(new URL('../manifest.json',import.meta.url),'utf8'));
-  assert.equal(manifest.version,'0.5.1');assert.equal(manifest.name,'kownload 下载助手');assert(manifest.key.startsWith('MIIBIjAN'));
+  assert.equal(manifest.version,'0.6.0');assert.equal(manifest.name,'kownload 下载助手');assert(manifest.key.startsWith('MIIBIjAN'));
   const script=manifest.content_scripts.find(s=>s.js.includes('netdisk-content.js'));
   assert.equal(script.all_frames,false);assert.equal(script.run_at,'document_start');assert.equal(script.world,'ISOLATED');
   assert.equal(manifest.content_scripts.find(s=>s.js.includes('content.js')).all_frames,true);

@@ -107,10 +107,11 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     if(before.report.state==='complete'){await retain(job,'browser_completed');return;}
     if(before.report.state!=='in_progress' || !before.report.paused){await retain(job);return;}
     job.stage='cancel_intent';await state(job,'cancelling');
-    await browser.downloads.cancel(job.id);
+    try {await browser.downloads.cancel(job.id);} catch {}
     // Chrome cancel() completion is not proof of ownership: inspect a fresh item.
     const after=await current(job);
     if(after.matches && after.report.state==='complete'){await retain(job,'browser_completed');return;}
+    if(after.matches && after.report.state==='in_progress'){await retain(job);return;}
     if(!after.matches || after.report.state!=='interrupted' || after.report.error!=='USER_CANCELED'){await uncertain(job);return;}
     job.cancelConfirmed=true;job.stage='cancel_confirmed';await persist();
     await commit(job);
@@ -122,7 +123,10 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     if(data.state==='aborted') {
       if(data.reason==='user_cancelled') {
         const {item,matches}=await current(job);
-        if(matches && item.state==='in_progress')await browser.downloads.cancel(job.id);
+        if(matches && item.state==='in_progress'){
+          job.stage='cancel_intent';await persist();
+          await browser.downloads.cancel(job.id);
+        }
         await state(job,'aborted',{resolved:true});
       } else await returnToBrowser(job);
       return;
