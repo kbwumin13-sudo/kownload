@@ -8,7 +8,7 @@ function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,tabFa
   const browser={
     permissions:{contains:async()=>true,onAdded:event('permission')},
     storage:{local:{get:async()=>({downloadCapture:{enabled,confirm}})},session:{set:async v=>Object.assign(saved,structuredClone(v)),get:async()=>structuredClone(saved)},onChanged:event('storage')},
-    downloads:{onDeterminingFilename:event('download'),pause:async id=>calls.push(['pause',id]),resume:async id=>calls.push(['resume',id]),cancel:async id=>calls.push(['cancel',id]),search:async()=>{if(searchFails)throw Error('search');return[{id:7,state:'in_progress'}];}},
+    downloads:{onCreated:event('created'),onChanged:event('changed'),onDeterminingFilename:event('download'),pause:async id=>calls.push(['pause',id]),resume:async id=>calls.push(['resume',id]),cancel:async id=>calls.push(['cancel',id]),search:async()=>{if(searchFails)throw Error('search');return[{id:7,state:'in_progress'}];}},
     tabs:{create:async()=>{if(tabFails)throw Error('tab');return{id:18};},onRemoved:event('removed')},
     action:{setBadgeText:async()=>{},setTitle:async()=>{}},
     webNavigation:{onCommitted:event('navigation')},webRequest:{onBeforeSendHeaders:event('headers')},runtime:{getURL:p=>'chrome-extension://ours/'+p,onMessage:event('message')}
@@ -150,4 +150,18 @@ test('safe failures release filename completion exactly once, while an unknown s
     assert.equal(f.events.download[0](f.item,()=>{suggestions++;}),true);await new Promise(resolve=>setImmediate(resolve));
     assert.equal(suggestions,released ? 1 : 0);
   }
+});
+test('the created event pauses immediately, before filename determination or confirmation',async()=>{
+  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
+  f.events.created[0](f.item);assert.deepEqual(f.calls,[['pause',7]]);
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
+  let suggestions=0;f.events.download[0](f.item,()=>{suggestions++;});await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(f.calls,[['pause',7]]);assert.equal(suggestions,0);
+  await f.controller.finish(f.controller.jobs.get(7),'submit');assert.equal(suggestions,1);assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
+});
+test('an early-paused POST returns its original request to the browser without native submission',async()=>{
+  const f=fixture();await new Promise(resolve=>setImmediate(resolve));f.events.created[0](f.item);
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'POST',requestHeaders:[]});await Promise.resolve();
+  let suggestions=0;f.events.download[0](f.item,()=>{suggestions++;});await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,0);assert.equal(suggestions,1);
 });

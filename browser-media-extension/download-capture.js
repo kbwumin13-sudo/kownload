@@ -7,8 +7,9 @@ const httpURL = value => { try { return /^https?:$/.test(new URL(value).protocol
 
 export function installDownloadCapture(browser,send) {
   if (!browser.permissions) return;
-  const jobs = new Map(),requests = new Map();
+  const jobs = new Map(),requests = new Map(),earlyPauses = new Map();
   let requestsBlockedUntil = 0;
+  let activeConfig;
   const restored = browser.storage.session.get(PENDING).then(saved => {
     for (const job of Object.values(saved[PENDING] || {})) {
       // Credentials deliberately do not survive a worker restart. Requests
@@ -16,10 +17,10 @@ export function installDownloadCapture(browser,send) {
       jobs.set(job.id,{...job,state:['waiting','expired','deciding'].includes(job.state) ? 'expired' : 'uncertain'});
     }
   });
-  let configReady = browser.storage.local.get(SETTING).then(value => value[SETTING]);
+  let configReady = browser.storage.local.get(SETTING).then(value => activeConfig=value[SETTING] || {enabled:false});
   browser.storage.onChanged?.addListener((changes,area) => {
     if (area === 'local' && changes[SETTING]) {
-      configReady = Promise.resolve(changes[SETTING].newValue);
+      activeConfig=changes[SETTING].newValue || {enabled:false};configReady = Promise.resolve(activeConfig);
       if (!changes[SETTING].newValue?.enabled) requests.clear();
     }
   });
@@ -107,7 +108,8 @@ export function installDownloadCapture(browser,send) {
     // reconstructed by a download manager. Leave them in the browser.
     if (!observed || observed.ambiguous || observed.expires < Date.now() || requestsBlockedUntil > Date.now()) return;
     requests.delete(url);
-    try { await browser.downloads.pause(item.id); } catch { return; }
+    const early = earlyPauses.get(item.id);earlyPauses.delete(item.id);
+    try { if (early) { if (!await early) return; } else await browser.downloads.pause(item.id); } catch { return; }
     const job = {id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,state:'waiting',operationId:newOperationId(),releaseFilename};
     try {
       const current = (await browser.downloads.search({id:item.id}))[0];
@@ -132,13 +134,24 @@ export function installDownloadCapture(browser,send) {
   function attach() {
     if (listening || !browser.downloads?.onDeterminingFilename) return;
     listening = true;
+    browser.downloads.onCreated?.addListener(item => {
+      // Filename determination can arrive after a small response is already
+      // fully buffered. Stop its network transfer at the first download event.
+      if (activeConfig?.enabled === false || !httpURL(item.finalUrl || item.url) || item.incognito || item.byExtensionId || item.state && item.state !== 'in_progress') return;
+      try { earlyPauses.set(item.id,Promise.resolve(browser.downloads.pause(item.id)).then(()=>true,()=>false)); } catch {}
+    });
+    browser.downloads.onChanged?.addListener(delta => {
+      if (delta.state?.current && delta.state.current !== 'in_progress') earlyPauses.delete(delta.id);
+    });
     browser.downloads.onDeterminingFilename.addListener((item,suggest) => {
       // pause() alone cannot prevent a fully buffered response from completing.
       // Keep filename completion pending through confirmation and submission.
       let released = false;
       const release = () => { if (!released) { released = true;suggest(); } };
-      void capture(item,release).finally(() => {
+      void capture(item,release).finally(async () => {
         const job = jobs.get(item.id);
+        const early = earlyPauses.get(item.id);earlyPauses.delete(item.id);
+        if (early && await early && !job) await browser.downloads.resume(item.id).catch(()=>{});
         if (!job || ['created','browser','cancelled'].includes(job.state)) release();
       }).catch(() => {});
       return true;
