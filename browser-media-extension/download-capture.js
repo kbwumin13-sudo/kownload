@@ -8,6 +8,7 @@ const httpURL = value => { try { return /^https?:$/.test(new URL(value).protocol
 export function installDownloadCapture(browser,send) {
   if (!browser.permissions) return;
   const jobs = new Map(),requests = new Map();
+  let requestsBlockedUntil = 0;
   const restored = browser.storage.session.get(PENDING).then(saved => {
     for (const job of Object.values(saved[PENDING] || {})) {
       // Credentials deliberately do not survive a worker restart. Requests
@@ -36,6 +37,9 @@ export function installDownloadCapture(browser,send) {
   };
   const terminal = async (job,state) => {
     job.state=state;delete job.header;delete job.url;
+    if (['created','browser','cancelled'].includes(state)) {
+      job.releaseFilename?.();delete job.releaseFilename;
+    }
     await changed(job);
   };
   async function finish(job,action) {
@@ -90,7 +94,7 @@ export function installDownloadCapture(browser,send) {
       } else await terminal(job,'uncertain');
     }
   }
-  async function capture(item) {
+  async function capture(item,releaseFilename) {
     await restored;
     const config = await configReady;
     const url = item.finalUrl || item.url;
@@ -99,10 +103,10 @@ export function installDownloadCapture(browser,send) {
     if (observed && observed.method !== 'GET') return;
     // Requests without an observed GET may contain POST bodies that cannot be
     // reconstructed by a download manager. Leave them in the browser.
-    if (!observed || observed.expires < Date.now()) return;
+    if (!observed || observed.ambiguous || observed.expires < Date.now() || requestsBlockedUntil > Date.now()) return;
     requests.delete(url);
     try { await browser.downloads.pause(item.id); } catch { return; }
-    const job = {id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,state:'waiting',operationId:newOperationId()};
+    const job = {id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,state:'waiting',operationId:newOperationId(),releaseFilename};
     try {
       const current = (await browser.downloads.search({id:item.id}))[0];
       if (!current || current.state !== 'in_progress') return;
@@ -127,22 +131,33 @@ export function installDownloadCapture(browser,send) {
     if (listening || !browser.downloads?.onDeterminingFilename) return;
     listening = true;
     browser.downloads.onDeterminingFilename.addListener((item,suggest) => {
-      // A fast response can finish as soon as filename determination is
-      // released. Establish the pause before allowing that completion.
-      void capture(item).finally(() => suggest()).catch(() => {});
+      // pause() alone cannot prevent a fully buffered response from completing.
+      // Keep filename completion pending through confirmation and submission.
+      let released = false;
+      const release = () => { if (!released) { released = true;suggest(); } };
+      void capture(item,release).finally(() => {
+        const job = jobs.get(item.id);
+        if (!job || ['created','browser','cancelled'].includes(job.state)) release();
+      }).catch(() => {});
       return true;
     });
   }
   browser.webRequest.onBeforeSendHeaders.addListener(event => { void configReady.then(config => {
     if (!config?.enabled) return;
-    if (event.tabId < 0 || !httpURL(event.url)) return;
+    if (event.tabId < 0 || event.incognito || !httpURL(event.url) || typeof event.requestId !== 'string' || !event.requestId || requestsBlockedUntil > Date.now()) return;
     const header = {...safeHeader(event.requestHeaders),...protectedHeaders(event.requestHeaders)};
     const cookie = event.requestHeaders?.find(h => h.name.toLowerCase() === 'cookie')?.value;
     if (cookie && !/[\r\n]/.test(cookie)) header.Cookie = cookie;
     header['Accept-Encoding'] = 'identity';
     for (const [url,request] of requests) if (request.expires < Date.now()) requests.delete(url);
-    requests.set(event.url,{method:event.method,header,expires:Date.now()+60000});
-    if (requests.size > 200) requests.delete(requests.keys().next().value);
+    const previous = requests.get(event.url);
+    const sameRequest = previous && previous.requestId === event.requestId && previous.tabId === event.tabId && previous.frameId === event.frameId && previous.documentId === event.documentId;
+    const ambiguous = previous && (previous.ambiguous || !sameRequest);
+    if (!previous && requests.size >= 200) {
+      // Do not evict one side of an ambiguous pair and then trust the other.
+      requests.clear();requestsBlockedUntil = Date.now()+60000;return;
+    }
+    requests.set(event.url,{requestId:event.requestId,tabId:event.tabId,frameId:event.frameId,documentId:event.documentId,method:event.method,...(!ambiguous ? {header} : {}),ambiguous:!!ambiguous,expires:Date.now()+60000});
   }); },{urls:['<all_urls>']},['requestHeaders','extraHeaders']);
   browser.permissions.contains({permissions:['downloads']}).then(granted => { if (granted) attach(); });
   browser.permissions.onAdded.addListener(permissions => { if (permissions.permissions?.includes('downloads')) attach(); });

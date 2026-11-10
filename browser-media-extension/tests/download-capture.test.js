@@ -23,7 +23,7 @@ function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,tabFa
   const controller=installDownloadCapture(browser,send);
   const item={id:7,url:'https://files.test/a.bin',finalUrl:'https://files.test/a.bin',filename:'/downloads/a.bin'};
   async function capture(overrides={},method='GET') {
-    for(const fn of events.headers)fn({url:item.finalUrl,tabId:1,method,requestHeaders:[{name:'Cookie',value:'private-cookie'},{name:'Authorization',value:'private-token'},{name:'Referer',value:'https://page.test/'}]});
+    for(const fn of events.headers)fn({url:item.finalUrl,tabId:1,requestId:'request-one',method,requestHeaders:[{name:'Cookie',value:'private-cookie'},{name:'Authorization',value:'private-token'},{name:'Referer',value:'https://page.test/'}]});
     await Promise.resolve();await controller.capture({...item,...overrides});
   }
   return {browser,controller,capture,item,calls,messages,saved,events};
@@ -38,15 +38,28 @@ test('created ACK cancels the browser only after the task exists, without a seco
 test('explicit host rejection resumes the original browser request',async()=>{
   const f=fixture({reply:{code:1,error:'ipc_unavailable',httpStatus:null,businessCode:null}});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.controller.jobs.get(7).state,'browser');
 });
-test('filename determination stays pending until the browser pause is established',async()=>{
+test('filename completion stays pending throughout confirmation and releases on explicit cancellation',async()=>{
   const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
   let releasePause,suggested=false;
   f.browser.downloads.pause=async id=>{f.calls.push(['pause',id]);await new Promise(resolve=>{releasePause=resolve;});};
-  f.events.headers[0]({url:f.item.finalUrl,tabId:1,method:'GET',requestHeaders:[]});await Promise.resolve();
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
   assert.equal(f.events.download[0](f.item,()=>{suggested=true;}),true);
   await new Promise(resolve=>setImmediate(resolve));assert.equal(suggested,false);
   releasePause();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(suggested,true);assert.equal(f.controller.jobs.get(7).state,'waiting');
+  assert.equal(suggested,false);assert.equal(f.controller.jobs.get(7).state,'waiting');
+  await f.controller.finish(f.controller.jobs.get(7),'cancel');assert.equal(suggested,true);
+});
+test('a fully buffered fast file cannot finish before confirmation and create a browser duplicate',async()=>{
+  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
+  let suggested=false;
+  f.browser.downloads.search=async()=>[{id:7,state:suggested ? 'complete' : 'in_progress'}];
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
+  assert.equal(f.events.download[0](f.item,()=>{suggested=true;}),true);
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(suggested,false);
+  await f.controller.finish(f.controller.jobs.get(7),'submit');
+  assert.equal(f.controller.jobs.get(7).state,'created');assert.equal(suggested,true);
+  assert.equal(f.messages.filter(m=>m.method==='forward').length,1);
+  assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);
 });
 test('a browser file already completed at confirmation is not reported as user cancellation',async()=>{
   const f=fixture({confirm:true});await f.capture();
@@ -100,4 +113,22 @@ test('default off, blob/data, POST, incognito and extension requests stay in the
   for(const [options,item,method] of [[{enabled:false},{},'GET'],[{}, {url:'blob:https://page.test/one',finalUrl:'blob:https://page.test/one'},'GET'],[{}, {},'POST'],[{}, {incognito:true},'GET'],[{}, {byExtensionId:'other'},'GET']]) {
     const f=fixture(options);await f.capture(item,method);assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
   }
+});
+for (const firstMethod of ['GET','POST']) test(`same-URL ${firstMethod}/GET requests from different tabs cannot borrow the later headers`,async()=>{
+  const f=fixture();
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,frameId:0,requestId:'request-A',method:firstMethod,requestHeaders:[{name:'Authorization',value:'synthetic-A'}]});
+  f.events.headers[0]({url:f.item.finalUrl,tabId:2,frameId:0,requestId:'request-B',method:'GET',requestHeaders:[{name:'Authorization',value:'synthetic-B'}]});
+  await Promise.resolve();await f.controller.capture(f.item);
+  assert.equal(f.messages.length,0);assert.deepEqual(f.calls,[]);
+});
+test('a retry of the same identified request retains its final headers',async()=>{
+  const f=fixture();
+  for(const token of ['synthetic-A','synthetic-B']) f.events.headers[0]({url:f.item.finalUrl,tabId:1,frameId:0,requestId:'same-request',method:'GET',requestHeaders:[{name:'Authorization',value:token}]});
+  await Promise.resolve();await f.controller.capture(f.item);
+  assert.equal(f.messages.find(m=>m.method==='forward').params.data.req.extra.header.Authorization,'synthetic-B');
+});
+test('cache overflow cannot erase ambiguity and then attach a different request',async()=>{
+  const f=fixture();
+  for(let i=0;i<201;i++) f.events.headers[0]({url:`https://files.test/${i}`,tabId:1,requestId:`request-${i}`,method:'GET',requestHeaders:[]});
+  await Promise.resolve();await f.capture();assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
 });
