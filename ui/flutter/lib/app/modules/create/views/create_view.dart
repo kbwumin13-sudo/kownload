@@ -117,6 +117,7 @@ class _CreateViewState extends State<CreateView> {
   NetdiskApi? get netdiskApi => widget.netdiskApi;
   NetdiskBrowserTool? get netdiskBrowserTool => widget.netdiskBrowserTool;
   final _inputFocus = FocusNode();
+  int _inputFocusGeneration = 0;
   final _panelError = RxnString();
   final _panelShowCompleted = false.obs;
   final _queuedInputs = <CreateTask>[];
@@ -181,8 +182,11 @@ class _CreateViewState extends State<CreateView> {
   }
 
   void _focusInput() {
+    final generation = ++_inputFocusGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted &&
+          generation == _inputFocusGeneration &&
+          MacPanel.visible.value &&
           MacPanel.presentation.value == 'panel' &&
           !_netdiskOpen.value &&
           _onboarding == null) {
@@ -1424,6 +1428,15 @@ class _CreateViewState extends State<CreateView> {
   }
 
   void _clearBrowserDraft() {
+    // Close EditableText's connection before controller changes can send an
+    // editing state to a native field that is being dismissed. Unfocus alone
+    // defers its listeners to a microtask; apply them before clearing the draft.
+    _inputFocusGeneration++;
+    final focus = FocusManager.instance.primaryFocus;
+    if (focus?.context?.findAncestorStateOfType<_CreateViewState>() == this) {
+      focus!.unfocus();
+      FocusManager.instance.applyFocusChangesIfNeeded();
+    }
     if (identical(MacPanel.incoming.value, _panelRequest)) {
       MacPanel.incoming.value = null;
     }
@@ -1489,6 +1502,7 @@ class _CreateViewState extends State<CreateView> {
       _panelError.value = null;
       MacPanel.notice.value = null;
     });
+    _focusInput();
   }
 
   void _clearCapturedHeadersFor(String value) {

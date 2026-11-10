@@ -421,6 +421,14 @@ void main() {
       final input = find.byKey(const ValueKey('panel-download-input'));
       expect(tester.widget<TextFormField>(input).controller!.text,
           'https://fixture.test/next');
+      expect(
+          tester
+              .widget<EditableText>(find.descendant(
+                  of: input, matching: find.byType(EditableText)))
+              .focusNode
+              .hasFocus,
+          true);
+      expect(tester.testTextInput.hasAnyClients, true);
       expect((await ui.flow.command(query()))['state'], 'aborted');
       await tester.tap(find.byTooltip('开始下载'));
       await tester.pumpAndSettle();
@@ -432,6 +440,64 @@ void main() {
       expect(submitted['req']['extra']['header']['Cookie'], 'fake-B');
       expect(submitted['operationId'], 'next');
     });
+  testWidgets('Escape detaches text input before clearing and hiding capture',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final ui = await mountHandoffUi(tester, core);
+    await ui.flow.command(prepare());
+    await tester.pumpAndSettle();
+    final input = find.byKey(const ValueKey('panel-download-input'));
+    await tester.showKeyboard(input);
+    final text = tester.widget<TextFormField>(input).controller!;
+    expect(tester.testTextInput.hasAnyClients, true);
+    final connectedWhenCleared = <bool>[];
+    void changed() {
+      if (text.text.isEmpty) {
+        connectedWhenCleared.add(tester.testTextInput.hasAnyClients);
+      }
+    }
+
+    text.addListener(changed);
+    addTearDown(() => text.removeListener(changed));
+    final connectedWhenHidden = <bool>[];
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async {
+      if (call.method == 'hide') {
+        connectedWhenHidden.add(tester.testTextInput.hasAnyClients);
+      }
+      return null;
+    });
+    tester.testTextInput.log.clear();
+    // A show request queued before Escape must not reattach after hide.
+    MacPanel.focusRequests.value++;
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(connectedWhenCleared, isNotEmpty);
+    expect(connectedWhenCleared, everyElement(false));
+    expect(connectedWhenHidden, [false]);
+    expect(tester.testTextInput.hasAnyClients, false);
+    expect(tester.testTextInput.log.map((call) => call.method),
+        contains('TextInput.clearClient'));
+    var connected = true;
+    for (final call in tester.testTextInput.log) {
+      if (call.method == 'TextInput.setClient') connected = true;
+      if (call.method == 'TextInput.clearClient') connected = false;
+      if (call.method == 'TextInput.setEditingState') {
+        expect(connected, true,
+            reason: 'Native TextInputModel must exist for every editing state');
+      }
+    }
+    expect(text.text, isEmpty);
+    expect((await ui.flow.command(query()))['reason'], 'user_cancelled');
+    expect(core.creates, 0);
+    expect(core.starts, 0);
+
+    await MacPanel.showPanel();
+    await tester.pumpAndSettle();
+    await tester.enterText(input, 'https://fixture.test/manual');
+    expect(tester.testTextInput.hasAnyClients, true);
+    expect(text.text, 'https://fixture.test/manual');
+  });
   testWidgets(
       'native confirmation prepares without resolve/create or created receipt; row checks only query',
       (tester) async {
@@ -517,8 +583,9 @@ class _UiApp extends AppController {
   BrowserHandoff get browserHandoff => flow;
   @override
   void onReady() {}
-  // ignore: must_call_super
   @override
+  // This fixture deliberately owns no AppController lifecycle resources.
+  // ignore: must_call_super
   void onClose() {}
   @override
   void completeBrowserConfirmation(String id,
@@ -531,9 +598,12 @@ class _List extends MacTaskListController {
   final Core core;
   _List(this.core);
   @override
-  void onInit() {}
+  // This fixture reads tasks from Core without starting the normal poller.
   // ignore: must_call_super
+  void onInit() {}
   @override
+  // This fixture has no task polling timer to stop.
+  // ignore: must_call_super
   void onClose() {}
   @override
   Future<void> getTasksState() async {
