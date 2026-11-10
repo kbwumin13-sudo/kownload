@@ -38,6 +38,23 @@ test('created ACK cancels the browser only after the task exists, without a seco
 test('explicit host rejection resumes the original browser request',async()=>{
   const f=fixture({reply:{code:1,error:'ipc_unavailable',httpStatus:null,businessCode:null}});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.controller.jobs.get(7).state,'browser');
 });
+test('filename determination stays pending until the browser pause is established',async()=>{
+  const f=fixture({confirm:true});await new Promise(resolve=>setImmediate(resolve));
+  let releasePause,suggested=false;
+  f.browser.downloads.pause=async id=>{f.calls.push(['pause',id]);await new Promise(resolve=>{releasePause=resolve;});};
+  f.events.headers[0]({url:f.item.finalUrl,tabId:1,method:'GET',requestHeaders:[]});await Promise.resolve();
+  assert.equal(f.events.download[0](f.item,()=>{suggested=true;}),true);
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(suggested,false);
+  releasePause();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(suggested,true);assert.equal(f.controller.jobs.get(7).state,'waiting');
+});
+test('a browser file already completed at confirmation is not reported as user cancellation',async()=>{
+  const f=fixture({confirm:true});await f.capture();
+  f.browser.downloads.search=async()=>[{id:7,state:'complete'}];
+  await f.controller.finish(f.controller.jobs.get(7),'submit');
+  assert.equal(f.controller.jobs.get(7).state,'browser');
+  assert.equal(f.messages.filter(m=>m.method==='forward').length,0);
+});
 for(const ping of [{code:0,data:false},new Error('host disconnected')])test('preflight unavailable/disconnect cannot have submitted a task and resumes the browser',async()=>{
   const f=fixture({ping});await f.capture();assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.messages.length,1);
 });

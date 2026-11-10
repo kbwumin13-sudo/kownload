@@ -63,7 +63,7 @@ export function installDownloadCapture(browser,send) {
       await terminal(job,'browser');
       return;
     }
-    if (!current || current.state !== 'in_progress') { await terminal(job,'cancelled');return; }
+    if (!current || current.state !== 'in_progress') { await terminal(job,current?.state === 'complete' ? 'browser' : 'cancelled');return; }
     job.state = 'sending';
     await changed(job);
     let reply;
@@ -127,8 +127,10 @@ export function installDownloadCapture(browser,send) {
     if (listening || !browser.downloads?.onDeterminingFilename) return;
     listening = true;
     browser.downloads.onDeterminingFilename.addListener((item,suggest) => {
-      suggest();
-      void capture(item).catch(() => {});
+      // A fast response can finish as soon as filename determination is
+      // released. Establish the pause before allowing that completion.
+      void capture(item).finally(() => suggest()).catch(() => {});
+      return true;
     });
   }
   browser.webRequest.onBeforeSendHeaders.addListener(event => { void configReady.then(config => {
