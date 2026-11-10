@@ -1,6 +1,7 @@
 import 'package:json_annotation/json_annotation.dart';
 
 import 'meta.dart';
+import 'browser_handoff.dart';
 
 part 'task.g.dart';
 
@@ -24,6 +25,8 @@ enum ExtractStatus {
 
 @JsonSerializable(explicitToJson: true)
 class Task {
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  TaskHandoff? handoff;
   String id;
   String name;
   Protocol? protocol;
@@ -35,6 +38,7 @@ class Task {
   DateTime updatedAt;
 
   Task({
+    this.handoff,
     required this.id,
     required this.name,
     required this.meta,
@@ -47,16 +51,19 @@ class Task {
 
   // Keep the existing generated model intact while accepting the new protocol.
   factory Task.fromJson(Map<String, dynamic> json) {
-    if (json['protocol'] == 'netdisk') {
-      return _$TaskFromJson({...json, 'protocol': null})
-        ..protocol = Protocol.netdisk;
-    }
-    return _$TaskFromJson(json);
+    final task = json['protocol'] == 'netdisk'
+        ? (_$TaskFromJson({...json, 'protocol': null})
+          ..protocol = Protocol.netdisk)
+        : _$TaskFromJson(json);
+    if (json['handoff'] is Map)
+      task.handoff = TaskHandoff.fromJson(json['handoff']);
+    return task;
   }
 
   Map<String, dynamic> toJson() => {
         ..._$TaskToJson(this),
         if (protocol == Protocol.netdisk) 'protocol': 'netdisk',
+        if (handoff != null) 'handoff': handoff!.toJson(),
       };
 }
 

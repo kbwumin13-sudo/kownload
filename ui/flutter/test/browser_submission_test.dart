@@ -572,7 +572,7 @@ void main() {
         400);
   });
   test(
-      'the next browser capture reads canonical App mode without reloading the helper',
+      'legacy one-phase browser capture is rejected regardless of confirmation preference',
       () async {
     var enabled = true;
     var confirm = true;
@@ -612,22 +612,14 @@ void main() {
     }
 
     try {
-      expect(await capture('canonical-confirm', true), 202);
-      expect(opens, 1);
-      expect(sends, 0);
-      expect(
-          rpc.observeBrowserState('canonical-confirm', 'chrome-one', 'chrome',
-              {'state': 'complete'})['state'],
-          'browser_completed',
-          reason: 'HTTP create metadata binds the observation identity');
+      expect(await capture('canonical-confirm', true), 409);
       enabled = false;
       expect(await capture('canonical-off', true), 409);
-      expect(sends, 0);
       enabled = true;
       confirm = false;
-      expect(await capture('canonical-direct', false), 200);
-      expect(sends, 1);
-      expect(opens, 1);
+      expect(await capture('canonical-direct', false), 409);
+      expect(sends, 0);
+      expect(opens, 0);
     } finally {
       client.close(force: true);
       await server.close(force: true);
@@ -682,7 +674,7 @@ void main() {
       r.headers.set(
           'X-Kownload-Host-Meta',
           jsonEncode({
-            'source': 'browser-capture',
+            'source': 'browser-media',
             'clientId': 'one',
             'browser': 'chrome',
             'silent': true

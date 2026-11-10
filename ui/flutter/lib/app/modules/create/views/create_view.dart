@@ -153,7 +153,9 @@ class _CreateViewState extends State<CreateView> {
       });
       _captureEndWorker =
           ever(Get.find<AppController>().completedBrowserOperation, (id) {
-        if (id != null) _finishBrowserCapture(id, '浏览器已完成下载，未新建 kownload 任务。');
+        if (id != null)
+          _finishBrowserCapture(
+              id, Get.find<AppController>().browserCaptureCompletionMessage);
       });
       _panelRequest = MacPanel.incoming.value;
       _pendingWorker = ever(Get.find<AppController>().pendingUpdateTask, (_) {
@@ -205,6 +207,7 @@ class _CreateViewState extends State<CreateView> {
       controller.pendingCreateHandled = false;
       _initialNetdiskHandled = false;
       _panelError.value = null;
+      MacPanel.notice.value = null;
     });
   }
 
@@ -315,8 +318,26 @@ class _CreateViewState extends State<CreateView> {
       } else {
         final operation = _panelRequest?.browserOperationId;
         if (operation != null) {
-          Get.find<AppController>()
-              .completeBrowserConfirmation(operation, cancelled: true);
+          if (_panelRequest?.browserHandoff != null) {
+            final ctx = _panelRequest!.browserHandoff!;
+            try {
+              await Get.find<AppController>().browserHandoff.command({
+                'action': 'handoffAbort',
+                'operationId': operation,
+                'clientId': ctx.clientId,
+                'browser': ctx.browser,
+                'reason': 'user_cancelled'
+              });
+              if (_panelRequest == null) await MacPanel.hide();
+            } catch (_) {
+              MacPanel.notice.value = '交接结果未知，请检查原下载和已有任务';
+            }
+            // The synchronous terminal callback may already have opened the next queued input.
+            return;
+          } else {
+            Get.find<AppController>()
+                .completeBrowserConfirmation(operation, cancelled: true);
+          }
           if (identical(MacPanel.incoming.value, _panelRequest))
             MacPanel.incoming.value = null;
           _panelRequest = null;
@@ -1397,7 +1418,8 @@ class _CreateViewState extends State<CreateView> {
 
   void _checkCaptureCompletion() {
     if (_captureCompletedDuringConfirm) {
-      throw const BrowserCaptureEnded('浏览器已完成下载，未新建 kownload 任务。');
+      throw BrowserCaptureEnded(
+          Get.find<AppController>().browserCaptureCompletionMessage);
     }
   }
 
@@ -1464,6 +1486,8 @@ class _CreateViewState extends State<CreateView> {
       _panelRequest = next;
       controller.pendingCreateHandled = false;
       _initialNetdiskHandled = false;
+      _panelError.value = null;
+      MacPanel.notice.value = null;
     });
   }
 
@@ -1496,7 +1520,10 @@ class _CreateViewState extends State<CreateView> {
                   final allTasks = taskList?.tasks.toList() ?? <Task>[];
                   final completed =
                       allTasks.where((t) => t.status == Status.done).length;
-                  final active = allTasks.length - completed;
+                  final active = allTasks
+                      .where((t) =>
+                          t.status != Status.done && t.handoff?.blocked != true)
+                      .length;
                   final showCompleted = _panelShowCompleted.value;
                   final recent =
                       MacPanel.taskResult.value?.taskIds ?? const <String>[];
@@ -1929,17 +1956,19 @@ class _CreateViewState extends State<CreateView> {
                         color: c.text)),
                 const SizedBox(height: 3),
                 Text(
-                    failed
-                        ? '下载失败 · 查看详情'
-                        : done
-                            ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                            : task.fetchingTorrentInfo
-                                ? '正在获取种子信息'
-                                : running
-                                    ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
-                                    : task.status == Status.pause
-                                        ? '已暂停'
-                                        : '等待下载',
+                    task.handoff?.blocked == true
+                        ? task.handoff!.label
+                        : failed
+                            ? '下载失败 · 查看详情'
+                            : done
+                                ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                                : task.fetchingTorrentInfo
+                                    ? '正在获取种子信息'
+                                    : running
+                                        ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
+                                        : task.status == Status.pause
+                                            ? '已暂停'
+                                            : '等待下载',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -1960,7 +1989,18 @@ class _CreateViewState extends State<CreateView> {
           if (failed)
             _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
                 () => _showTaskError(task)),
-          if (done)
+          if (task.handoff?.blocked == true)
+            _panelIcon(c, CupertinoIcons.arrow_clockwise, '检查交接', () async {
+              try {
+                final result =
+                    await Get.find<AppController>().checkBrowserHandoff(task);
+                MacPanel.notice.value = result.message;
+                await list.getTasksState();
+              } catch (e) {
+                _panelError.value = e.toString();
+              }
+            })
+          else if (done)
             Icon(CupertinoIcons.checkmark_circle, size: 17, color: c.secondary)
           else
             _panelIcon(c, running ? CupertinoIcons.pause : CupertinoIcons.play,
@@ -2102,6 +2142,35 @@ class _CreateViewState extends State<CreateView> {
           Get.find<AppController>().pendingUpdateTask.value != null;
       if (hasInput && (!await _ensureMacOnboarding() || !mounted)) return;
       _checkCaptureCompletion();
+      final handoffRequest = _panelRequest;
+      if (handoffRequest?.browserHandoff != null &&
+          handoffRequest?.req?.url.trim() == _urlController.text.trim()) {
+        final prepared = await Get.find<AppController>().prepareBrowserHandoff(
+            CreateTask(
+                req: _requestForUrl(_urlController.text.trim()),
+                opts: Options(
+                    name: _renameController.text,
+                    path: _pathController.text,
+                    selectFiles: [],
+                    extra: parseReqOptsExtra()))
+              ..browserHandoff = handoffRequest!.browserHandoff
+              ..browserOperationId = handoffRequest.browserOperationId
+              ..browserCapture = true);
+        _checkCaptureCompletion();
+        if (prepared.state == 'prepared' || prepared.committed) {
+          _clearBrowserDraft();
+          await MacPanel.showTaskResult(prepared.taskIds, null);
+          MacPanel.notice.value = prepared.message;
+          if (Get.isRegistered<MacTaskListController>())
+            await Get.find<MacTaskListController>().getTasksState();
+        } else if (prepared.state == 'aborted') {
+          _finishBrowserCapture(
+              handoffRequest.browserOperationId!, prepared.message);
+        } else {
+          throw StateError(prepared.message);
+        }
+        return;
+      }
       // An existing netdisk task owns its file/source, including transferred
       // copies. Browser/native input must never turn recovery into a new batch.
       if (await _showPendingNetdiskTask()) return;
@@ -2202,7 +2271,8 @@ class _CreateViewState extends State<CreateView> {
       }
     } catch (e) {
       final error = _captureCompletedDuringConfirm
-          ? const BrowserCaptureEnded('浏览器已完成下载，未新建 kownload 任务。')
+          ? BrowserCaptureEnded(
+              Get.find<AppController>().browserCaptureCompletionMessage)
           : e;
       if (error is BrowserCaptureEnded &&
           _panelRequest?.browserCapture == true) {

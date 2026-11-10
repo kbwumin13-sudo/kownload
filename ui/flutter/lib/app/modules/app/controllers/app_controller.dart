@@ -1,3 +1,6 @@
+import '../../../services/browser_handoff.dart';
+import '../../../../api/model/browser_handoff.dart';
+import '../../../../api/model/task.dart' as task_model;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -95,6 +98,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
   BrowserSubmissionRpc? _browserRpc;
   late final BrowserIntegration browserIntegration =
       BrowserIntegration.database(
+    handoffCommand: handleBrowserHandoff,
     showMedia: () async {
       await MacPanel.showPanel();
       await MacPanel.resize(
@@ -111,6 +115,82 @@ class AppController extends GetxController with WindowListener, TrayListener {
         _browserRpc?.decideConfirmation(id, token, decision, browserState) ??
         {'state': 'unknown', 'taskIds': <String>[]},
   );
+
+  int _handoffPresentation = 0;
+  Future<Map<String, dynamic>> handleBrowserHandoff(
+      Map<String, dynamic> value) async {
+    final result = await browserHandoff.command(value);
+    if ((value['action'] == 'handoffPrepare' &&
+            const ['prepared', 'committed'].contains(result['state'])) ||
+        (value['action'] == 'handoffCommit' &&
+            result['state'] == 'committed')) {
+      final generation = ++_handoffPresentation;
+      unawaited(
+          _presentHandoff(BrowserHandoffResult.fromJson(result), generation)
+              .catchError((_) {}));
+    }
+    return result;
+  }
+
+  Future<void> _presentHandoff(
+      BrowserHandoffResult result, int generation) async {
+    if (!Util.isMacos() || !MacOnboarding.completed) return;
+    if (Get.isRegistered<MacTaskListController>())
+      await Get.find<MacTaskListController>().getTasksState();
+    if (generation != _handoffPresentation) return;
+    await MacPanel.showTaskResult(result.taskIds, null);
+    if (generation == _handoffPresentation)
+      MacPanel.notice.value = result.message;
+  }
+
+  Map<String, bool>? browserCapturePreferences(
+      String clientId, String browser) {
+    final client = browserIntegration.clients
+        .where((c) => c.id == clientId && c.browser == browser)
+        .firstOrNull;
+    return client == null
+        ? null
+        : {
+            'enabled': client.preferences.captureEnabled,
+            'confirm': client.preferences.confirmDownloads ||
+                (Util.isMacos() && !MacOnboarding.completed)
+          };
+  }
+
+  late final BrowserHandoff browserHandoff = BrowserHandoff(
+    request: browserHandoffRequest,
+    preferences: browserCapturePreferences,
+    begin: beginBrowserCapture,
+    ended: (id, reason) => browserCaptureCompleted(id, reason: reason),
+    confirm: (task) async {
+      if (Util.isMacos()) {
+        await MacPanel.showPanel(task: task);
+      } else {
+        await windowManager.show();
+        _handleToCreate0(task);
+      }
+    },
+  );
+  Future<BrowserHandoffResult> prepareBrowserHandoff(CreateTask task) {
+    final id = task.browserOperationId, context = task.browserHandoff;
+    if (id == null || context == null) throw StateError('交接上下文已失效，请检查原下载。');
+    return browserHandoff.prepareConfirmed(id, context, task);
+  }
+
+  Future<BrowserHandoffResult> checkBrowserHandoff(task_model.Task task) async {
+    final context = task.handoff;
+    if (context == null || context.version != 1)
+      throw StateError('无法识别交接状态，请检查浏览器原下载。');
+    return BrowserHandoffResult.fromJson(
+        await browserHandoff.command({
+          'action': 'handoffQuery',
+          'operationId': context.operationId,
+          'clientId': context.clientId,
+          'browser': context.browser
+        }),
+        operationId: context.operationId,
+        allowLocalAbort: true);
+  }
 
   void completeBrowserConfirmation(String id,
       {List<String> taskIds = const [], bool cancelled = false}) {
@@ -134,8 +214,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
   final pendingUpdateTask = Rxn<PendingUpdateTask>();
   final browserCaptureRequests = 0.obs;
   final completedBrowserOperation = RxnString();
+  String browserCaptureCompletionMessage =
+      handoffEndMessage('browser_completed');
 
-  void browserCaptureCompleted(String id) {
+  void browserCaptureCompleted(String id,
+      {String reason = 'browser_completed'}) {
+    browserCaptureCompletionMessage = handoffEndMessage(reason);
     completedBrowserOperation.value = id;
     final incoming = MacPanel.incoming.value;
     if (incoming?.browserCapture == true &&

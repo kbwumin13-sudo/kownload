@@ -149,6 +149,8 @@ class BrowserIntegration extends ChangeNotifier {
   final Map<String, dynamic> Function(String, String, String, Map)?
       observeSubmission;
   final Future<void> Function()? showMedia;
+  final Future<Map<String, dynamic>> Function(Map<String, dynamic>)?
+      handoffCommand;
   late final media = BrowserMedia(show: showMedia ?? () async {});
   final _clients = <String, BrowserClient>{};
   final statuses = <String, BrowserClientStatus>{};
@@ -162,7 +164,8 @@ class BrowserIntegration extends ChangeNotifier {
       this.submission,
       this.decideSubmission,
       this.observeSubmission,
-      this.showMedia});
+      this.showMedia,
+      this.handoffCommand});
 
   factory BrowserIntegration.database(
           {Future<void> Function()? openSettings,
@@ -171,7 +174,9 @@ class BrowserIntegration extends ChangeNotifier {
               decideSubmission,
           Map<String, dynamic> Function(String, String, String, Map)?
               observeSubmission,
-          Future<void> Function()? showMedia}) =>
+          Future<void> Function()? showMedia,
+          Future<Map<String, dynamic>> Function(Map<String, dynamic>)?
+              handoffCommand}) =>
       BrowserIntegration(
         read: () => Database.instance.get<Map<String, dynamic>>(
             storageKey, (value) => Map<String, dynamic>.from(value)),
@@ -182,6 +187,7 @@ class BrowserIntegration extends ChangeNotifier {
         decideSubmission: decideSubmission,
         observeSubmission: observeSubmission,
         showMedia: showMedia,
+        handoffCommand: handoffCommand,
       );
 
   List<BrowserClient> get clients {
@@ -244,6 +250,17 @@ class BrowserIntegration extends ChangeNotifier {
 
   Future<Map<String, dynamic>> command(Map<String, dynamic> request) async {
     final action = request['action'];
+    if (const [
+      'handoffCapabilities',
+      'handoffPrepare',
+      'handoffQuery',
+      'handoffCommit',
+      'handoffAbort'
+    ].contains(action)) {
+      if (handoffCommand == null)
+        throw const FormatException('unsupported_handoff');
+      return handoffCommand!(request);
+    }
     if (const ['mediaOpen', 'mediaPoll', 'mediaResult'].contains(action)) {
       return media.handle(request);
     }

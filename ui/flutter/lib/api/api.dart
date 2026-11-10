@@ -151,6 +151,17 @@ Future<ResolveResult> resolve(ResolveTask resolveTask) async {
               : '解析下载链接超时，请检查网络或稍后重试');
 }
 
+/// Fixed core endpoint; no fallback to ordinary create on unsupported cores.
+Future<Map<String, dynamic>> browserHandoffRequest(
+        String method, Map<String, dynamic> data) =>
+    _parse<Map<String, dynamic>>(
+        () => method == 'GET'
+            ? _client.dio.get('/api/v1/browser/handoff')
+            : _client.dio.post('/api/v1/browser/handoff', data: data),
+        (value) => value is Map
+            ? Map<String, dynamic>.from(value)
+            : throw const FormatException('invalid_handoff_result'));
+
 Future<String> createTask(CreateTask createTask, {String? operationId}) async {
   return _parse<String>(
       () => _client.dio.post("api/v1/tasks",

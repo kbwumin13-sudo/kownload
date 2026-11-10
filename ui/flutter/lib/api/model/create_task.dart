@@ -1,6 +1,7 @@
 import 'package:json_annotation/json_annotation.dart';
 
 import 'options.dart';
+import 'browser_handoff.dart';
 import 'request.dart';
 
 part 'create_task.g.dart';
@@ -10,6 +11,8 @@ class CreateTask {
   /// Transient App confirmation identity; never sent to the download engine.
   @JsonKey(includeFromJson: false, includeToJson: false)
   String? browserOperationId;
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  BrowserHandoffContext? browserHandoff;
   @JsonKey(includeFromJson: false, includeToJson: false)
   bool browserCapture = false;
   String? rid;

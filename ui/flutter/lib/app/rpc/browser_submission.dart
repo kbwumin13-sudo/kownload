@@ -594,6 +594,12 @@ class BrowserSubmissionRpc {
           throw const FormatException('invalid_request');
         }
         final capture = meta['source'] == 'browser-capture';
+        if (capture) {
+          final rejected =
+              BrowserRpcReply.failure(id, 'handoff_required', status: 409);
+          await ctx.writeJSON(rejected.body, statusCode: rejected.status);
+          return;
+        }
         Map<String, bool>? preferences;
         if (capture && capturePreferences != null) {
           if (meta['clientId'] is! String || meta['browser'] is! String) {

@@ -303,7 +303,13 @@ class BuildTaskListView extends GetView {
                       );
 
                       await patchTask(task.id, patchData);
-                      await continueTask(task.id);
+                      if (task.handoff?.blocked == true) {
+                        final result = await Get.find<AppController>()
+                            .checkBrowserHandoff(task);
+                        showMessage('浏览器交接', result.message);
+                      } else {
+                        await continueTask(task.id);
+                      }
                       Get.back();
                     } catch (e) {
                       showErrorMessage(e);
@@ -348,7 +354,13 @@ class BuildTaskListView extends GetView {
               icon: const Icon(Icons.play_arrow),
               onPressed: () async {
                 try {
-                  await continueTask(task.id);
+                  if (task.handoff?.blocked == true) {
+                    final result = await Get.find<AppController>()
+                        .checkBrowserHandoff(task);
+                    showMessage('浏览器交接', result.message);
+                  } else {
+                    await continueTask(task.id);
+                  }
                 } catch (e) {
                   showErrorMessage(e);
                 }
@@ -389,6 +401,8 @@ class BuildTaskListView extends GetView {
     }
 
     String getProgressText() {
+      if (task.handoff?.blocked == true)
+        return macos ? '' : task.handoff!.label;
       if (isDone()) {
         return Util.fmtByte(task.meta.res!.size);
       }
@@ -494,10 +508,16 @@ class BuildTaskListView extends GetView {
       const MenuDivider(),
       MenuItem(
         icon: const Icon(Icons.play_arrow),
-        label: Text('continue'.tr),
+        label: Text(task.handoff?.blocked == true ? '检查交接' : 'continue'.tr),
         enabled: !isDone() && !isRunning(),
         onSelected: (_) async {
           try {
+            if (task.handoff?.blocked == true) {
+              final result =
+                  await Get.find<AppController>().checkBrowserHandoff(task);
+              showMessage('浏览器交接', result.message);
+              return;
+            }
             await continueAllTasks(
               filterSelectedTaskIds({
                 ...taskListController.selectedTaskIds,
@@ -507,6 +527,7 @@ class BuildTaskListView extends GetView {
                     (id) => tasks.any(
                       (t) =>
                           t.id == id &&
+                          t.handoff?.blocked != true &&
                           t.status != Status.done &&
                           t.status != Status.running,
                     ),
@@ -565,7 +586,8 @@ class BuildTaskListView extends GetView {
         MenuItem(
           icon: const Icon(Icons.login),
           label: const Text('重新同步网盘登录'),
-          enabled: task.status == Status.pause || task.status == Status.error,
+          enabled: task.handoff?.blocked != true &&
+              (task.status == Status.pause || task.status == Status.error),
           onSelected: (_) {
             appController.pendingUpdateTask.value =
                 PendingUpdateTask(id: task.id, name: task.name);
@@ -581,7 +603,8 @@ class BuildTaskListView extends GetView {
       MenuItem.submenu(
         icon: const Icon(Icons.link),
         label: Text('updateUrl'.tr),
-        enabled: (task.protocol == Protocol.http ||
+        enabled: task.handoff?.blocked != true &&
+            (task.protocol == Protocol.http ||
                 task.protocol == Protocol.media) &&
             (task.status == Status.pause || task.status == Status.error),
         items: [
@@ -626,27 +649,29 @@ class BuildTaskListView extends GetView {
     if (macos && Util.isMacos()) {
       final colors = MacColors.of(context);
       final extraction = getExtractionStatusText();
-      final status = isDone()
-          ? 'downloaded'.tr
-          : isRunning()
-              ? (task.progress.mediaPhase == 'merge'
-                  ? (Get.locale?.languageCode == 'zh' ? '合并中' : 'Merging')
-                  : task.fetchingTorrentInfo
-                      ? (Get.locale?.languageCode == 'zh'
-                          ? '正在获取种子信息'
-                          : 'Fetching torrent info')
-                      : 'downloading'.tr)
-              : task.status == Status.pause
-                  ? 'pause'.tr
-                  : task.status == Status.error
-                      ? 'error'.tr
-                      : task.status == Status.wait
+      final status = task.handoff?.blocked == true
+          ? task.handoff!.label
+          : isDone()
+              ? 'downloaded'.tr
+              : isRunning()
+                  ? (task.progress.mediaPhase == 'merge'
+                      ? (Get.locale?.languageCode == 'zh' ? '合并中' : 'Merging')
+                      : task.fetchingTorrentInfo
                           ? (Get.locale?.languageCode == 'zh'
-                              ? '等待中'
-                              : 'Waiting')
-                          : (Get.locale?.languageCode == 'zh'
-                              ? '准备中'
-                              : 'Ready');
+                              ? '正在获取种子信息'
+                              : 'Fetching torrent info')
+                          : 'downloading'.tr)
+                  : task.status == Status.pause
+                      ? 'pause'.tr
+                      : task.status == Status.error
+                          ? 'error'.tr
+                          : task.status == Status.wait
+                              ? (Get.locale?.languageCode == 'zh'
+                                  ? '等待中'
+                                  : 'Waiting')
+                              : (Get.locale?.languageCode == 'zh'
+                                  ? '准备中'
+                                  : 'Ready');
       void selectRow({bool pointer = false}) {
         (taskListController as MacTaskListController).selectRow(
           tasks.map<String>((Task item) => item.id).toList(),
@@ -784,7 +809,11 @@ class BuildTaskListView extends GetView {
                         )
                       else
                         IconButton(
-                          tooltip: isRunning() ? 'pause'.tr : 'continue'.tr,
+                          tooltip: task.handoff?.blocked == true
+                              ? '检查交接'
+                              : isRunning()
+                                  ? 'pause'.tr
+                                  : 'continue'.tr,
                           icon: Icon(
                             isRunning() ? Icons.pause : Icons.play_arrow,
                             size: 18,
@@ -794,7 +823,13 @@ class BuildTaskListView extends GetView {
                               if (isRunning()) {
                                 await pauseTask(task.id);
                               } else {
-                                await continueTask(task.id);
+                                if (task.handoff?.blocked == true) {
+                                  final result = await Get.find<AppController>()
+                                      .checkBrowserHandoff(task);
+                                  showMessage('浏览器交接', result.message);
+                                } else {
+                                  await continueTask(task.id);
+                                }
                               }
                               await taskListController.getTasksState();
                             } catch (e) {
