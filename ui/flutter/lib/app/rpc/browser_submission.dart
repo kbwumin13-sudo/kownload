@@ -406,13 +406,26 @@ class BrowserSubmissionRpc {
           'submission': {'state': 'accepted', 'taskIds': <String>[]},
         });
       }
-      return await _present(await _forward(
+      final reply = await _forward(
         {'method': 'POST', 'path': '/api/v1/tasks', 'data': params},
         id,
         const Duration(seconds: 10),
         watch,
         domain,
-      ));
+      );
+      // Only the strictly validated REST result can publish created. While
+      // awaiting it, an automatic request has no accepted confirmation.
+      final submission = reply.body['submission'];
+      if (id != null &&
+          reply.body['error'] == null &&
+          submission is Map &&
+          submission['state'] == 'created') {
+        _creates[id]?.confirmation = {
+          'state': 'created',
+          'taskIds': List<String>.from(submission['taskIds']),
+        };
+      }
+      return await _present(reply);
     } catch (_) {
       _trace(id, 'flutter_create_failed', watch, domain, 'request_failed');
       final reply = BrowserRpcReply.failure(id, 'request_failed',

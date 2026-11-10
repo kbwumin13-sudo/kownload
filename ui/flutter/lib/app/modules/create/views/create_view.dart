@@ -73,6 +73,7 @@ Protocol? _parseProtocol(String url) {
 class _CreateViewState extends State<CreateView> {
   final _createdIds = <String>[];
   Future<String> _createTask(CreateTask task) async {
+    _checkCaptureCompletion();
     final operation = _panelRequest?.browserOperationId;
     final matches =
         _panelRequest?.req?.url.trim() == _urlController.text.trim();
@@ -93,6 +94,7 @@ class _CreateViewState extends State<CreateView> {
   }
 
   Future<List<String>> _createBatch(CreateTaskBatch batch) async {
+    _checkCaptureCompletion();
     final operation =
         _panelRequest?.req?.url.trim() == _urlController.text.trim()
             ? _panelRequest?.browserOperationId
@@ -119,6 +121,9 @@ class _CreateViewState extends State<CreateView> {
   final _panelShowCompleted = false.obs;
   final _queuedInputs = <CreateTask>[];
   CreateTask? _panelRequest;
+  String? _confirmingCapture;
+  Route<dynamic>? _captureResolveRoute;
+  bool _captureCompletedDuringConfirm = false;
   Request? _originalRequest;
   Uri? _credentialOrigin;
   bool _clipboardChecked = false;
@@ -1374,6 +1379,12 @@ class _CreateViewState extends State<CreateView> {
 
   void _finishBrowserCapture(String id, String message) {
     if (!mounted) return;
+    if (_confirmingCapture == id) {
+      _captureCompletedDuringConfirm = true;
+      final route = _captureResolveRoute;
+      _captureResolveRoute = null;
+      if (route?.isActive == true) route!.navigator?.removeRoute(route);
+    }
     _queuedInputs.removeWhere(
         (task) => task.browserCapture && task.browserOperationId == id);
     if (_panelRequest?.browserCapture != true ||
@@ -1382,6 +1393,12 @@ class _CreateViewState extends State<CreateView> {
     _panelError.value = message;
     _drainQueuedInputs();
     setState(() {});
+  }
+
+  void _checkCaptureCompletion() {
+    if (_captureCompletedDuringConfirm) {
+      throw const BrowserCaptureEnded('浏览器已完成下载，未新建 kownload 任务。');
+    }
   }
 
   void _clearBrowserDraft() {
@@ -2069,6 +2086,10 @@ class _CreateViewState extends State<CreateView> {
       return;
     }
     controller.isConfirming.value = true;
+    _confirmingCapture = _panelRequest?.browserCapture == true
+        ? _panelRequest?.browserOperationId
+        : null;
+    _captureCompletedDuringConfirm = false;
     _createdIds.clear();
     _panelError.value = null;
     MacPanel.cancelAutoHide();
@@ -2080,6 +2101,7 @@ class _CreateViewState extends State<CreateView> {
           _netdiskRequest.value != null ||
           Get.find<AppController>().pendingUpdateTask.value != null;
       if (hasInput && (!await _ensureMacOnboarding() || !mounted)) return;
+      _checkCaptureCompletion();
       // An existing netdisk task owns its file/source, including transferred
       // copies. Browser/native input must never turn recovery into a new batch.
       if (await _showPendingNetdiskTask()) return;
@@ -2174,17 +2196,25 @@ class _CreateViewState extends State<CreateView> {
             req: _requestForUrl(submitUrl),
             opts: opt,
           ));
+          _checkCaptureCompletion();
           await _showResolveDialog(rr);
         }
       }
     } catch (e) {
-      if (e is BrowserCaptureEnded && _panelRequest?.browserCapture == true) {
-        _finishBrowserCapture(_panelRequest!.browserOperationId!, e.message);
+      final error = _captureCompletedDuringConfirm
+          ? const BrowserCaptureEnded('浏览器已完成下载，未新建 kownload 任务。')
+          : e;
+      if (error is BrowserCaptureEnded &&
+          _panelRequest?.browserCapture == true) {
+        _finishBrowserCapture(
+            _panelRequest!.browserOperationId!, error.message);
       }
-      _panelError.value = e.toString();
-      if (!Util.isMacos()) showErrorMessage(e);
+      _panelError.value = error.toString();
+      if (!Util.isMacos()) showErrorMessage(error);
     } finally {
       _confirmController.reset();
+      _confirmingCapture = null;
+      _captureCompletedDuringConfirm = false;
       controller.isConfirming.value = false;
       _drainQueuedInputs();
     }
@@ -2398,107 +2428,111 @@ class _CreateViewState extends State<CreateView> {
     return showDialog<void>(
         context: Get.context!,
         barrierDismissible: false,
-        builder: (_) => AlertDialog(
-              title: rr.res.name.isEmpty ? null : Text(rr.res.name),
-              content: Builder(
-                builder: (context) {
-                  // Get available height and width of the build area of this widget. Make a choice depending on the size.
-                  var height = MediaQuery.of(context).size.height;
-                  var width = MediaQuery.of(context).size.width;
+        builder: (dialogContext) {
+          if (_confirmingCapture != null) {
+            _captureResolveRoute = ModalRoute.of(dialogContext);
+          }
+          return AlertDialog(
+            title: rr.res.name.isEmpty ? null : Text(rr.res.name),
+            content: Builder(
+              builder: (context) {
+                // Get available height and width of the build area of this widget. Make a choice depending on the size.
+                var height = MediaQuery.of(context).size.height;
+                var width = MediaQuery.of(context).size.width;
 
-                  return SizedBox(
-                    height: height * 0.75,
-                    width: width,
-                    child: Form(
-                        key: createFormKey,
-                        autovalidateMode: AutovalidateMode.always,
-                        child: FileTreeView(
-                          files: rr.res.files,
-                          initialValues: rr.res.files.asMap().keys.toList(),
-                          onSelectionChanged: (List<int> values) {
-                            controller.selectedIndexes.value = values;
-                          },
-                        )),
-                  );
-                },
-              ),
-              actions: [
-                ConstrainedBox(
-                  constraints: BoxConstraints.tightFor(
-                    width: Get.theme.buttonTheme.minWidth,
-                    height: Get.theme.buttonTheme.height,
-                  ),
-                  child: ElevatedButton(
-                    style:
-                        ElevatedButton.styleFrom(shape: const StadiumBorder())
-                            .copyWith(
-                                backgroundColor: MaterialStateProperty.all(
-                                    Get.theme.colorScheme.background)),
-                    onPressed: () {
-                      Get.back();
-                    },
-                    child: Text('cancel'.tr),
-                  ),
-                ),
-                ConstrainedBox(
-                  constraints: BoxConstraints.tightFor(
-                    width: Get.theme.buttonTheme.minWidth,
-                    height: Get.theme.buttonTheme.height,
-                  ),
-                  child: RoundedLoadingButton(
-                      color: Get.theme.colorScheme.secondary,
-                      onPressed: () async {
-                        try {
-                          downloadController.start();
-                          if (controller.selectedIndexes.isEmpty) {
-                            showMessage('tip'.tr, 'noFileSelected'.tr);
-                            return;
-                          }
-                          final optExtra = parseReqOptsExtra();
-                          if (createFormKey.currentState!.validate()) {
-                            if (rr.id.isEmpty) {
-                              // from extension resolve result
-                              final reqs =
-                                  controller.selectedIndexes.map((index) {
-                                final file = rr.res.files[index];
-                                return CreateTaskBatchItem(
-                                    req: file.req!..proxy = parseProxy(),
-                                    opts: Options(
-                                        name: file.name,
-                                        path: path.join(_pathController.text,
-                                            rr.res.name, file.path),
-                                        selectFiles: [],
-                                        extra: optExtra));
-                              }).toList();
-                              await _createBatch(CreateTaskBatch(reqs: reqs));
-                            } else {
-                              await _createTask(CreateTask(
-                                  rid: rr.id,
-                                  opts: Options(
-                                      name: _renameController.text,
-                                      path: _pathController.text,
-                                      selectFiles: controller.selectedIndexes,
-                                      extra: optExtra)));
-                            }
-                            Get.back();
-                            _completeCreate();
-                          }
-                        } catch (e) {
-                          showErrorMessage(e);
-                        } finally {
-                          downloadController.reset();
-                        }
-                      },
-                      controller: downloadController,
-                      child: Text(
-                        'download'.tr,
-                        // style: controller.selectedIndexes.isEmpty
-                        //     ? Get.textTheme.disabled
-                        //     : Get.textTheme.titleSmall
+                return SizedBox(
+                  height: height * 0.75,
+                  width: width,
+                  child: Form(
+                      key: createFormKey,
+                      autovalidateMode: AutovalidateMode.always,
+                      child: FileTreeView(
+                        files: rr.res.files,
+                        initialValues: rr.res.files.asMap().keys.toList(),
+                        onSelectionChanged: (List<int> values) {
+                          controller.selectedIndexes.value = values;
+                        },
                       )),
+                );
+              },
+            ),
+            actions: [
+              ConstrainedBox(
+                constraints: BoxConstraints.tightFor(
+                  width: Get.theme.buttonTheme.minWidth,
+                  height: Get.theme.buttonTheme.height,
                 ),
-              ],
-            ));
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(shape: const StadiumBorder())
+                      .copyWith(
+                          backgroundColor: MaterialStateProperty.all(
+                              Get.theme.colorScheme.background)),
+                  onPressed: () {
+                    Get.back();
+                  },
+                  child: Text('cancel'.tr),
+                ),
+              ),
+              ConstrainedBox(
+                constraints: BoxConstraints.tightFor(
+                  width: Get.theme.buttonTheme.minWidth,
+                  height: Get.theme.buttonTheme.height,
+                ),
+                child: RoundedLoadingButton(
+                    color: Get.theme.colorScheme.secondary,
+                    onPressed: () async {
+                      try {
+                        downloadController.start();
+                        if (controller.selectedIndexes.isEmpty) {
+                          showMessage('tip'.tr, 'noFileSelected'.tr);
+                          return;
+                        }
+                        final optExtra = parseReqOptsExtra();
+                        if (createFormKey.currentState!.validate()) {
+                          if (rr.id.isEmpty) {
+                            // from extension resolve result
+                            final reqs =
+                                controller.selectedIndexes.map((index) {
+                              final file = rr.res.files[index];
+                              return CreateTaskBatchItem(
+                                  req: file.req!..proxy = parseProxy(),
+                                  opts: Options(
+                                      name: file.name,
+                                      path: path.join(_pathController.text,
+                                          rr.res.name, file.path),
+                                      selectFiles: [],
+                                      extra: optExtra));
+                            }).toList();
+                            await _createBatch(CreateTaskBatch(reqs: reqs));
+                          } else {
+                            await _createTask(CreateTask(
+                                rid: rr.id,
+                                opts: Options(
+                                    name: _renameController.text,
+                                    path: _pathController.text,
+                                    selectFiles: controller.selectedIndexes,
+                                    extra: optExtra)));
+                          }
+                          Get.back();
+                          _completeCreate();
+                        }
+                      } catch (e) {
+                        showErrorMessage(e);
+                      } finally {
+                        downloadController.reset();
+                      }
+                    },
+                    controller: downloadController,
+                    child: Text(
+                      'download'.tr,
+                      // style: controller.selectedIndexes.isEmpty
+                      //     ? Get.textTheme.disabled
+                      //     : Get.textTheme.titleSmall
+                    )),
+              ),
+            ],
+          );
+        }).whenComplete(() => _captureResolveRoute = null);
   }
 
   Widget _buildCategorySelector(AppController appController) {

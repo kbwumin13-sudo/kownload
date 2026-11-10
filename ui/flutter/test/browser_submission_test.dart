@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/app/rpc/browser_submission.dart';
 import 'package:gopeed/app/rpc/rpc.dart';
+import 'package:gopeed/app/services/browser_integration.dart';
 
 Response<dynamic> response(dynamic data, [int status = 200]) => Response(
     requestOptions: RequestOptions(path: '/api/v1/tasks'),
@@ -193,6 +195,54 @@ void main() {
             'unknown', 'one', 'edge', {'state': 'complete'})['state'],
         'unknown');
     expect(ended, ['waiting']);
+  });
+
+  test(
+      'passive complete cannot close an automatic REST create in flight or change its created receipt',
+      () async {
+    final upstream = Completer<Response<dynamic>>();
+    var sends = 0;
+    final ended = <String>[];
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) {
+          sends++;
+          return upstream.future;
+        },
+        showCreate: (_) async {},
+        log: (_) {},
+        onBrowserCaptureCompleted: ended.add);
+    final future = rpc.create(body,
+        operationId: 'automatic',
+        confirm: false,
+        browserCapture: true,
+        captureClientId: 'one',
+        captureBrowser: 'chrome');
+    expect(sends, 1);
+    expect(rpc.confirmationStatus('automatic')['state'], 'unknown',
+        reason:
+            'automatic creation is never an unsubmitted accepted confirmation');
+    expect(
+        rpc.observeBrowserState(
+            'automatic', 'one', 'chrome', {'state': 'complete'})['state'],
+        'unknown');
+    expect(ended, isEmpty);
+    upstream.complete(response(created('automatic')));
+    final reply = await future;
+    expect(reply.body['submission'], {
+      'state': 'created',
+      'taskIds': ['task-one']
+    });
+    rpc.observeBrowserState(
+        'automatic', 'one', 'chrome', {'state': 'complete'});
+    final retry = await rpc.create(body,
+        operationId: 'automatic',
+        confirm: false,
+        browserCapture: true,
+        captureClientId: 'one',
+        captureBrowser: 'chrome');
+    expect(retry.body, reply.body);
+    expect(sends, 1);
+    expect(ended, isEmpty);
   });
 
   test('only explicit cancellation marks an accepted confirmation cancelled',
@@ -580,6 +630,89 @@ void main() {
       expect(opens, 1);
     } finally {
       client.close(force: true);
+      await server.close(force: true);
+    }
+  });
+
+  test(
+      'HTTP automatic ACK loss can query the strictly created receipt without replay',
+      () async {
+    final upstream = Completer<Response<dynamic>>(),
+        entered = Completer<void>(),
+        presented = Completer<void>();
+    var sends = 0;
+    final rpc = BrowserSubmissionRpc(
+        capturePreferences: (_, __) => {'enabled': true, 'confirm': false},
+        send: (_, __, ___) {
+          sends++;
+          entered.complete();
+          return upstream.future;
+        },
+        showCreate: (_) async {},
+        log: (_) {},
+        showResult: (_, __) async {
+          presented.complete();
+        });
+    final app = BrowserIntegration(
+        read: () => null,
+        write: (_) async {
+          fail('receipt must not persist');
+        },
+        submission: rpc.confirmationStatus);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((r) async {
+      try {
+        final ctx = RpcContext(r, r.response);
+        if (r.uri.path == '/create')
+          await rpc.handle(ctx, create: true);
+        else
+          await app.handle(ctx);
+      } catch (_) {
+        try {
+          await r.response.close();
+        } catch (_) {}
+      }
+    });
+    final lostClient = _RealHttp().createHttpClient(null),
+        queryClient = _RealHttp().createHttpClient(null);
+    try {
+      final r = await lostClient
+          .postUrl(Uri.parse('http://127.0.0.1:${server.port}/create'));
+      r.headers.set(operationHeader, 'ack-lost');
+      r.headers.set(
+          'X-Kownload-Host-Meta',
+          jsonEncode({
+            'source': 'browser-capture',
+            'clientId': 'one',
+            'browser': 'chrome',
+            'silent': true
+          }));
+      r.write(body);
+      final dropped = () async {
+        try {
+          final reply = await r.close();
+          await reply.drain<void>();
+        } catch (_) {}
+      }();
+      await entered.future;
+      lostClient.close(force: true);
+      await dropped;
+      upstream.complete(response(created('ack-lost')));
+      await presented.future;
+      final query = await queryClient
+          .postUrl(Uri.parse('http://127.0.0.1:${server.port}/browser'));
+      query.write(
+          jsonEncode({'action': 'submission', 'operationId': 'ack-lost'}));
+      final result = await query.close();
+      final value = jsonDecode(await utf8.decoder.bind(result).join());
+      expect(value['data'], {
+        'state': 'created',
+        'taskIds': ['task-one']
+      });
+      expect(sends, 1);
+    } finally {
+      lostClient.close(force: true);
+      queryClient.close(force: true);
       await server.close(force: true);
     }
   });
