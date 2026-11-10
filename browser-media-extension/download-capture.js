@@ -110,7 +110,7 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     job.polling=true;
     try {
       const {report}=await current(job);
-      const data=await appBridge.request('submission',{operationId:job.operationId,browserState:report,...(report.state==='complete' && job.state!=='authorizing' ? {decision:'browser_completed'} : {})});
+      const data=await appBridge.request('submission',{operationId:job.operationId,browserState:report});
       await receipt(job,data);
     } catch {await state(job,'uncertain').catch(()=>{});}
     finally {job.polling=false;}
@@ -168,6 +168,9 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     jobs.set(item.id,job);
     try {
       job.releaseNative=appBridge.acquire();
+      // This is an actual eligible download, not passive media discovery. An
+      // enabled capture can wake the App before asking its canonical mode.
+      if(activeConfig?.enabled !== false) await appBridge.wake();
       const settings=await appBridge.settings();
       activeConfig=settings.downloadCapture;
       if(!activeConfig.enabled){await returnToBrowser(job);return;}

@@ -6,7 +6,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,receipt={state:'unknown',taskIds:[]},session={}}={}) {
   const events={},calls=[],messages=[],rpc=[],saved=structuredClone(session);
   const event=name=>({addListener:fn=>{(events[name] ||= []).push(fn);}});
-  const f={events,calls,messages,rpc,saved,settings:{downloadCapture:{enabled,confirm}},receipt,leases:0,settingsReads:0,itemState:{id:7,state:'in_progress',paused:true,bytesReceived:0,totalBytes:20}};
+  const f={events,calls,messages,rpc,saved,settings:{downloadCapture:{enabled,confirm}},receipt,leases:0,wakes:0,settingsReads:0,itemState:{id:7,state:'in_progress',paused:true,bytesReceived:0,totalBytes:20}};
   f.browser={
     permissions:{contains:async()=>true,onAdded:event('permission'),onRemoved:event('removedPermission')},
     storage:{local:{get:async()=>({downloadCapture:{enabled,confirm}})},session:{get:async()=>structuredClone(saved),set:async value=>Object.assign(saved,structuredClone(value))},onChanged:event('storage')},
@@ -21,6 +21,7 @@ function fixture({enabled=true,confirm=false,ping={code:0,data:true},reply,recei
     return reply || {code:0,httpStatus:200,businessCode:0,operationId:message.operationId,data:{code:0,operationId:message.operationId,data:'task-one',submission:{state:'created',taskIds:['task-one']}}};
   };
   f.bridge={
+    wake:async()=>{f.wakes++;if(f.wakeError)throw Error('unavailable');},
     settings:async()=>{f.settingsReads++;if(f.settingsError)throw Error('unavailable');return structuredClone(f.settings);},
     identity:async()=>({clientId:'client-one',browser:'chrome'}),
     send:f.send,acquire:()=>{f.leases++;let released=false;return()=>{if(!released){released=true;f.leases--;}};},
@@ -72,7 +73,7 @@ test('App approval is gated by the current download and does not issue another c
 test('a real browser completion during confirmation is reported separately and never re-created',async()=>{
   const f=fixture({confirm:true,reply:accepted});await f.capture();f.itemState.state='complete';f.itemState.bytesReceived=20;
   f.receipt={state:'browser_completed',taskIds:[]};await f.controller.poll(f.controller.jobs.get(7));
-  assert.equal(f.rpc[0].decision,'browser_completed');assert.equal(submissions(f).length,1);assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.leases,0);
+  assert.equal(f.rpc[0].decision,undefined);assert.equal(f.rpc[0].browserState.state,'complete');assert.equal(submissions(f).length,1);assert.deepEqual(f.calls,[['pause',7]]);assert.equal(f.leases,0);
 });
 test('only an explicit App cancellation cancels an in-progress browser download',async()=>{
   const f=fixture({confirm:true,reply:accepted});await f.capture();f.receipt={state:'cancelled',taskIds:[]};
@@ -148,4 +149,18 @@ test('ordinary association is not displaced by image or XHR resources',async()=>
 });
 test('browser query failure before posting cannot strand an original request',async()=>{
   const f=fixture();f.searchError=true;await f.capture();assert.equal(submissions(f).length,0);assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.leases,0);
+});
+
+test('completion while waiting sends status before any token-bound decision',async()=>{
+ const f=fixture({confirm:true,reply:accepted});await f.capture();f.itemState.state='complete';
+ f.receipt=params=>{if(params.decision){assert.equal(params.confirmToken,'token-one');assert.equal(params.decision,'browser_completed');return {state:'browser_completed',taskIds:[]};}return {state:'accepted',taskIds:[],commitRequested:true,confirmToken:'token-one'};};
+ await f.controller.poll(f.controller.jobs.get(7));assert.equal(f.rpc[0].decision,undefined);assert.equal(f.rpc[1].decision,'browser_completed');assert.equal(f.controller.jobs.get(7).resolved,true);assert.equal(submissions(f).length,1);
+});
+
+test('enabled download wakes the App before canonical settings; passive/off capture does not',async()=>{
+ const f=fixture();let running=false;f.bridge.wake=async()=>{f.wakes++;running=true;};
+ const read=f.bridge.settings;f.bridge.settings=async()=>{assert.equal(running,true);return read();};
+ assert.equal(f.wakes,0);await f.observe();assert.equal(f.wakes,0);await f.capture();assert.equal(f.wakes,1);assert.equal(submissions(f).length,1);
+ const off=fixture({enabled:false});await off.capture();assert.equal(off.wakes,0);assert.equal(submissions(off).length,0);
+ const failure=fixture();failure.wakeError=true;await failure.capture();assert.equal(submissions(failure).length,0);assert.deepEqual(failure.calls,[['pause',7],['resume',7]]);
 });
