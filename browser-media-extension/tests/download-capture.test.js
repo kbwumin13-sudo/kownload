@@ -132,3 +132,22 @@ test('cache overflow cannot erase ambiguity and then attach a different request'
   for(let i=0;i<201;i++) f.events.headers[0]({url:`https://files.test/${i}`,tabId:1,requestId:`request-${i}`,method:'GET',requestHeaders:[]});
   await Promise.resolve();await f.capture();assert.deepEqual(f.calls,[]);assert.equal(f.messages.length,0);
 });
+test('confirmation status uses the real browser state after a worker restart or external completion',async()=>{
+  const f=fixture({confirm:true});await f.capture();f.browser.downloads.search=async()=>[{id:7,state:'complete',paused:true,bytesReceived:20,totalBytes:20}];
+  const reply=await new Promise(resolve=>f.events.message[0]({type:'DOWNLOAD_CAPTURE',id:7,action:'status'},{url:'chrome-extension://ours/download-confirm.html?id=7'},resolve));
+  assert.equal(reply.job.state,'browser');assert.equal(reply.browser.state,'complete');assert.equal(f.messages.length,0);
+});
+test('a transient browser query failure leaves an unsubmitted confirmation recoverable',async()=>{
+  const f=fixture({confirm:true});await f.capture();f.browser.downloads.search=async()=>{throw Error('temporary');};
+  await assert.rejects(f.controller.finish(f.controller.jobs.get(7),'resume'));assert.equal(f.controller.jobs.get(7).state,'waiting');
+  f.browser.downloads.search=async()=>[{id:7,state:'in_progress',paused:true}];
+  await f.controller.finish(f.controller.jobs.get(7),'resume');assert.equal(f.controller.jobs.get(7).state,'browser');assert.equal(f.messages.length,0);
+});
+test('safe failures release filename completion exactly once, while an unknown submission remains held',async()=>{
+  for(const [options,released] of [[{ping:new Error('disconnected')},true],[{reply:{code:1,error:'ipc_unavailable'}},true],[{reply:new Error('lost after submission')},false]]) {
+    const f=fixture(options);await new Promise(resolve=>setImmediate(resolve));let suggestions=0;
+    f.events.headers[0]({url:f.item.finalUrl,tabId:1,requestId:'request-one',method:'GET',requestHeaders:[]});await Promise.resolve();
+    assert.equal(f.events.download[0](f.item,()=>{suggestions++;}),true);await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(suggestions,released ? 1 : 0);
+  }
+});

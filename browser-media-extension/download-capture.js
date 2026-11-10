@@ -44,15 +44,16 @@ export function installDownloadCapture(browser,send) {
   };
   async function finish(job,action) {
     if (!['waiting','expired'].includes(job.state) || !['submit','cancel','resume'].includes(action) || job.state === 'expired' && action === 'submit') return;
+    const previousState = job.state;
     job.state = 'deciding';
-    if (action === 'cancel') {
-      await browser.downloads.cancel(job.id);
-      await terminal(job,'cancelled');
-      return;
-    }
-    if (action === 'resume') {
-      await browser.downloads.resume(job.id);
-      await terminal(job,'browser');
+    if (action !== 'submit') {
+      try {
+        const current = (await browser.downloads.search({id:job.id}))[0];
+        if (current?.state === 'complete') { await terminal(job,'browser');return; }
+        if (action === 'cancel') await browser.downloads.cancel(job.id);
+        else await browser.downloads.resume(job.id);
+        await terminal(job,action === 'cancel' ? 'cancelled' : 'browser');
+      } catch (error) { job.state=previousState;throw error; }
       return;
     }
     // A failed preflight cannot have submitted a task. Keep the browser's
@@ -68,6 +69,7 @@ export function installDownloadCapture(browser,send) {
       return;
     }
     if (!current || current.state !== 'in_progress') { await terminal(job,current?.state === 'complete' ? 'browser' : 'cancelled');return; }
+    if (current.paused === false) { await terminal(job,'browser');return; }
     job.state = 'sending';
     await changed(job);
     let reply;
@@ -177,7 +179,9 @@ export function installDownloadCapture(browser,send) {
       await restored;
       const job = jobs.get(Number(message.id));
       if (message.action !== 'status' && job) await finish(job,message.action);
-      respond({ok:true,job:job ? {id:job.id,name:job.name,state:job.state,taskIds:job.taskIds} : null});
+      const current = (await browser.downloads.search({id:Number(message.id)}))[0];
+      if (job && ['waiting','expired'].includes(job.state) && (current?.state === 'complete' || current?.state === 'interrupted' || current?.paused === false)) await terminal(job,'browser');
+      respond({ok:true,job:job ? {id:job.id,name:job.name,state:job.state,taskIds:job.taskIds} : null,browser:current ? {state:current.state,paused:current.paused,received:current.bytesReceived,total:current.totalBytes} : null});
     })().catch(() => respond({ok:false}));
     return true;
   });
