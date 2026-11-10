@@ -124,7 +124,7 @@ class _CreateViewState extends State<CreateView> {
   bool _clipboardChecked = false;
   Future<bool>? _onboarding;
   String? _lastDefaultDownloadPath;
-  Worker? _pendingWorker, _captureWorker;
+  Worker? _pendingWorker, _captureWorker, _captureEndWorker;
   @override
   void initState() {
     super.initState();
@@ -145,6 +145,10 @@ class _CreateViewState extends State<CreateView> {
             _netdiskOpen.value) return;
         _clearBrowserDraft();
         setState(() {});
+      });
+      _captureEndWorker =
+          ever(Get.find<AppController>().completedBrowserOperation, (id) {
+        if (id != null) _finishBrowserCapture(id, '浏览器已完成下载，未新建 kownload 任务。');
       });
       _panelRequest = MacPanel.incoming.value;
       _pendingWorker = ever(Get.find<AppController>().pendingUpdateTask, (_) {
@@ -204,6 +208,7 @@ class _CreateViewState extends State<CreateView> {
     if (Util.isMacos()) MacPanel.cancelAutoHide();
     _pendingWorker?.dispose();
     _captureWorker?.dispose();
+    _captureEndWorker?.dispose();
     MacPanel.focusRequests.removeListener(_focusInput);
     MacPanel.incoming.removeListener(_receiveInput);
     MacPanel.taskResult.removeListener(_receiveTaskResult);
@@ -1367,6 +1372,18 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
+  void _finishBrowserCapture(String id, String message) {
+    if (!mounted) return;
+    _queuedInputs.removeWhere(
+        (task) => task.browserCapture && task.browserOperationId == id);
+    if (_panelRequest?.browserCapture != true ||
+        _panelRequest?.browserOperationId != id) return;
+    _clearBrowserDraft();
+    _panelError.value = message;
+    _drainQueuedInputs();
+    setState(() {});
+  }
+
   void _clearBrowserDraft() {
     if (identical(MacPanel.incoming.value, _panelRequest)) {
       MacPanel.incoming.value = null;
@@ -2162,7 +2179,7 @@ class _CreateViewState extends State<CreateView> {
       }
     } catch (e) {
       if (e is BrowserCaptureEnded && _panelRequest?.browserCapture == true) {
-        _clearBrowserDraft();
+        _finishBrowserCapture(_panelRequest!.browserOperationId!, e.message);
       }
       _panelError.value = e.toString();
       if (!Util.isMacos()) showErrorMessage(e);

@@ -157,68 +157,147 @@ void main() {
     expect(requests, hasLength(1));
   });
 
-  testWidgets(
-      'browser completion clears the capture credentials and operation before manual input',
-      (tester) async {
-    if (!Platform.isMacOS) return;
-    Database.instance.box = _Box()..onboardingCompleted = true;
-    final app = Get.put<AppController>(_App()) as _App;
-    app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
-    app.downloaderConfig.value.extra.defaultDirectDownload = true;
-    app.pendingUpdateTask.value =
-        PendingUpdateTask(id: 'old-task', name: 'old');
-    app.beginBrowserCapture();
-    expect(app.pendingUpdateTask.value, isNull);
-    app.browserCompleted = true;
-    Get.put(CreateController());
-    MacPanel.presentation.value = 'panel';
-    MacPanel.incoming.value = CreateTask(
-        req: Request(url: 'https://fixture.test/captured', extra: {
-      'header': {'Cookie': 'fake-capture-only'}
-    }))
-      ..browserCapture = true
-      ..browserOperationId = 'completed-capture';
-    tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
-    await tester.binding.setSurfaceSize(const Size(640, 760));
-    addTearDown(() async {
-      await tester.pumpWidget(const SizedBox.shrink());
-      MacPanel.incoming.value = null;
-      MacPanel.taskResult.value = null;
-      MacPanel.cancelAutoHide();
-      Get.reset();
-      Get.routerDelegate = null;
-      Get.routeInformationParser = null;
-      await tester.binding.setSurfaceSize(null);
+  for (final passive in [false, true])
+    testWidgets(
+        'browser completion clears credentials before manual input; passive=$passive',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      Database.instance.box = _Box()..onboardingCompleted = true;
+      final app = Get.put<AppController>(_App()) as _App;
+      app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+      app.downloaderConfig.value.extra.defaultDirectDownload = true;
+      app.pendingUpdateTask.value =
+          PendingUpdateTask(id: 'old-task', name: 'old');
+      app.beginBrowserCapture();
+      expect(app.pendingUpdateTask.value, isNull);
+      app.browserCompleted = !passive;
+      Get.put(CreateController());
+      MacPanel.presentation.value = 'panel';
+      MacPanel.incoming.value = CreateTask(
+          req: Request(url: 'https://fixture.test/captured', extra: {
+        'header': {'Cookie': 'fake-capture-only'}
+      }))
+        ..browserCapture = true
+        ..browserOperationId = 'completed-capture';
       tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(MacPanel.channel, null);
+          .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+      await tester.binding.setSurfaceSize(const Size(640, 760));
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        MacPanel.incoming.value = null;
+        MacPanel.taskResult.value = null;
+        MacPanel.cancelAutoHide();
+        Get.reset();
+        Get.routerDelegate = null;
+        Get.routeInformationParser = null;
+        await tester.binding.setSurfaceSize(null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(MacPanel.channel, null);
+      });
+      final requests = <CreateTask>[];
+      await tester.pumpWidget(
+          GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+        GetPage(
+            name: '/',
+            page: () => CreateView(taskCreator: (task) async {
+                  requests.add(task);
+                  return 'manual-task';
+                }))
+      ]));
+      await tester.pumpAndSettle();
+      if (passive) {
+        app.browserCaptureCompleted('completed-capture');
+      } else {
+        await tester.tap(find.byTooltip('开始下载'));
+      }
+      await tester.pumpAndSettle();
+      expect(requests, isEmpty);
+      expect(find.textContaining('浏览器已完成下载'), findsOneWidget);
+      expect(MacPanel.incoming.value, isNull);
+      await tester.enterText(find.byKey(const ValueKey('panel-download-input')),
+          'https://fixture.test/manual');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('开始下载'));
+      await tester.pumpAndSettle();
+      expect(requests, hasLength(1));
+      expect(jsonEncode(requests.single.toJson()),
+          isNot(contains('fake-capture-only')));
+      expect(app.browserResults, isEmpty);
     });
-    final requests = <CreateTask>[];
-    await tester.pumpWidget(
-        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
-      GetPage(
-          name: '/',
-          page: () => CreateView(taskCreator: (task) async {
-                requests.add(task);
-                return 'manual-task';
-              }))
-    ]));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('开始下载'));
-    await tester.pumpAndSettle();
-    expect(requests, isEmpty);
-    expect(find.textContaining('浏览器已完成下载'), findsOneWidget);
-    expect(MacPanel.incoming.value, isNull);
-    await tester.enterText(find.byKey(const ValueKey('panel-download-input')),
-        'https://fixture.test/manual');
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('开始下载'));
-    await tester.pumpAndSettle();
-    expect(requests, hasLength(1));
-    expect(jsonEncode(requests.single.toJson()),
-        isNot(contains('fake-capture-only')));
-    expect(app.browserResults, isEmpty);
-  });
+
+  for (final finishQueuedFirst in [false, true])
+    testWidgets(
+        'passive completion isolates current and queued captures; queued first=$finishQueuedFirst',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      Database.instance.box = _Box()..onboardingCompleted = true;
+      final app = Get.put<AppController>(_App()) as _App;
+      app.downloaderConfig.value.downloadDir = '/tmp/kownload-test';
+      app.downloaderConfig.value.extra.defaultDirectDownload = true;
+      Get.put(CreateController());
+      CreateTask capture(String id) => CreateTask(
+              req: Request(url: 'https://fixture.test/$id', extra: {
+            'header': {'Cookie': 'fake-$id'}
+          }))
+            ..browserCapture = true
+            ..browserOperationId = id;
+      MacPanel.presentation.value = 'panel';
+      MacPanel.incoming.value = capture('A');
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+      await tester.binding.setSurfaceSize(const Size(640, 760));
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        MacPanel.incoming.value = null;
+        MacPanel.taskResult.value = null;
+        MacPanel.cancelAutoHide();
+        Get.reset();
+        Get.routerDelegate = null;
+        Get.routeInformationParser = null;
+        await tester.binding.setSurfaceSize(null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(MacPanel.channel, null);
+      });
+      final requests = <CreateTask>[];
+      await tester.pumpWidget(
+          GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+        GetPage(
+            name: '/',
+            page: () => CreateView(taskCreator: (task) async {
+                  requests.add(task);
+                  return 'created-B';
+                }))
+      ]));
+      await tester.pumpAndSettle();
+      await MacPanel.showPanel(task: capture('B'));
+      await tester.pumpAndSettle();
+      app.browserCaptureCompleted('unrelated');
+      await tester.pumpAndSettle();
+      final input = find.byKey(const ValueKey('panel-download-input'));
+      expect(tester.widget<TextFormField>(input).controller!.text,
+          'https://fixture.test/A');
+      if (finishQueuedFirst) {
+        app.browserCaptureCompleted('B');
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextFormField>(input).controller!.text,
+            'https://fixture.test/A');
+      }
+      app.browserCaptureCompleted('A');
+      await tester.pumpAndSettle();
+      expect(requests, isEmpty);
+      expect(tester.widget<TextFormField>(input).controller!.text,
+          finishQueuedFirst ? '' : 'https://fixture.test/B');
+      if (!finishQueuedFirst) {
+        await tester.tap(find.byTooltip('开始下载'));
+        await tester.pumpAndSettle();
+        expect(requests, hasLength(1));
+        expect(requests.single.req!.url, 'https://fixture.test/B');
+        final request = jsonEncode(requests.single.toJson());
+        expect(request, contains('fake-B'));
+        expect(request, isNot(contains('fake-A')));
+        expect(app.browserResults.single['id'], 'B');
+      }
+    });
 
   testWidgets(
       'browser result selects ongoing and reveals queued or completed tasks',

@@ -193,6 +193,47 @@ void main() {
     expect(opens, 1);
   });
 
+  test(
+      'passive browser state requires a well-formed client and is not persisted or a decision',
+      () async {
+    final observations = <List<dynamic>>[];
+    app = BrowserIntegration(
+        read: () => stored,
+        write: (value) async {
+          stored = value;
+        },
+        observeSubmission: (id, client, browser, state) {
+          observations.add([id, client, browser, state]);
+          return {'state': 'browser_completed', 'taskIds': <String>[]};
+        });
+    final value = {
+      'action': 'submission',
+      'operationId': 'capture-one',
+      'clientId': 'client-one',
+      'browser': 'chrome',
+      'browserState': {'state': 'complete'}
+    };
+    expect((await app.command(value))['state'], 'browser_completed');
+    expect(observations, [
+      [
+        'capture-one',
+        'client-one',
+        'chrome',
+        {'state': 'complete'}
+      ]
+    ]);
+    expect(stored, isNull);
+    for (final bad in [
+      {'clientId': null},
+      {'browser': 'other'},
+      {'browserState': 'complete'},
+      {'clientId': 'bad id'}
+    ]) {
+      await expectLater(app.command({...value, ...bad}), throwsFormatException);
+    }
+    expect(observations, hasLength(1));
+  });
+
   test('a restarted App reports unknown instead of assuming cancellation',
       () async {
     final result =
