@@ -85,20 +85,63 @@ struct PanelHostTest {
     let metadataURL = metadataDirectory.appendingPathComponent("Local State")
     try! metadataFixture.write(to: metadataURL)
     let oldBookmarks = UserDefaults.standard.dictionary(forKey: "netdiskProfileFileBookmarks")
-    UserDefaults.standard.set([metadataURL.path: Data("obsolete-bookmark".utf8)], forKey: "netdiskProfileFileBookmarks")
-    // An obsolete bookmark is dropped and reported once so the user can allow
-    // the file again; the retry then reads what the OS permits.
-    var firstRead: Any?
-    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { firstRead = $0 }
-    precondition((firstRead as? FlutterError)?.code == "profile_permission_denied", "An obsolete bookmark is reported once")
-    precondition((UserDefaults.standard.dictionary(forKey: "netdiskProfileFileBookmarks") as? [String: Data])?[metadataURL.path] == nil,
-                 "The obsolete bookmark is removed")
-    var recoveredMetadata: Any?
-    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { recoveredMetadata = $0 }
-    precondition((recoveredMetadata as? String)?.contains("学习") == true, "The retry reads OS-permitted metadata")
+    let bookmarkKey = "netdiskProfileFileBookmarks"
+    func requireProfile(_ condition: Bool, _ message: String) {
+      if !condition { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func readProfile() -> Any? {
+      var result: Any?
+      window.handleBrowserProfileCall(FlutterMethodCall(methodName: "read", arguments: ["path": metadataURL.path])) { result = $0 }
+      return result
+    }
+    let invalidBookmarks = [metadataURL.path: Data("obsolete-bookmark".utf8)]
+    UserDefaults.standard.set(invalidBookmarks, forKey: bookmarkKey)
+    for _ in 0..<2 {
+      requireProfile((readProfile() as? FlutterError)?.code == "profile_permission_denied",
+                     "An unreadable bookmark must require explicit permission again")
+      requireProfile(UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data] == invalidBookmarks,
+                     "Failed reads must preserve the original bookmark bytes")
+    }
+    // A real bookmark whose file moved must not authorize a different file
+    // subsequently created at the old path, or be silently discarded.
+    let scopedBookmark = try! metadataURL.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+                                                      includingResourceValuesForKeys: nil, relativeTo: nil)
+    let movedDirectory = metadataDirectory.appendingPathComponent("moved")
+    try! FileManager.default.createDirectory(at: movedDirectory, withIntermediateDirectories: true)
+    try! FileManager.default.moveItem(at: metadataURL, to: movedDirectory.appendingPathComponent("Local State"))
+    try! metadataFixture.write(to: metadataURL)
+    var stale = false
+    let movedURL = try? URL(resolvingBookmarkData: scopedBookmark, options: [.withSecurityScope, .withoutUI],
+                           relativeTo: nil, bookmarkDataIsStale: &stale)
+    requireProfile(stale || movedURL?.standardizedFileURL != metadataURL.standardizedFileURL,
+                   "The fixture must exercise a stale, unreadable or mismatched bookmark")
+    let movedBookmarks = [metadataURL.path: scopedBookmark]
+    UserDefaults.standard.set(movedBookmarks, forKey: bookmarkKey)
+    requireProfile((readProfile() as? FlutterError)?.code == "profile_permission_denied",
+                   "A moved or stale bookmark must not authorize the replacement file")
+    requireProfile(UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data] == movedBookmarks,
+                   "A moved or stale bookmark must remain stored")
+    print("PASS: failed and moved/stale bookmark reads preserve bytes; stale=\(stale)")
+    // Exercise the production explicit chooser callback with a real temporary
+    // file; the presenter shows no UI and creates no production authorization.
+    window.presentOpenPanel = { _, done in done([metadataURL]) }
+    var selectedProfile: Any?
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "choose", arguments: ["path": metadataURL.path])) { selectedProfile = $0 }
+    let replacementBookmarks = UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data]
+    requireProfile(selectedProfile as? String == metadataURL.path && replacementBookmarks?[metadataURL.path] != scopedBookmark,
+                   "An explicit selection must replace the stale bookmark")
+    requireProfile((readProfile() as? String)?.contains("学习") == true,
+                   "The explicitly selected valid bookmark must read metadata")
+    requireProfile(UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data] == replacementBookmarks,
+                   "A valid read must preserve the chosen bookmark")
+    var cancelledProfile: Any? = "unanswered"
+    window.presentOpenPanel = { _, done in done(nil) }
+    window.handleBrowserProfileCall(FlutterMethodCall(methodName: "choose", arguments: ["path": metadataURL.path])) { cancelledProfile = $0 }
+    requireProfile(cancelledProfile == nil && UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data] == replacementBookmarks,
+                   "Cancelling an explicit selection must preserve the chosen bookmark")
     UserDefaults.standard.set(oldBookmarks, forKey: "netdiskProfileFileBookmarks")
     try! FileManager.default.removeItem(at: metadataDirectory)
-    print("PASS: an obsolete profile bookmark is reported once and removed; the retry reads the metadata")
+    print("PASS: explicit replacement, valid metadata reads and chooser cancellation preserve their semantics")
     let input = InputController()
     window.installContentController(input)
     var events: [(String, Any?)] = []

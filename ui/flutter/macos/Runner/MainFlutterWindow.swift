@@ -457,9 +457,9 @@ class MainFlutterWindow: NSWindow {
            !stale, resolved.standardizedFileURL == currentURL.standardizedFileURL {
           scopeURL = resolved
         } else {
-          var bookmarks = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
-          bookmarks.removeValue(forKey: path)
-          defaults.set(bookmarks, forKey: key)
+          // A failed read must not erase the user's stored authorization data.
+          // Only an explicit selection above replaces it; the failed bookmark
+          // still grants no access and is reported for the user to renew.
           result(FlutterError(code: "profile_permission_denied",
             message: "原资料文件授权已失效，请点“选择资料文件”重新允许读取。", details: nil))
           return
