@@ -81,6 +81,40 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "wakeup_failed", nil, nil)
 		}
 		return success
+	case "browser":
+		var params struct {
+			Action   string `json:"action"`
+			ClientID string `json:"clientId"`
+			Browser  string `json:"browser"`
+		}
+		if json.Unmarshal(req.Params, &params) != nil || !operationID.MatchString(params.ClientID) || (params.Browser != "chrome" && params.Browser != "edge") {
+			return failure(req.OperationID, "invalid_request", nil, nil)
+		}
+		switch params.Action {
+		case "sync", "settings", "submission", "mediaPoll", "mediaResult":
+		case "openSettings", "updateSettings", "mediaOpen":
+			wake, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := d.Wakeup.Ensure(wake, params.Action == "updateSettings")
+			cancel()
+			if err != nil {
+				return failure(req.OperationID, "wakeup_failed", nil, nil)
+			}
+		default:
+			return failure(req.OperationID, "invalid_request", nil, nil)
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if !d.Client.Available(requestCtx) {
+			return failure(req.OperationID, "ipc_unavailable", nil, nil)
+		}
+		status, reply, err := d.Client.Post(requestCtx, "/browser", req)
+		if err != nil {
+			if status > 0 {
+				return failureWithBusiness(req.OperationID, "request_failed", status, nil)
+			}
+			return failure(req.OperationID, "request_failed", nil, nil)
+		}
+		return interpret(req, status, reply, false)
 	case "create", "forward":
 		// The official Gopeed extension sends create params as a base64 JSON
 		// string. Normalize this legacy envelope before validating/forwarding;

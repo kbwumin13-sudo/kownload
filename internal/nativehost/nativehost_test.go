@@ -18,22 +18,26 @@ import (
 )
 
 type fixture struct {
-	status    int
-	body      string
-	calls     int
-	available bool
-	wakeError error
-	last      Request
-	budget    time.Duration
+	status     int
+	body       string
+	calls      int
+	available  bool
+	wakeError  error
+	last       Request
+	lastPath   string
+	wakes      int
+	wakeSilent bool
+	budget     time.Duration
 }
 
 func (f *fixture) Available(context.Context) bool { return f.available }
-func (f *fixture) Post(ctx context.Context, _ string, r Request) (int, []byte, error) {
+func (f *fixture) Post(ctx context.Context, path string, r Request) (int, []byte, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		f.budget = time.Until(deadline)
 	}
 	f.calls++
 	f.last = r
+	f.lastPath = path
 	return f.status, []byte(f.body), nil
 }
 
@@ -58,7 +62,45 @@ func TestForwardDefaultBudget(t *testing.T) {
 		})
 	}
 }
-func (f *fixture) Ensure(context.Context, bool) error { return f.wakeError }
+func (f *fixture) Ensure(_ context.Context, silent bool) error {
+	f.wakes++
+	f.wakeSilent = silent
+	return f.wakeError
+}
+
+func TestBrowserBridgeOnlyWakesForExplicitActions(t *testing.T) {
+	for _, action := range []string{"sync", "settings", "submission", "mediaPoll", "mediaResult", "openSettings", "updateSettings", "mediaOpen"} {
+		t.Run(action, func(t *testing.T) {
+			f := &fixture{available: true, status: 200, body: `{"code":0,"data":{"revision":1}}`}
+			params := `{"action":"` + action + `","clientId":"profile-A","browser":"edge","legacySettings":{"showAll":true}}`
+			body, _ := json.Marshal(Request{Method: "browser", Params: json.RawMessage(params)})
+			r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), body)
+			wake := action == "openSettings" || action == "updateSettings" || action == "mediaOpen"
+			if r.Code != 0 || f.calls != 1 || f.lastPath != "/browser" || string(f.last.Params) != params || (f.wakes == 1) != wake || f.budget > 10*time.Second || f.budget < 9*time.Second {
+				t.Fatalf("incorrect browser route: response=%+v calls=%d path=%s wakes=%d budget=%s", r, f.calls, f.lastPath, f.wakes, f.budget)
+			}
+			if wake && f.wakeSilent != (action == "updateSettings") {
+				t.Fatal("incorrect browser activation policy")
+			}
+		})
+	}
+}
+
+func TestBrowserBridgeValidationAndUnavailableNeverCreatesOrEchoesData(t *testing.T) {
+	for _, params := range []string{`null`, `{}`, `{"action":"unknown","clientId":"a","browser":"chrome"}`, `{"action":"sync","clientId":"","browser":"chrome"}`, `{"action":"sync","clientId":"a","browser":"other"}`} {
+		f := &fixture{available: true}
+		body, _ := json.Marshal(Request{Method: "browser", Params: json.RawMessage(params)})
+		r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), body)
+		if r.Error != "invalid_request" || f.calls != 0 || f.wakes != 0 {
+			t.Fatalf("invalid browser request executed: %+v", r)
+		}
+	}
+	f := &fixture{}
+	r := (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), []byte(`{"method":"browser","params":{"action":"submission","clientId":"a","browser":"chrome","operationId":"op-private"}}`))
+	if r.Error != "ipc_unavailable" || f.calls != 0 || f.wakes != 0 {
+		t.Fatalf("unavailable passive route executed: %+v", r)
+	}
+}
 func runFixture(f *fixture, method string) Response {
 	return (Dispatcher{Client: f, Wakeup: f}).Dispatch(context.Background(), []byte(`{"method":"`+method+`","operationId":"op-1","params":{"method":"POST","path":"/api/v1/tasks","data":{}}}`))
 }
