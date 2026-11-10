@@ -104,6 +104,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
     submission: (id) =>
         _browserRpc?.confirmationStatus(id) ??
         {'state': 'unknown', 'taskIds': <String>[]},
+    observeSubmission: (id, clientId, browser, browserState) =>
+        _browserRpc?.observeBrowserState(id, clientId, browser, browserState) ??
+        {'state': 'unknown', 'taskIds': <String>[]},
     decideSubmission: (id, token, decision, browserState) =>
         _browserRpc?.decideConfirmation(id, token, decision, browserState) ??
         {'state': 'unknown', 'taskIds': <String>[]},
@@ -130,6 +133,16 @@ class AppController extends GetxController with WindowListener, TrayListener {
   /// Stored here in AppController to persist across page navigations.
   final pendingUpdateTask = Rxn<PendingUpdateTask>();
   final browserCaptureRequests = 0.obs;
+  final completedBrowserOperation = RxnString();
+
+  void browserCaptureCompleted(String id) {
+    completedBrowserOperation.value = id;
+    final incoming = MacPanel.incoming.value;
+    if (incoming?.browserCapture == true &&
+        incoming?.browserOperationId == id) {
+      MacPanel.incoming.value = null;
+    }
+  }
 
   void beginBrowserCapture() {
     // Clear the UI binding, never update or delete the old task.
@@ -407,6 +420,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
     try {
       final browserRpc = _browserRpc = BrowserSubmissionRpc(
         beginBrowserCapture: beginBrowserCapture,
+        onBrowserCaptureCompleted: browserCaptureCompleted,
         capturePreferences: (clientId, browser) {
           final client = browserIntegration.clients
               .where((c) => c.id == clientId && c.browser == browser)

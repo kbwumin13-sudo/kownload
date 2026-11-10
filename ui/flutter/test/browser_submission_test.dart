@@ -79,6 +79,122 @@ void main() {
     expect(resets, 1);
   });
 
+  test('passive complete closes only the matching uncommitted capture once',
+      () async {
+    final ended = <String>[];
+    var sends = 0;
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async {
+          sends++;
+          throw StateError('unexpected');
+        },
+        showCreate: (_) async {},
+        log: (_) {},
+        onBrowserCaptureCompleted: ended.add);
+    await rpc.create(body,
+        operationId: 'observe',
+        confirm: true,
+        browserCapture: true,
+        captureClientId: 'chrome-A',
+        captureBrowser: 'chrome');
+    for (final pair in [('chrome-B', 'chrome'), ('chrome-A', 'edge')]) {
+      expect(
+          rpc.observeBrowserState(
+              'observe', pair.$1, pair.$2, {'state': 'complete'})['state'],
+          'accepted');
+    }
+    expect(
+        rpc.observeBrowserState(
+            'other-op', 'chrome-A', 'chrome', {'state': 'complete'})['state'],
+        'unknown');
+    expect(
+        rpc.observeBrowserState('observe', 'chrome-A', 'chrome',
+            {'state': 'in_progress', 'received': 10, 'total': 10})['state'],
+        'accepted');
+    expect(ended, isEmpty);
+    expect(
+        rpc.observeBrowserState(
+            'observe', 'chrome-A', 'chrome', {'state': 'complete'})['state'],
+        'browser_completed');
+    rpc.observeBrowserState(
+        'observe', 'chrome-A', 'chrome', {'state': 'complete'});
+    expect(ended, ['observe']);
+    expect(await rpc.requestCommit('observe'), false);
+    expect(
+        (await rpc.create(body, operationId: 'observe', confirm: true))
+            .body['submission']['state'],
+        'browser_completed');
+    expect(sends, 0);
+    await rpc.create(body,
+        operationId: 'manual',
+        confirm: true,
+        captureClientId: 'chrome-A',
+        captureBrowser: 'chrome');
+    expect(
+        rpc.observeBrowserState(
+            'manual', 'chrome-A', 'chrome', {'state': 'complete'})['state'],
+        'accepted');
+    expect(ended, ['observe']);
+  });
+
+  test(
+      'passive completion releases a waiting gate but never changes a committed or created receipt',
+      () async {
+    final ended = <String>[];
+    final rpc = BrowserSubmissionRpc(
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {},
+        log: (_) {},
+        onBrowserCaptureCompleted: ended.add);
+    Future<void> capture(String id) => rpc
+        .create(body,
+            operationId: id,
+            confirm: true,
+            browserCapture: true,
+            captureClientId: 'one',
+            captureBrowser: 'edge')
+        .then((_) {});
+    await capture('waiting');
+    final gate = rpc.requestCommit('waiting');
+    final oldToken =
+        rpc.confirmationStatus('waiting')['confirmToken'] as String;
+    rpc.observeBrowserState('waiting', 'one', 'edge', {'state': 'complete'});
+    expect(await gate, false);
+    expect(
+        rpc.decideConfirmation('waiting', oldToken, 'commit',
+            {'state': 'in_progress', 'paused': true})['state'],
+        'browser_completed');
+    await capture('started');
+    final startedGate = rpc.requestCommit('started');
+    final token = rpc.confirmationStatus('started')['confirmToken'] as String;
+    rpc.decideConfirmation(
+        'started', token, 'commit', {'state': 'in_progress', 'paused': true});
+    expect(await startedGate, true);
+    expect(
+        rpc.observeBrowserState(
+            'started', 'one', 'edge', {'state': 'complete'})['commitStarted'],
+        true);
+    rpc.completeConfirmation('started', taskIds: ['real-created']);
+    expect(
+        rpc.observeBrowserState(
+            'started', 'one', 'edge', {'state': 'complete'}),
+        {
+          'state': 'created',
+          'taskIds': ['real-created']
+        });
+    await capture('cancelled');
+    rpc.completeConfirmation('cancelled', cancelled: true);
+    expect(
+        rpc.observeBrowserState(
+            'cancelled', 'one', 'edge', {'state': 'complete'})['state'],
+        'cancelled');
+    expect(
+        rpc.observeBrowserState(
+            'unknown', 'one', 'edge', {'state': 'complete'})['state'],
+        'unknown');
+    expect(ended, ['waiting']);
+  });
+
   test('only explicit cancellation marks an accepted confirmation cancelled',
       () async {
     final rpc = BrowserSubmissionRpc(
@@ -449,6 +565,11 @@ void main() {
       expect(await capture('canonical-confirm', true), 202);
       expect(opens, 1);
       expect(sends, 0);
+      expect(
+          rpc.observeBrowserState('canonical-confirm', 'chrome-one', 'chrome',
+              {'state': 'complete'})['state'],
+          'browser_completed',
+          reason: 'HTTP create metadata binds the observation identity');
       enabled = false;
       expect(await capture('canonical-off', true), 409);
       expect(sends, 0);

@@ -146,6 +146,8 @@ class BrowserIntegration extends ChangeNotifier {
   final Map<String, dynamic> Function(String)? submission;
   final Map<String, dynamic> Function(String, String, String, Map)?
       decideSubmission;
+  final Map<String, dynamic> Function(String, String, String, Map)?
+      observeSubmission;
   final Future<void> Function()? showMedia;
   late final media = BrowserMedia(show: showMedia ?? () async {});
   final _clients = <String, BrowserClient>{};
@@ -159,6 +161,7 @@ class BrowserIntegration extends ChangeNotifier {
       this.openSettings,
       this.submission,
       this.decideSubmission,
+      this.observeSubmission,
       this.showMedia});
 
   factory BrowserIntegration.database(
@@ -166,6 +169,8 @@ class BrowserIntegration extends ChangeNotifier {
           Map<String, dynamic> Function(String)? submission,
           Map<String, dynamic> Function(String, String, String, Map)?
               decideSubmission,
+          Map<String, dynamic> Function(String, String, String, Map)?
+              observeSubmission,
           Future<void> Function()? showMedia}) =>
       BrowserIntegration(
         read: () => Database.instance.get<Map<String, dynamic>>(
@@ -175,6 +180,7 @@ class BrowserIntegration extends ChangeNotifier {
         openSettings: openSettings,
         submission: submission,
         decideSubmission: decideSubmission,
+        observeSubmission: observeSubmission,
         showMedia: showMedia,
       );
 
@@ -257,6 +263,19 @@ class BrowserIntegration extends ChangeNotifier {
         }
         return decideSubmission?.call(id, request['confirmToken'],
                 request['decision'], request['browserState']) ??
+            {'state': 'unknown', 'taskIds': <String>[]};
+      }
+      if (request['browserState'] != null) {
+        final clientId = request['clientId'], browser = request['browser'];
+        if (clientId is! String ||
+            !_validId(clientId) ||
+            !const ['chrome', 'edge'].contains(browser) ||
+            request['browserState'] is! Map) {
+          throw const FormatException('invalid_request');
+        }
+        return observeSubmission?.call(
+                id, clientId, browser as String, request['browserState']) ??
+            submission?.call(id) ??
             {'state': 'unknown', 'taskIds': <String>[]};
       }
       return submission?.call(id) ??

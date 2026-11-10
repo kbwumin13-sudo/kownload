@@ -45,6 +45,7 @@ class _CreateReceipt {
   bool complete = false;
   Map<String, dynamic>? confirmation;
   bool browserCapture = false;
+  String? captureClientId, captureBrowser;
   Completer<bool>? gate;
   String? confirmToken;
   _CreateReceipt(this.expires);
@@ -55,6 +56,7 @@ class _CreateReceipt {
 class BrowserSubmissionRpc {
   final BrowserForward send;
   final void Function()? beginBrowserCapture;
+  final void Function(String)? onBrowserCaptureCompleted;
   final Future<void> Function(Map<String, dynamic>) showCreate;
   final void Function(Map<String, dynamic>) log;
   final Future<void> Function(List<String> taskIds, String? error)? showResult;
@@ -70,6 +72,7 @@ class BrowserSubmissionRpc {
     this.showConfirmation,
     this.capturePreferences,
     this.beginBrowserCapture,
+    this.onBrowserCaptureCompleted,
   });
 
   Map<String, dynamic> confirmationStatus(String id) {
@@ -78,6 +81,43 @@ class BrowserSubmissionRpc {
         ? {'state': 'unknown', 'taskIds': <String>[]}
         : {...value, 'taskIds': List<String>.from(value['taskIds'])};
   }
+
+  /// A passive observation may finish only this client's uncommitted capture.
+  /// It never grants submission or treats fully buffered bytes as completion.
+  Map<String, dynamic> observeBrowserState(
+      String id, String clientId, String browser, Map browserState) {
+    final receipt = _creates[id];
+    if (receipt == null ||
+        !receipt.browserCapture ||
+        receipt.captureClientId != clientId ||
+        receipt.captureBrowser != browser ||
+        receipt.confirmation?['state'] != 'accepted' ||
+        receipt.confirmation?['commitStarted'] == true ||
+        browserState['state'] != 'complete') {
+      return confirmationStatus(id);
+    }
+    receipt.confirmation = {
+      'state': 'browser_completed',
+      'taskIds': <String>[]
+    };
+    receipt.reply = Future.value(_browserCompletedReply(id));
+    final gate = receipt.gate;
+    if (gate != null && !gate.isCompleted) gate.complete(false);
+    try {
+      onBrowserCaptureCompleted?.call(id);
+    } catch (_) {
+      log({'stage': 'flutter_panel_failed'});
+    }
+    return confirmationStatus(id);
+  }
+
+  BrowserRpcReply _browserCompletedReply(String id) => BrowserRpcReply(202, {
+        'code': 0,
+        'msg': '',
+        'data': null,
+        'operationId': id,
+        'submission': {'state': 'browser_completed', 'taskIds': <String>[]},
+      });
 
   Future<bool> requestCommit(String id) async {
     final receipt = _creates[id];
@@ -257,6 +297,8 @@ class BrowserSubmissionRpc {
     String? operationId,
     required bool confirm,
     bool browserCapture = false,
+    String? captureClientId,
+    String? captureBrowser,
   }) async {
     final watch = Stopwatch()..start();
     var domain = '';
@@ -288,6 +330,8 @@ class BrowserSubmissionRpc {
         if (browserCapture) beginBrowserCapture?.call();
         final receipt = _CreateReceipt(now.add(const Duration(hours: 24)));
         receipt.browserCapture = browserCapture;
+        receipt.captureClientId = captureClientId;
+        receipt.captureBrowser = captureBrowser;
         _creates[operationId] = receipt;
         receipt.reply = _create(
           params,
@@ -351,6 +395,8 @@ class BrowserSubmissionRpc {
         if (result?['state'] == 'created') {
           return _confirmedReply(id!, List<String>.from(result!['taskIds']));
         }
+        if (result?['state'] == 'browser_completed')
+          return _browserCompletedReply(id!);
         _trace(id, 'flutter_accepted', watch, domain);
         return BrowserRpcReply(202, {
           'code': 0,
@@ -556,6 +602,8 @@ class BrowserSubmissionRpc {
                   ? meta['silent'] != true
                   : preferences['confirm'] != false),
           browserCapture: capture,
+          captureClientId: capture ? meta['clientId'] as String? : null,
+          captureBrowser: capture ? meta['browser'] as String? : null,
         );
       } else {
         reply = await forward(await ctx.readJSON(), operationId: id);
