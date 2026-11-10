@@ -56,8 +56,8 @@ ThemeData macTheme(Brightness brightness) {
     inputDecorationTheme: InputDecorationTheme(
         isDense: true,
         filled: true,
-        fillColor: c.surface,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+        fillColor: c.field,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         border: border,
         enabledBorder: border,
         focusedBorder: border.copyWith(
@@ -66,7 +66,7 @@ ThemeData macTheme(Brightness brightness) {
         hintStyle: TextStyle(fontSize: 12, color: c.secondary)),
     dialogTheme: DialogThemeData(
         backgroundColor: c.background,
-        elevation: 16,
+        elevation: 8,
         shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
             side: BorderSide(color: c.border)),

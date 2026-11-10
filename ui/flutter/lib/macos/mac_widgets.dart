@@ -4,18 +4,20 @@ import 'mac_glass.dart';
 
 class MacColors {
   final bool dark;
-  const MacColors(this.dark);
+  final bool highContrast;
+  const MacColors(this.dark, {this.highContrast = false});
   static MacColors of(BuildContext context) =>
-      MacColors(Theme.of(context).brightness == Brightness.dark);
+      MacColors(Theme.of(context).brightness == Brightness.dark,
+          highContrast: MediaQuery.maybeOf(context)?.highContrast ?? false);
   Color get background =>
-      dark ? const Color(0xff1d1d1f) : const Color(0xfff5f5f7);
-  Color get surface => dark ? const Color(0xff2a2a2d) : Colors.white;
+      dark ? const Color(0xff1c1c1e) : const Color(0xfff5f5f7);
+  Color get surface => dark ? const Color(0xff28282a) : Colors.white;
   Color get sidebar => dark ? const Color(0xff1c1c1e) : const Color(0xffededf0);
   Color get text => dark ? const Color(0xffefeff1) : const Color(0xff242426);
   Color get secondary =>
-      dark ? const Color(0xffa0a0a6) : const Color(0xff6e6e73);
-  Color get border =>
-      (dark ? Colors.white : Colors.black).withValues(alpha: .09);
+      dark ? const Color(0xffb0b0b6) : const Color(0xff626267);
+  Color get border => (dark ? Colors.white : Colors.black)
+      .withValues(alpha: highContrast ? .38 : .10);
   Color get accent => dark ? const Color(0xff0a84ff) : const Color(0xff007aff);
   Color get primaryFill => accent;
   Color get primaryText => Colors.white;
@@ -24,6 +26,9 @@ class MacColors {
           .withValues(alpha: .08);
   Color get windowBottom => windowTop;
   Color get selection => accent.withValues(alpha: dark ? .18 : .085);
+  Color get separator => border;
+  Color get field => (dark ? Colors.white : Colors.black)
+      .withValues(alpha: highContrast ? .09 : .035);
 }
 
 class MacToolbar extends StatelessWidget {
@@ -138,7 +143,7 @@ class _MacButtonState extends State<MacButton> {
         child: DecoratedBox(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(MacMetrics.controlRadius),
-            boxShadow: enabled
+            boxShadow: enabled && !widget.primary
                 ? [
                     BoxShadow(
                         color:

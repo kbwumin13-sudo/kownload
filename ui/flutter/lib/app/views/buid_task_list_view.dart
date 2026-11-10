@@ -1,3 +1,4 @@
+import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:flutter/services.dart';
@@ -688,9 +689,10 @@ class BuildTaskListView extends GetView {
         contextMenu: contextMenu,
         child: Obx(
           () => Container(
+            constraints: const BoxConstraints(minHeight: 64),
             decoration: BoxDecoration(
-              color: isSelect() ? colors.selection : Colors.transparent,
-              borderRadius: BorderRadius.circular(8),
+              color: isSelect() ? colors.accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
             ),
             child: Listener(
               onPointerDown: (event) {
@@ -699,7 +701,7 @@ class BuildTaskListView extends GetView {
                 }
               },
               child: InkWell(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(10),
                 onTap: () {
                   if (taskController.selectTask.value?.id != task.id) {
                     selectRow();
@@ -708,7 +710,7 @@ class BuildTaskListView extends GetView {
                 onDoubleTap: task.open,
                 child: Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
                   child: Row(
                     children: [
                       SizedBox(
@@ -720,8 +722,10 @@ class BuildTaskListView extends GetView {
                                 fileIcon(task.name, isFolder: isFolderTask()),
                             size: 25,
                             color: isFolderTask()
-                                ? colors.accent
-                                : colors.secondary),
+                                ? (isSelect() ? Colors.white : colors.accent)
+                                : (isSelect()
+                                    ? Colors.white
+                                    : colors.secondary)),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -736,8 +740,10 @@ class BuildTaskListView extends GetView {
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      color: colors.text,
-                                      fontSize: 13,
+                                      color: isSelect()
+                                          ? Colors.white
+                                          : colors.text,
+                                      fontSize: 14,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -749,7 +755,9 @@ class BuildTaskListView extends GetView {
                                     child: Icon(
                                       Icons.hearing,
                                       size: 15,
-                                      color: colors.accent,
+                                      color: isSelect()
+                                          ? Colors.white
+                                          : colors.accent,
                                     ),
                                   ),
                               ],
@@ -761,18 +769,17 @@ class BuildTaskListView extends GetView {
                                 getProgressText(),
                                 getPercentText(),
                                 if (isRunning())
-                                  '${Util.fmtByte(task.progress.speed)}/s',
-                                if (isRunning())
                                   streamsLabel((taskListController
                                           as MacTaskListController)
                                       .stats[task.id]),
-                                if (getEtaText().isNotEmpty) getEtaText(),
                                 if (extraction.isNotEmpty) extraction,
                               ].where((part) => part.isNotEmpty).join(' · '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                color: colors.secondary,
+                                color: isSelect()
+                                    ? Colors.white.withValues(alpha: .82)
+                                    : colors.secondary,
                                 fontSize: 11,
                               ),
                             ),
@@ -783,7 +790,8 @@ class BuildTaskListView extends GetView {
                                 minHeight: 2,
                                 borderRadius: BorderRadius.circular(1),
                                 backgroundColor: colors.border,
-                                color: colors.accent,
+                                color:
+                                    isSelect() ? Colors.white : colors.accent,
                               ),
                             ],
                             if (task.progress.extractStatus ==
@@ -794,21 +802,54 @@ class BuildTaskListView extends GetView {
                                     .clamp(0.0, 1.0)
                                     .toDouble(),
                                 minHeight: 2,
-                                color: colors.accent,
+                                color:
+                                    isSelect() ? Colors.white : colors.accent,
                               ),
                             ],
                           ],
                         ),
                       ),
+                      const SizedBox(width: 12),
+                      SizedBox(
+                        width: 100,
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                  isRunning()
+                                      ? '${Util.fmtByte(task.progress.speed)}/s'
+                                      : '',
+                                  maxLines: 1,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: isSelect()
+                                          ? Colors.white
+                                          : colors.text,
+                                      fontFeatures: const [
+                                        FontFeature.tabularFigures()
+                                      ])),
+                              if (getEtaText().isNotEmpty)
+                                Text('剩余 ${getEtaText()}',
+                                    maxLines: 1,
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: isSelect()
+                                            ? Colors.white
+                                                .withValues(alpha: .82)
+                                            : colors.secondary)),
+                            ]),
+                      ),
                       const SizedBox(width: 8),
                       if (isDone())
                         IconButton(
+                          color: isSelect() ? Colors.white : colors.secondary,
                           tooltip: 'downloadPath'.tr,
                           icon: const Icon(Icons.folder_open, size: 18),
                           onPressed: task.explorer,
                         )
                       else
                         IconButton(
+                          color: isSelect() ? Colors.white : colors.secondary,
                           tooltip: task.handoff?.blocked == true
                               ? '检查交接'
                               : isRunning()

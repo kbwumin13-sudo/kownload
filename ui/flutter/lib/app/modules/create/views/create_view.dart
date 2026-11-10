@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show FontFeature;
 
 import 'package:contentsize_tabbarview/contentsize_tabbarview.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -1563,8 +1564,8 @@ class _CreateViewState extends State<CreateView> {
                               height: 1.2)),
                       textDirection: Directionality.of(context),
                       maxLines: 3)
-                    ..layout(maxWidth: input.text.isEmpty ? 534 : 506);
-                  final inputHeight = 72.0 +
+                    ..layout(maxWidth: input.text.isEmpty ? 430 : 402);
+                  final inputHeight = 68.0 +
                       (painter.computeLineMetrics().length.clamp(1, 3) - 1) *
                           24;
                   painter.dispose();
@@ -1576,7 +1577,7 @@ class _CreateViewState extends State<CreateView> {
                       MacPanel.resize(expanded
                           ? 700
                           : inputHeight +
-                              84 +
+                              76 +
                               (tasks.isEmpty ? 70 : tasks.length * 58) +
                               (error == null ? 0 : 44));
                     }
@@ -1595,8 +1596,7 @@ class _CreateViewState extends State<CreateView> {
                     child: Material(
                         color: appearance.reduceTransparency
                             ? c.background
-                            : c.background
-                                .withValues(alpha: c.dark ? .22 : .35),
+                            : c.background.withValues(alpha: .025),
                         child: Column(children: [
                           if (expanded)
                             Padding(
@@ -1706,13 +1706,51 @@ class _CreateViewState extends State<CreateView> {
                                           controller.clearFileDataUri();
                                           _inputFocus.requestFocus();
                                         }),
+                                      const SizedBox(width: 8),
+                                      Tooltip(
+                                          message: '开始下载',
+                                          child: MacButton(
+                                              primary: hasInput,
+                                              onPressed: hasInput &&
+                                                      !controller
+                                                          .isConfirming.value
+                                                  ? _doConfirm
+                                                  : null,
+                                              child: controller
+                                                      .isConfirming.value
+                                                  ? const CupertinoActivityIndicator(
+                                                      radius: 7)
+                                                  : Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                          const Text('下载',
+                                                              style: TextStyle(
+                                                                  fontSize:
+                                                                      12)),
+                                                          const SizedBox(
+                                                              width: 8),
+                                                          ExcludeSemantics(
+                                                              child: Icon(
+                                                                  CupertinoIcons
+                                                                      .return_icon,
+                                                                  size: 11,
+                                                                  color: hasInput
+                                                                      ? c.primaryText.withValues(
+                                                                          alpha:
+                                                                              .75)
+                                                                      : c.secondary.withValues(
+                                                                          alpha:
+                                                                              .5))),
+                                                        ]))),
+                                      const SizedBox(width: 8),
                                       _panelIcon(c, CupertinoIcons.gear, '设置',
                                           () => MacPanel.showSettings()),
                                     ]))),
                           if (!expanded) ...[
                             Divider(color: c.border, height: 1, thickness: .5),
                             SizedBox(
-                                height: 40,
+                                height: 36,
                                 child: Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 14),
@@ -1805,7 +1843,7 @@ class _CreateViewState extends State<CreateView> {
                                           ])),
                             Divider(color: c.border, height: 1, thickness: .5),
                             SizedBox(
-                                height: 42,
+                                height: 36,
                                 child: Padding(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 20),
@@ -1823,7 +1861,7 @@ class _CreateViewState extends State<CreateView> {
                                                   overflow:
                                                       TextOverflow.ellipsis,
                                                   style: TextStyle(
-                                                      fontSize: 10,
+                                                      fontSize: 11,
                                                       color: message == null
                                                           ? c.secondary
                                                           : c.accent)))),
@@ -1832,7 +1870,7 @@ class _CreateViewState extends State<CreateView> {
                                           builder: (_, label, __) => Text(
                                               '$label 唤起 · esc 收起',
                                               style: TextStyle(
-                                                  fontSize: 10,
+                                                  fontSize: 11,
                                                   color: c.secondary))),
                                       const SizedBox(width: 10),
                                       _panelAction(
@@ -1842,42 +1880,6 @@ class _CreateViewState extends State<CreateView> {
                                           () => MacPanel.showSettings(
                                               section: 'tasks')),
                                       const SizedBox(width: 6),
-                                      Tooltip(
-                                          message: '开始下载',
-                                          child: MacButton(
-                                              primary: hasInput,
-                                              onPressed: hasInput &&
-                                                      !controller
-                                                          .isConfirming.value
-                                                  ? _doConfirm
-                                                  : null,
-                                              child: controller
-                                                      .isConfirming.value
-                                                  ? const CupertinoActivityIndicator(
-                                                      radius: 7)
-                                                  : Row(
-                                                      mainAxisSize:
-                                                          MainAxisSize.min,
-                                                      children: [
-                                                          const Text('下载',
-                                                              style: TextStyle(
-                                                                  fontSize:
-                                                                      12)),
-                                                          const SizedBox(
-                                                              width: 8),
-                                                          ExcludeSemantics(
-                                                              child: Icon(
-                                                                  CupertinoIcons
-                                                                      .return_icon,
-                                                                  size: 11,
-                                                                  color: hasInput
-                                                                      ? c.primaryText.withValues(
-                                                                          alpha:
-                                                                              .75)
-                                                                      : c.secondary.withValues(
-                                                                          alpha:
-                                                                              .5))),
-                                                        ]))),
                                     ]))),
                           ],
                         ])),
@@ -1965,7 +1967,7 @@ class _CreateViewState extends State<CreateView> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        fontSize: 13,
+                        fontSize: 14,
                         fontWeight: FontWeight.w500,
                         color: c.text)),
                 const SizedBox(height: 3),
@@ -1979,7 +1981,10 @@ class _CreateViewState extends State<CreateView> {
                                 : task.fetchingTorrentInfo
                                     ? '正在获取种子信息'
                                     : running
-                                        ? '${Util.fmtByte(task.progress.downloaded)} · ${Util.fmtByte(task.progress.speed)}/s'
+                                        ? (total > 0
+                                            ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
+                                            : Util.fmtByte(
+                                                task.progress.downloaded))
                                         : task.status == Status.pause
                                             ? '已暂停'
                                             : '等待下载',
@@ -1999,7 +2004,30 @@ class _CreateViewState extends State<CreateView> {
                       color: c.accent),
                 ],
               ])),
-          const SizedBox(width: 10),
+          const SizedBox(width: 12),
+          SizedBox(
+              width: 100,
+              child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                        running ? '${Util.fmtByte(task.progress.speed)}/s' : '',
+                        maxLines: 1,
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: c.text,
+                            fontFeatures: const [
+                              FontFeature.tabularFigures()
+                            ])),
+                    if (running &&
+                        total > task.progress.downloaded &&
+                        task.progress.speed > 0)
+                      Text(
+                          '${((total - task.progress.downloaded) / task.progress.speed / 60).ceil()} 分钟剩余',
+                          maxLines: 1,
+                          style: TextStyle(fontSize: 11, color: c.secondary)),
+                  ])),
           if (failed)
             _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
                 () => _showTaskError(task)),
