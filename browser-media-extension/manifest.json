@@ -13,6 +13,8 @@
     "nativeMessaging",
     "scripting"
   ],
+  "optional_permissions": ["downloads"],
+  "options_ui": {"page":"download-settings.html","open_in_tab":true},
   "host_permissions": [
     "<all_urls>"
   ],

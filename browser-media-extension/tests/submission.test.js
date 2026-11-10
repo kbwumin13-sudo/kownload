@@ -9,8 +9,11 @@ function browser(seed={},host=async m=>contractReply(m,{code:0,data:{code:0,data
  const event={addListener(){}};
  const chrome={storage:{session:{get:async()=>structuredClone(memory),set:async p=>Object.assign(memory,structuredClone(p)),remove:async k=>delete memory[k]},local:{get:async()=>({})}},action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}},tabs:{get:async()=>({id:1,url:'https://page.test/watch'}),onRemoved:event},cookies:{getAllCookieStores:async()=>[{id:'fixture',tabIds:[1]}],getAll:async()=>[]},webNavigation:{onCommitted:event,onHistoryStateUpdated:event,onReferenceFragmentUpdated:event},webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k=>[k,event])),runtime:{onMessage:{addListener:f=>listener=f},sendMessage:async()=>{},sendNativeMessage:(_,m,cb)=>{messages.push(m);Promise.resolve(host(m)).then(cb);}}};
  vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,chrome,installNetdiskBridge:()=>{},URL,URLSearchParams,console:{info:(...v)=>logs.push(v)}});
- return {memory,messages,logs,request:m=>new Promise(resolve=>listener(m,{},resolve))};
+ return {memory,messages,logs,dispatch:m=>listener(m,{},()=>{}),request:m=>new Promise(resolve=>listener(m,{},resolve))};
 }
+test('ordinary download messages are delegated without a competing media response',()=>{
+ assert.equal(browser().dispatch({type:'DOWNLOAD_CAPTURE',action:'status',id:7}),false);
+});
 // ADD_DOM requires a sender; use a stored candidate to isolate submission semantics.
 const item={id:'one',tabId:1,frameId:0,documentId:'fixture-doc',kind:'image',url:'https://cdn.test/synthetic.jpg?signature=fixture-secret',sourcePage:'https://page.test/watch',capturedAt:Date.now()};
 const seed={mediaStateV1:{items:{one:item},submitted:{},routes:{},topCommit:{}}};

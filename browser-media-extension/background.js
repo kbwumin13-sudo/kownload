@@ -1,7 +1,9 @@
 import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,SUBMIT_RESEND_DELAYS,delay,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
+import {installDownloadCapture} from './lib.js';
 
 installNetdiskBridge(chrome);
+installDownloadCapture(chrome,message => native(message,false,true));
 
 const pendingHeaders = new Map();
 const requestStarts = new Map();
@@ -317,6 +319,7 @@ async function update(item,options) {
   return {taskId:options.taskId};
 }
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
+  if (msg?.type === 'DOWNLOAD_CAPTURE') return false;
   if (typeof msg?.type==='string' && msg.type.startsWith('NETDISK_')) return false;
   (async () => {
     if (msg.type === 'ADD_DOM') {
