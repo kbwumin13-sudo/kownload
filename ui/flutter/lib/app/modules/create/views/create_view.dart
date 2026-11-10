@@ -41,6 +41,7 @@ import '../../app/controllers/app_controller.dart';
 import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
+import 'browser_media_view.dart';
 
 class CreateView extends StatefulWidget {
   final NetdiskApi? netdiskApi;
@@ -91,6 +92,25 @@ class _CreateViewState extends State<CreateView> {
     return id;
   }
 
+  Future<List<String>> _createBatch(CreateTaskBatch batch) async {
+    final operation =
+        _panelRequest?.req?.url.trim() == _urlController.text.trim()
+            ? _panelRequest?.browserOperationId
+            : null;
+    if (operation != null && _panelRequest?.browserCapture == true) {
+      await Get.find<AppController>().authorizeBrowserConfirmation(operation);
+    }
+    final ids = await createTaskBatch(batch, operationId: operation);
+    if (Util.isMacos()) {
+      _createdIds.addAll(ids);
+      if (operation != null) {
+        Get.find<AppController>()
+            .completeBrowserConfirmation(operation, taskIds: ids);
+      }
+    }
+    return ids;
+  }
+
   CreateController get controller => Get.find<CreateController>();
   NetdiskApi? get netdiskApi => widget.netdiskApi;
   NetdiskBrowserTool? get netdiskBrowserTool => widget.netdiskBrowserTool;
@@ -104,7 +124,7 @@ class _CreateViewState extends State<CreateView> {
   bool _clipboardChecked = false;
   Future<bool>? _onboarding;
   String? _lastDefaultDownloadPath;
-  Worker? _pendingWorker;
+  Worker? _pendingWorker, _captureWorker;
   @override
   void initState() {
     super.initState();
@@ -112,11 +132,29 @@ class _CreateViewState extends State<CreateView> {
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
       MacPanel.taskResult.addListener(_receiveTaskResult);
+      Get.find<AppController>()
+          .browserIntegration
+          .media
+          .addListener(_receiveMedia);
+      Get.find<AppController>().browserIntegration.addListener(_receiveMedia);
+      _captureWorker =
+          ever(Get.find<AppController>().browserCaptureRequests, (_) {
+        if (!mounted ||
+            controller.isConfirming.value ||
+            _panelRequest?.browserOperationId != null ||
+            _netdiskOpen.value) return;
+        _clearBrowserDraft();
+        setState(() {});
+      });
       _panelRequest = MacPanel.incoming.value;
       _pendingWorker = ever(Get.find<AppController>().pendingUpdateTask, (_) {
         if (mounted) setState(() => _initialNetdiskHandled = false);
       });
     }
+  }
+
+  void _receiveMedia() {
+    if (mounted) setState(() {});
   }
 
   void _receiveTaskResult() {
@@ -165,9 +203,19 @@ class _CreateViewState extends State<CreateView> {
   void dispose() {
     if (Util.isMacos()) MacPanel.cancelAutoHide();
     _pendingWorker?.dispose();
+    _captureWorker?.dispose();
     MacPanel.focusRequests.removeListener(_focusInput);
     MacPanel.incoming.removeListener(_receiveInput);
     MacPanel.taskResult.removeListener(_receiveTaskResult);
+    if (Get.isRegistered<AppController>()) {
+      Get.find<AppController>()
+          .browserIntegration
+          .media
+          .removeListener(_receiveMedia);
+      Get.find<AppController>()
+          .browserIntegration
+          .removeListener(_receiveMedia);
+    }
     _inputFocus.dispose();
     for (final field in [
       _urlController,
@@ -284,6 +332,26 @@ class _CreateViewState extends State<CreateView> {
   @override
   Widget build(BuildContext context) {
     final appController = Get.find<AppController>();
+    final mediaSession = appController.browserIntegration.media.active;
+    if (Util.isMacos() && mediaSession != null) {
+      final preferences = appController.browserIntegration.clients
+          .where((c) => c.id == mediaSession.clientId)
+          .firstOrNull
+          ?.preferences;
+      return BrowserMediaView(
+        key: ValueKey(mediaSession.id),
+        media: appController.browserIntegration.media,
+        session: mediaSession,
+        showSmallImages: preferences?.showAll ?? false,
+        defaultDirectory: appController.downloaderConfig.value.downloadDir,
+        disableSite: () =>
+            appController.browserIntegration.update(mediaSession.clientId, {
+          'sniffing': {
+            'disabledSites': {mediaSession.site: true}
+          },
+        }),
+      );
+    }
 
     if (_connectionsController.text.isEmpty) {
       _connectionsController.text = appController
@@ -1299,6 +1367,19 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
+  void _clearBrowserDraft() {
+    if (identical(MacPanel.incoming.value, _panelRequest)) {
+      MacPanel.incoming.value = null;
+    }
+    _panelRequest = null;
+    _urlController.clear();
+    controller.clearFileDataUri();
+    controller.pendingCreateHandled = false;
+    controller.showAdvanced.value = false;
+    _initialNetdiskHandled = false;
+    _resetTaskParameters();
+  }
+
   void _resetTaskParameters() {
     _netdiskRequest.value = null;
     _credentialOrigin = null;
@@ -2080,6 +2161,9 @@ class _CreateViewState extends State<CreateView> {
         }
       }
     } catch (e) {
+      if (e is BrowserCaptureEnded && _panelRequest?.browserCapture == true) {
+        _clearBrowserDraft();
+      }
       _panelError.value = e.toString();
       if (!Util.isMacos()) showErrorMessage(e);
     } finally {
@@ -2369,9 +2453,7 @@ class _CreateViewState extends State<CreateView> {
                                         selectFiles: [],
                                         extra: optExtra));
                               }).toList();
-                              final ids = await createTaskBatch(
-                                  CreateTaskBatch(reqs: reqs));
-                              if (Util.isMacos()) _createdIds.addAll(ids);
+                              await _createBatch(CreateTaskBatch(reqs: reqs));
                             } else {
                               await _createTask(CreateTask(
                                   rid: rr.id,

@@ -27,7 +27,7 @@ void main() {
     await app.command(sync('chrome-one', 'chrome', {
       'downloadCapture': {'enabled': true, 'confirm': false},
       'showAll': true,
-      'disabledSites': {'a.test': true},
+      'disabledSites': {'a.test': true, '[::1]': true},
       'Cookie': 'must-not-persist',
     }));
     await app.command(sync('edge-one', 'edge', {
@@ -42,7 +42,7 @@ void main() {
     expect(chrome.captureEnabled, true);
     expect(chrome.confirmDownloads, false);
     expect(chrome.showAll, true);
-    expect(chrome.disabledSites, {'a.test': true});
+    expect(chrome.disabledSites, {'a.test': true, '[::1]': true});
     expect(edge.captureEnabled, false);
     expect(edge.confirmDownloads, true);
     expect(edge.disabledSites, {'b.test': true});

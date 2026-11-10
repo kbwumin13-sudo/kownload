@@ -54,6 +54,7 @@ class _CreateReceipt {
 /// Only operation IDs and final receipts are retained; request bodies are not.
 class BrowserSubmissionRpc {
   final BrowserForward send;
+  final void Function()? beginBrowserCapture;
   final Future<void> Function(Map<String, dynamic>) showCreate;
   final void Function(Map<String, dynamic>) log;
   final Future<void> Function(List<String> taskIds, String? error)? showResult;
@@ -68,6 +69,7 @@ class BrowserSubmissionRpc {
     this.showResult,
     this.showConfirmation,
     this.capturePreferences,
+    this.beginBrowserCapture,
   });
 
   Map<String, dynamic> confirmationStatus(String id) {
@@ -260,6 +262,9 @@ class BrowserSubmissionRpc {
     var domain = '';
     try {
       _validateId(operationId);
+      if (browserCapture && operationId == null) {
+        throw const FormatException('invalid_request');
+      }
       final params = decodeCreate(text);
       domain = _domain(params);
       _trace(operationId, 'flutter_create_received', watch, domain);
@@ -280,6 +285,7 @@ class BrowserSubmissionRpc {
           }
           _creates.remove(finished);
         }
+        if (browserCapture) beginBrowserCapture?.call();
         final receipt = _CreateReceipt(now.add(const Duration(hours: 24)));
         receipt.browserCapture = browserCapture;
         _creates[operationId] = receipt;
@@ -509,6 +515,7 @@ class BrowserSubmissionRpc {
     RpcContext ctx, {
     required bool create,
     bool forceConfirmation = false,
+    bool forceCaptureConfirmation = false,
   }) async {
     String? id;
     BrowserRpcReply reply;
@@ -544,7 +551,7 @@ class BrowserSubmissionRpc {
         reply = await this.create(
           await ctx.readText(),
           operationId: id,
-          confirm: forceConfirmation ||
+          confirm: (capture ? forceCaptureConfirmation : forceConfirmation) ||
               (preferences == null
                   ? meta['silent'] != true
                   : preferences['confirm'] != false),

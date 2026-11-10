@@ -58,6 +58,27 @@ void main() {
     expect(sends, 0);
   });
 
+  test(
+      'new capture resets unrelated UI binding once, before showing confirmation',
+      () async {
+    var resets = 0;
+    final rpc = BrowserSubmissionRpc(
+        beginBrowserCapture: () => resets++,
+        send: (_, __, ___) async => throw StateError('unexpected'),
+        showCreate: (_) async {
+          expect(resets, 1);
+        },
+        log: (_) {});
+    await rpc.create(body,
+        operationId: 'fresh-capture', confirm: true, browserCapture: true);
+    await rpc.create(body,
+        operationId: 'fresh-capture', confirm: true, browserCapture: true);
+    expect(resets, 1,
+        reason: 'a status retry must not clear another active draft');
+    await rpc.create(body, operationId: 'manual', confirm: true);
+    expect(resets, 1);
+  });
+
   test('only explicit cancellation marks an accepted confirmation cancelled',
       () async {
     final rpc = BrowserSubmissionRpc(
@@ -65,6 +86,8 @@ void main() {
         showCreate: (_) async {},
         log: (_) {});
     expect(rpc.confirmationStatus('unknown')['state'], 'unknown');
+    expect((await rpc.create(body, confirm: true, browserCapture: true)).status,
+        400);
     await rpc.create(body, operationId: 'cancel-one', confirm: true);
     expect(rpc.confirmationStatus('cancel-one')['state'], 'accepted');
     rpc.completeConfirmation('cancel-one', cancelled: true);
@@ -401,7 +424,8 @@ void main() {
       log: (_) {},
     );
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    server.listen((r) => rpc.handle(RpcContext(r, r.response), create: true));
+    server.listen((r) => rpc.handle(RpcContext(r, r.response),
+        create: true, forceConfirmation: true));
     final client = _RealHttp().createHttpClient(null);
     Future<int> capture(String id, bool silent) async {
       final request = await client
