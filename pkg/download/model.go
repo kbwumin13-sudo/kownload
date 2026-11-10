@@ -24,6 +24,7 @@ type ResolveResult struct {
 }
 
 type Task struct {
+	Handoff   *BrowserHandoff      `json:"handoff,omitempty"`
 	ID        string               `json:"id"`
 	Protocol  string               `json:"protocol"`
 	Meta      *fetcher.FetcherMeta `json:"meta"`
@@ -124,8 +125,9 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		CreatedAt time.Time            `json:"createdAt"`
 		UpdatedAt time.Time            `json:"updatedAt"`
 		Name      string               `json:"name"`
+		Handoff   *BrowserHandoff      `json:"handoff,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked()})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff})
 }
 
 func (t *Task) getStatus() base.Status {

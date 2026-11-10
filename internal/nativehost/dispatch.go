@@ -91,7 +91,8 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "invalid_request", nil, nil)
 		}
 		switch params.Action {
-		case "sync", "settings", "submission", "mediaPoll", "mediaResult":
+		case "sync", "settings", "submission", "mediaPoll", "mediaResult",
+			"handoffCapabilities", "handoffPrepare", "handoffQuery", "handoffCommit", "handoffAbort":
 		case "openSettings", "updateSettings", "mediaOpen":
 			wake, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := d.Wakeup.Ensure(wake, params.Action == "updateSettings")

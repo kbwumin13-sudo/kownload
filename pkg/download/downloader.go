@@ -96,6 +96,7 @@ type Progress struct {
 }
 
 type Downloader struct {
+	handoffMu       sync.Mutex
 	Logger          *logger.Logger
 	ExtensionLogger *logger.Logger
 
@@ -472,6 +473,9 @@ func (d *Downloader) queueChanged() <-chan struct{} {
 // enqueueLocked puts a task in the wait queue and tells tasks idling in a
 // source cooldown. Caller holds d.lock.
 func (d *Downloader) enqueueLocked(task *Task) {
+	if task.handoffHeld() {
+		return
+	}
 	d.queueMu.Lock()
 	d.waitTasks = append(d.waitTasks, task)
 	d.queueMu.Unlock()
@@ -507,7 +511,7 @@ func (d *Downloader) queueWaiting() bool {
 	defer d.queueMu.Unlock()
 	now := time.Now()
 	for _, t := range d.waitTasks {
-		if t.getStatus() == base.DownloadStatusWait && !t.notBeforeTime().After(now) {
+		if !t.handoffHeld() && t.getStatus() == base.DownloadStatusWait && !t.notBeforeTime().After(now) {
 			return true
 		}
 	}
@@ -631,7 +635,7 @@ func (d *Downloader) notifyRunning() {
 		now := time.Now()
 		for i := 0; i < len(d.waitTasks); i++ {
 			wt := d.waitTasks[i]
-			if wt.getStatus() != base.DownloadStatusWait {
+			if wt.handoffHeld() || wt.getStatus() != base.DownloadStatusWait {
 				d.dequeueLocked(i)
 				i--
 				continue
@@ -721,6 +725,9 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 		defer task.lock.Unlock()
 		task.statusLock.Lock()
 		defer task.statusLock.Unlock()
+		if task.handoffHeld() {
+			return ErrHandoffHeld
+		}
 		status := task.getStatus()
 		if (task.Protocol == "media" || task.Protocol == "netdisk") && status != base.DownloadStatusPause && status != base.DownloadStatusError {
 			return errors.New("media task must be paused or failed before patching")
@@ -809,8 +816,12 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 	}
 
 	filter.NotStatuses = []base.Status{base.DownloadStatusRunning, base.DownloadStatusDone}
-	continueTasks := d.getTasksByFilter(filter)
+	selectedTasks := d.getTasksByFilter(filter)
+	continueTasks := handoffEligible(selectedTasks)
 	if len(continueTasks) == 0 {
+		if len(selectedTasks) > 0 {
+			return ErrHandoffHeld
+		}
 		return ErrTaskNotFound
 	}
 
@@ -887,7 +898,7 @@ func (d *Downloader) continueAll() (err error) {
 		// calculate how many tasks can be continued, can't exceed maxRunning
 		remainCount := d.remainRunningCount()
 		for _, task := range d.tasks {
-			if task.getStatus() != base.DownloadStatusRunning && task.getStatus() != base.DownloadStatusDone {
+			if !task.handoffHeld() && task.getStatus() != base.DownloadStatusRunning && task.getStatus() != base.DownloadStatusDone {
 				if len(continuedTasks) < remainCount {
 					continuedTasks = append(continuedTasks, task)
 				} else {
@@ -912,7 +923,7 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 		return d.continueAll()
 	}
 
-	continueTasks := d.getTasksByFilter(filter)
+	continueTasks := handoffEligible(d.getTasksByFilter(filter))
 	for _, task := range continueTasks {
 		if err = d.doStart(task); err != nil {
 			return
@@ -1075,7 +1086,9 @@ func (d *Downloader) closeNetdiskFetchers() error {
 }
 
 func (d *Downloader) Close() error {
+	d.handoffMu.Lock()
 	d.closed.Store(true)
+	d.handoffMu.Unlock()
 
 	closeArr := []func() error{
 		d.pauseAll,
@@ -1673,6 +1686,9 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var runCtx context.Context
 	var runCancel context.CancelFunc
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
+		if task.handoffHeld() {
+			return true, ErrHandoffHeld
+		}
 		if onlyWaiting && task.getStatus() != base.DownloadStatusWait ||
 			task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
 			isReturn = true

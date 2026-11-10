@@ -69,7 +69,7 @@ func (f *fixture) Ensure(_ context.Context, silent bool) error {
 }
 
 func TestBrowserBridgeOnlyWakesForExplicitActions(t *testing.T) {
-	for _, action := range []string{"sync", "settings", "submission", "mediaPoll", "mediaResult", "openSettings", "updateSettings", "mediaOpen"} {
+	for _, action := range []string{"sync", "settings", "submission", "mediaPoll", "mediaResult", "openSettings", "updateSettings", "mediaOpen", "handoffCapabilities", "handoffPrepare", "handoffQuery", "handoffCommit", "handoffAbort"} {
 		t.Run(action, func(t *testing.T) {
 			f := &fixture{available: true, status: 200, body: `{"code":0,"data":{"revision":1}}`}
 			params := `{"action":"` + action + `","clientId":"profile-A","browser":"edge","legacySettings":{"showAll":true}}`

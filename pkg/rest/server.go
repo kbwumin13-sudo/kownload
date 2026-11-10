@@ -122,6 +122,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	r.Methods(http.MethodGet).Path("/api/v1/info").HandlerFunc(Info)
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
+	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(BrowserHandoff)
 	r.Methods(http.MethodGet).Path("/api/v1/netdisk/providers").HandlerFunc(NetdiskProviders)
 	r.Methods(http.MethodPost).Path("/api/v1/netdisk/browser/request").HandlerFunc(NetdiskBrowserRequest)
 	r.Methods(http.MethodGet, http.MethodDelete).Path("/api/v1/netdisk/browser/requests/{id}").HandlerFunc(NetdiskBrowserStatus)
