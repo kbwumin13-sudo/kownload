@@ -1,25 +1,34 @@
 // Independently implemented against Chrome downloads and our Native contract.
-import {newOperationId,nativeSubmission,safeHeader,protectedHeaders,createAppBridge} from './lib.js';
+import {newOperationId,safeHeader,protectedHeaders,createAppBridge} from './lib.js';
 
-const PENDING='downloadCapturePending';
+const PENDING='downloadHandoffPendingV1';
 const httpURL=value=>{try{return /^https?:$/.test(new URL(value).protocol);}catch{return false;}};
 const validId=value=>typeof value==='string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
-const rejected=reply=>reply?.code !== 0 && (
-  ['invalid_request','unknown_method','wakeup_failed','ipc_unavailable'].includes(reply?.error) ||
-  reply?.error==='business_error' && Number.isInteger(reply.businessCode) && reply.businessCode !== 0
-);
+const validTaskId=value=>typeof value==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const sha256=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(n=>n.toString(16).padStart(2,'0')).join('');
+const sameBinding=(a,b)=>a && b && a.id===b.id && a.startTime===b.startTime && a.urlHash===b.urlHash;
+const validBinding=value=>Number.isInteger(value?.id) && value.id>=0 && Number.isFinite(Date.parse(value.startTime)) && /^[a-f0-9]{64}$/.test(value.urlHash);
 
 export function installDownloadCapture(browser,send,{appBridge=createAppBridge(browser,send),pollMs=1000}={}) {
   if (!browser.permissions) return;
   const jobs=new Map(),requests=new Map(),earlyPauses=new Map();
-  let listening=false,granted=false,activeConfig,requestsBlockedUntil=0;
+  let listening=false,granted=false,activeConfig,requestsBlockedUntil=0,writing=Promise.resolve();
   browser.storage.local.get('downloadCapture').then(saved=>{activeConfig=saved.downloadCapture;});
   browser.storage.onChanged?.addListener((changes,area)=>{
     if(area==='local' && changes.downloadCapture) activeConfig=changes.downloadCapture.newValue;
   });
-  const persist=()=>browser.storage.session.set({[PENDING]:Object.fromEntries([...jobs].filter(([,job])=>!job.resolved).map(([id,job])=>[id,{
-    id,name:job.name,operationId:job.operationId,state:job.state,posted:!!job.posted,...(job.taskIds ? {taskIds:job.taskIds} : {})
-  }]))});
+  function persist() {
+    // Protocol metadata survives a browser/worker restart; URLs and credentials
+    // remain in this one live invocation and never enter the recovery journal.
+    const records=Object.fromEntries([...jobs].filter(([,job])=>!job.resolved).map(([id,job])=>[id,{
+      version:1,id,name:job.name,operationId:job.operationId,state:job.state,stage:job.stage,
+      posted:!!job.posted,download:job.download,clientId:job.clientId,browser:job.browser,
+      browserRetained:!!job.browserRetained,cancelConfirmed:!!job.cancelConfirmed,
+      ...(job.taskId ? {taskId:job.taskId} : {})
+    }]));
+    writing=writing.catch(()=>{}).then(()=>browser.storage.local.set({[PENDING]:records}));
+    return writing;
+  }
   function release(job) {
     clearTimeout(job.timer);delete job.timer;
     job.releaseFilename?.();delete job.releaseFilename;
@@ -27,162 +36,179 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
   }
   async function state(job,value,{resolved=false}={}) {
     job.state=value;job.resolved=resolved;
-    if (value !== 'preparing' && value !== 'sending') {delete job.url;delete job.header;}
+    if(value!=='preparing' && value!=='sending'){delete job.url;delete job.header;}
     await persist();
     if(resolved || value==='uncertain') release(job);
     if(value==='uncertain') {
       await browser.action.setBadgeText({text:'!'});
-      await browser.action.setTitle({title:'下载状态未确认，请在 kownload 检查；不会重复提交'});
+      await browser.action.setTitle({title:'浏览器交接待检查；不会重新创建或自动启动待交接任务'});
     }
     const finished=[...jobs].filter(([,item])=>item.resolved);
-    for(const [id] of finished.slice(0,-20)) jobs.delete(id);
+    for(const [id] of finished.slice(0,-20))jobs.delete(id);
   }
   async function current(job) {
     const item=(await browser.downloads.search({id:job.id}))[0];
-    return {item,report:{state:item?.state || 'unknown',paused:item?.paused===true,received:item?.bytesReceived ?? 0,total:item?.totalBytes ?? -1}};
+    const binding=item && {id:item.id,startTime:item.startTime,urlHash:await sha256(item.finalUrl || item.url || '')};
+    return {item,matches:sameBinding(binding,job.download),report:{state:item?.state || 'unknown',error:item?.error || '',paused:item?.paused===true}};
   }
-  async function returnToBrowser(job) {
-    job.posted=false;job.state='preparing';delete job.url;delete job.header;
-    try {
-      let item;
-      try {({item}=await current(job));} catch {await browser.downloads.resume(job.id);}
-      if(item?.state==='in_progress' && item.paused !== false) await browser.downloads.resume(job.id);
-      await state(job,'browser',{resolved:true});
-    } catch {release(job);await persist().catch(()=>{});await browser.action.setBadgeText({text:'!'});}
-  }
-  async function cancelFromApp(job) {
-    job.state='cancelled';job.posted=false;delete job.url;delete job.header;
+  async function returnToBrowser(job,{pending=false}={}) {
+    // Durable retained flag prevents a late prepared reply from taking ownership.
+    job.browserRetained=true;
     await persist();
     try {
-      const {item}=await current(job);
-      // A genuine App cancellation never deletes a file the browser completed.
-      if(item?.state==='in_progress') await browser.downloads.cancel(job.id);
-      await state(job,'cancelled',{resolved:true});
-    } catch {release(job);await persist().catch(()=>{});}
-  }
-  async function created(job,ids) {
-    if(!Array.isArray(ids) || !ids.length || ids.some(id=>typeof id!=='string' || !id.trim())) throw new Error('invalid_receipt');
-    job.taskIds=[...new Set(ids)];
-    // Persist the authoritative creation before attempting browser cleanup.
-    job.state='created';delete job.url;delete job.header;await persist().catch(()=>{});
-    try {
-      const {item,report}=await current(job);
-      if(item?.state==='in_progress') await browser.downloads.cancel(job.id);
-      else if(item?.state==='complete') {
-        // The App task already exists; preserve both facts and the browser file.
-        await appBridge.request('submission',{operationId:job.operationId,browserState:report}).catch(()=>{});
-        job.browserCompleted=true;
+      let snapshot;
+      try {snapshot=await current(job);} catch(error) {
+        if(job.posted)throw error;
+        await browser.downloads.resume(job.id);
       }
-      await state(job,'created',{resolved:true});
-    } catch {
-      // Cancellation failure cannot turn a created task back into "unknown".
-      release(job);await persist().catch(()=>{});
-      await browser.action.setBadgeText({text:'!'});
-    }
+      if(snapshot?.matches && snapshot.item.state==='in_progress' && snapshot.item.paused!==false)await browser.downloads.resume(job.id);
+      await state(job,pending ? 'uncertain' : 'browser',{resolved:!pending});
+    } finally {release(job);}
   }
+  async function abort(job,reason) {
+    return appBridge.request('handoffAbort',{operationId:job.operationId,...(job.taskId?{taskId:job.taskId}:{}),reason});
+  }
+  async function retain(job,reason='browser_retained') {
+    job.browserRetained=true;await persist();
+    let acknowledged=false;
+    try {const data=await abort(job,reason);acknowledged=data?.version===1 && ['aborted','unknown'].includes(data.state);} catch {}
+    await returnToBrowser(job,{pending:!acknowledged});
+  }
+  async function uncertain(job) {await state(job,'uncertain').catch(()=>{release(job);});}
   function schedule(job) {
     clearTimeout(job.timer);
-    if(pollMs>0 && !job.resolved && ['accepted','authorizing'].includes(job.state)) job.timer=setTimeout(()=>{void poll(job);},pollMs);
+    if(pollMs>0 && !job.resolved && job.state==='accepted')job.timer=setTimeout(()=>{void poll(job);},pollMs);
+  }
+  function validate(job,data) {
+    if(data?.version!==1 || data.operationId!==job.operationId || !Array.isArray(data.taskIds))throw Error('invalid_receipt');
+    if(data.state==='aborted' && !data.taskId && data.taskIds.length===0 && ['user_cancelled','browser_completed','browser_retained'].includes(data.reason) && !job.taskId)return;
+    if(['prepared','committed','aborted'].includes(data.state)) {
+      if(!validTaskId(data.taskId) || data.taskIds.length!==1 || data.taskIds[0]!==data.taskId || !sameBinding(data.download,job.download) || job.taskId && job.taskId!==data.taskId)throw Error('invalid_receipt');
+      job.taskId=data.taskId;
+    } else if(data.taskIds.length)throw Error('invalid_receipt');
+  }
+  async function commit(job) {
+    if(!job.cancelConfirmed || !job.taskId)throw Error('unconfirmed_cancellation');
+    job.stage='commit';await state(job,'committing');
+    const data=await appBridge.request('handoffCommit',{operationId:job.operationId,taskId:job.taskId,download:job.download,cancelConfirmed:true,browserState:{state:'interrupted',error:'USER_CANCELED'}});
+    validate(job,data);
+    if(data.state!=='committed')throw Error('commit_unconfirmed');
+    await state(job,'committed',{resolved:true});
+  }
+  async function prepared(job) {
+    await state(job,'prepared');
+    if(job.browserRetained){await retain(job);return;}
+    if(job.cancelConfirmed){await commit(job);return;}
+    // A worker crash between cancel and its durable confirmation must not infer
+    // success from the later state or repeat an unjournaled ownership transfer.
+    if(job.stage==='cancel_intent'){await uncertain(job);return;}
+    const before=await current(job);
+    if(!before.matches){await retain(job);return;}
+    if(before.report.state==='complete'){await retain(job,'browser_completed');return;}
+    if(before.report.state!=='in_progress' || !before.report.paused){await retain(job);return;}
+    job.stage='cancel_intent';await state(job,'cancelling');
+    await browser.downloads.cancel(job.id);
+    // Chrome cancel() completion is not proof of ownership: inspect a fresh item.
+    const after=await current(job);
+    if(after.matches && after.report.state==='complete'){await retain(job,'browser_completed');return;}
+    if(!after.matches || after.report.state!=='interrupted' || after.report.error!=='USER_CANCELED'){await uncertain(job);return;}
+    job.cancelConfirmed=true;job.stage='cancel_confirmed';await persist();
+    await commit(job);
   }
   async function receipt(job,data) {
-    if(data?.operationId && data.operationId!==job.operationId) throw new Error('invalid_receipt');
-    if(data?.state==='created') {await created(job,data.taskIds);return;}
-    if(!Array.isArray(data?.taskIds) || data.taskIds.length) throw new Error('invalid_receipt');
-    if(data.state==='cancelled') {await cancelFromApp(job);return;}
-    if(['browser_completed','browser_retained'].includes(data.state)) {await returnToBrowser(job);return;}
-    if(data.state==='unknown') {await state(job,'uncertain');return;}
-    if(data.state!=='accepted') throw new Error('invalid_receipt');
-    await state(job,data.commitStarted ? 'authorizing' : 'accepted');
-    if(data.commitRequested) {
-      if(!validId(data.confirmToken)) throw new Error('invalid_receipt');
-      const {report}=await current(job);
-      const decision=report.state==='complete' ? 'browser_completed' : report.state==='in_progress' && report.paused ? 'commit' : 'browser_retained';
-      // Approval only releases the App's existing CreateView submission. It
-      // never repeats create or sends an alternate task request.
-      await state(job,'authorizing');
-      const answer=await appBridge.request('submission',{operationId:job.operationId,confirmToken:data.confirmToken,decision,browserState:report});
-      if(answer?.state!=='accepted') {await receipt(job,answer);return;}
+    validate(job,data);
+    if(data.state==='committed'){await state(job,'committed',{resolved:true});return;}
+    if(data.state==='prepared'){await prepared(job);return;}
+    if(data.state==='aborted') {
+      if(data.reason==='user_cancelled') {
+        const {item,matches}=await current(job);
+        if(matches && item.state==='in_progress')await browser.downloads.cancel(job.id);
+        await state(job,'aborted',{resolved:true});
+      } else await returnToBrowser(job);
+      return;
     }
-    schedule(job);
+    if(data.state==='accepted') {
+      if(job.browserRetained){await retain(job);return;}
+      const {report,matches}=await current(job);
+      if(matches && report.state==='complete'){await retain(job,'browser_completed');return;}
+      await state(job,'accepted');schedule(job);return;
+    }
+    if(data.state!=='unknown')throw Error('invalid_receipt');
+    if(job.cancelConfirmed || job.stage==='cancel_intent' || job.stage==='commit')await uncertain(job);
+    else await returnToBrowser(job,{pending:true});
   }
   async function poll(job) {
-    if(job.polling || job.resolved) return;
+    if(job.polling || job.resolved)return;
     job.polling=true;
     try {
-      const {report}=await current(job);
-      const data=await appBridge.request('submission',{operationId:job.operationId,browserState:report});
+      const data=await appBridge.request('handoffQuery',{operationId:job.operationId});
       await receipt(job,data);
-    } catch {await state(job,'uncertain').catch(()=>{});}
-    finally {job.polling=false;}
+    } catch {
+      if(job.cancelConfirmed || job.stage==='cancel_intent' || job.stage==='commit')await uncertain(job);
+      else await returnToBrowser(job,{pending:true}).catch(()=>uncertain(job));
+    } finally {job.polling=false;}
   }
   async function submit(job) {
+    const capability=await appBridge.request('handoffCapabilities');
+    if(capability?.version!==1){await returnToBrowser(job);return;}
+    const {item,matches}=await current(job);
+    if(!matches || item.state!=='in_progress' || !item.paused){await returnToBrowser(job);return;}
+    job.stage='prepare';job.posted=true;await state(job,'sending');
     try {
-      const ping=await appBridge.send({method:'ping'});
-      if(ping?.code!==0 || ping.data!==true) {await returnToBrowser(job);return;}
-    } catch {await returnToBrowser(job);return;}
-    const {item}=await current(job);
-    if(!item || item.state!=='in_progress' || item.paused===false) {await returnToBrowser(job);return;}
-    await state(job,'sending');job.posted=true;await persist();
-    let reply;
-    try {
-      reply=await appBridge.send({method:'create',operationId:job.operationId,meta:{silent:!job.confirm,source:'browser-capture',...await appBridge.identity()},params:{req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}}});
-      const answer=nativeSubmission(reply,job.operationId);
-      if(answer.state==='created') await created(job,answer.taskIds);
-      else {await state(job,'accepted');schedule(job);}
-    } catch {
-      if(rejected(reply)) await returnToBrowser(job);
-      else {
-        // A lost acknowledgement can be queried once, never replayed.
-        await state(job,'recovering');
-        await poll(job);
-        if(job.state==='uncertain') release(job);
-      }
-    }
+      const data=await appBridge.request('handoffPrepare',{operationId:job.operationId,download:job.download,req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}});
+      await receipt(job,data);
+    } catch {await poll(job);}
   }
-  const restored=browser.storage.session.get(PENDING).then(saved=>{
+  const restored=browser.storage.local.get(PENDING).then(saved=>{
     for(const item of Object.values(saved[PENDING] || {})) {
-      if(!Number.isInteger(item.id) || !validId(item.operationId)) continue;
-      jobs.set(item.id,{...item,resolved:false,posted:typeof item.posted==='boolean' ? item.posted : ['sending','accepted','authorizing','recovering','uncertain','created'].includes(item.state)});
+      if(item.version!==1 || !validBinding(item.download) || item.id!==item.download.id || !validId(item.operationId) || !validId(item.clientId) || !['chrome','edge'].includes(item.browser))continue;
+      jobs.set(item.id,{...item,resolved:false});
     }
   });
   void restored.then(async()=>{
+    const identity=await appBridge.identity();
     for(const job of [...jobs.values()]) {
+      if(job.clientId!==identity.clientId || job.browser!==identity.browser)continue;
       try {
-        if(job.state==='created') {await created(job,job.taskIds);continue;}
-        if(job.state==='cancelled') {await cancelFromApp(job);continue;}
-        if(!job.posted) {await returnToBrowser(job);continue;}
+        if(!job.posted){await returnToBrowser(job);continue;}
         job.releaseNative=appBridge.acquire();
-        await appBridge.settings();
         await poll(job);
-      } catch {await state(job,'uncertain').catch(()=>{});}
+      } catch {await uncertain(job);}
     }
-  });
+    // Core can retain a prepared task even if the helper journal was removed.
+    // Without our durable cancel proof it remains held; never guess or recreate.
+    try {
+      const data=await appBridge.request('handoffQuery',{pending:true});
+      if(data?.version!==1 || !Array.isArray(data.items))return;
+      for(const record of data.items) {
+        if(record.state!=='prepared' || !validId(record.operationId) || !validBinding(record.download) || !validTaskId(record.taskId) || jobs.has(record.download.id))continue;
+        const job={id:record.download.id,download:record.download,operationId:record.operationId,taskId:record.taskId,...identity,posted:true,browserRetained:true,stage:'prepare',state:'prepared',resolved:false};
+        jobs.set(job.id,job);await retain(job);
+      }
+    } catch {}
+  }).catch(()=>{});
   async function capture(item,releaseFilename) {
     await restored;
     const url=item.finalUrl || item.url,observed=requests.get(url);
-    if(!httpURL(url) || item.incognito || item.byExtensionId || jobs.has(item.id) || !observed || observed.method!=='GET' || observed.ambiguous || observed.expires<Date.now() || requestsBlockedUntil>Date.now()) return;
+    if(!httpURL(url) || item.incognito || item.byExtensionId || jobs.has(item.id) || !observed || observed.method!=='GET' || observed.ambiguous || observed.expires<Date.now() || requestsBlockedUntil>Date.now())return;
     requests.delete(url);
     const early=earlyPauses.get(item.id);earlyPauses.delete(item.id);
     try {if(early){if(!await early)return;}else await browser.downloads.pause(item.id);}catch{return;}
-    const job={id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,operationId:newOperationId(),state:'preparing',posted:false,resolved:false,releaseFilename};
+    const job={id:item.id,name:(item.filename || '').split(/[\\/]/).pop() || 'download',url,header:observed.header,operationId:newOperationId(),state:'preparing',stage:'prepare',posted:false,resolved:false,releaseFilename};
     jobs.set(item.id,job);
     try {
+      job.download={id:item.id,startTime:item.startTime,urlHash:await sha256(url)};
+      Object.assign(job,await appBridge.identity());
+      if(!validBinding(job.download))throw Error('download_identity_unavailable');
       job.releaseNative=appBridge.acquire();
-      // This is an actual eligible download, not passive media discovery. An
-      // enabled capture can wake the App before asking its canonical mode.
-      if(activeConfig?.enabled !== false) await appBridge.wake();
-      const settings=await appBridge.settings();
-      activeConfig=settings.downloadCapture;
+      if(activeConfig?.enabled!==false)await appBridge.wake();
+      const settings=await appBridge.settings();activeConfig=settings.downloadCapture;
       if(!activeConfig.enabled){await returnToBrowser(job);return;}
-      job.confirm=activeConfig.confirm;
-      await persist();
-      await submit(job);
+      await persist();await submit(job);
     } catch {
-      if(!job.posted) await returnToBrowser(job).catch(()=>{});
-      else await state(job,'uncertain').catch(()=>{});
-    } finally {
-      if(job.resolved || job.state==='uncertain') release(job);
-    }
+      if(!job.posted)await returnToBrowser(job).catch(()=>{release(job);});
+      else await uncertain(job);
+    } finally {if(job.resolved || job.state==='uncertain')release(job);}
   }
   function attach() {
     if(listening || !browser.downloads?.onDeterminingFilename) return;
