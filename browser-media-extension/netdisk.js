@@ -1,5 +1,6 @@
 import {readNetdiskPage} from './netdisk-page.js';
 import {newOperationId} from './lib.js';
+import {browserClientId} from './app-identity.js';
 
 const entry = (id,name,hosts,apiHosts,roots) => ({id,name,hosts,apiHosts,roots});
 export const NETDISK_PROVIDERS = [
@@ -145,17 +146,8 @@ function taskPort(chrome,timeoutMs) {
 }
 export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdiskPage}={}) {
   const jobs=new Map(),epochs=new Map();
-  let identity;
   const browser=/Edg\//.test(globalThis.navigator?.userAgent || '') ? 'edge' : 'chrome';
-  async function instance() {
-    if (!identity) identity=(async()=>{
-      const saved=await chrome.storage.local.get('netdiskInstanceId');
-      const id=text(saved.netdiskInstanceId,128) || globalThis.crypto.randomUUID();
-      if (!saved.netdiskInstanceId) await chrome.storage.local.set({netdiskInstanceId:id});
-      return id;
-    })();
-    return identity;
-  }
+  const instance = () => browserClientId(chrome);
   function invalidate(tabId) {
     epochs.set(tabId,(epochs.get(tabId)||0)+1);
     jobs.get(tabId)?.port?.close();

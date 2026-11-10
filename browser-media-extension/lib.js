@@ -342,3 +342,4 @@ export function mediaContextUrls(info,rootUrl) {
   return [...urls].slice(0,64);
 }
 export {installDownloadCapture} from './download-capture.js';
+export {createAppBridge} from './app-bridge.js';

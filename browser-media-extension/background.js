@@ -1,9 +1,10 @@
 import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,SUBMIT_RESEND_DELAYS,delay,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
-import {installDownloadCapture} from './lib.js';
+import {installDownloadCapture,createAppBridge} from './lib.js';
 
 installNetdiskBridge(chrome);
 installDownloadCapture(chrome,message => native(message,false,true));
+const appBridge = createAppBridge(chrome,message => native(message,false,true));
 
 const pendingHeaders = new Map();
 const requestStarts = new Map();
@@ -321,6 +322,13 @@ async function update(item,options) {
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
   if (msg?.type === 'DOWNLOAD_CAPTURE') return false;
   if (typeof msg?.type==='string' && msg.type.startsWith('NETDISK_')) return false;
+  if (msg?.type === 'APP_BRIDGE') {
+    if (!sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
+    const action = msg.action === 'openSettings' ? () => appBridge.openSettings() : msg.action === 'updateSettings' ? () => appBridge.updateSettings(msg.patch) : msg.action === 'settings' ? () => appBridge.settings() : null;
+    if (!action) { sendResponse({ok:false,error:'未知请求'});return false; }
+    void action().then(data => sendResponse({ok:true,data}),error => sendResponse({ok:false,error:safeError(error)}));
+    return true;
+  }
   (async () => {
     if (msg.type === 'ADD_DOM') {
       const tabId = sender.tab?.id;
