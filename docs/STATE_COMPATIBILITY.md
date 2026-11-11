@@ -22,7 +22,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
-| MCP 稳定 bin 的安装 xattr v1：`io.github.kbwumin13-sudo.kownload.mcp-install` | CLI 独立候选已在私有 HOME 首装/升级；不属于 Task/数据库格式，不新增 receipt 库。旧离线副本已实证丢标记，本增量补固定标记保全 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知/缺失/摘要不符拒绝升级，不自动认领 | 仅对 data/bin/kownload-mcp 普通单链接文件验证 mode700、冻结 v1/七字段/≤2048B/二进制 SHA256 绑定；固定 marker 原字节复制后复读源与副本，不保全则不发布 restore-plan/pairVerified。目录摘要仍 content-only，标记单独核验，不推广为其他 attrs 或 quarantine 的备份证明 |
+| MCP 稳定 bin 的安装 xattr v1：`io.github.kbwumin13-sudo.kownload.mcp-install`，JSON 白名单 `recordVersion/product/sourceCommit/version/readApiVersion/architecture/sha256` | CLI 独立候选已在私有 HOME 首装/升级；recordVersion=1、product=kownload-mcp、40小写hex源码、release+同SHA、readApiVersion=1、arm64、64小写hex摘要；不属于 Task/数据库格式，不新增 receipt 库。旧离线副本已实证丢标记，本增量补固定标记保全 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知字段/版本、缺失或摘要不符拒绝升级，不自动认领 | CLI 同私有 staging inode 发布前写入并读回；不支持/失败保旧入口。离线保全仅对 data/bin/kownload-mcp 普通单链接文件验证 mode700、冻结 v1/七字段/≤2048B/二进制 SHA256 绑定；固定 marker 原字节复制后复读源与副本，不保全则不发布 restore-plan/pairVerified。目录摘要仍 content-only，标记单独核验，不推广为其他 attrs 或 quarantine 的备份证明 |
 
 ## 回退单位
 
