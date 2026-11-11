@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/util"
 )
@@ -41,27 +42,30 @@ type operationTaskLink struct {
 	Ref    CreationOperation `json:"ref"`
 }
 type BatchOperationRequest struct {
-	Version     int                         `json:"version"`
-	OperationID string                      `json:"operationId"`
-	Reqs        []*base.CreateTaskBatchItem `json:"reqs"`
-	Opts        *base.Options               `json:"opts,omitempty"`
+	Version     int                          `json:"version"`
+	OperationID string                       `json:"operationId"`
+	Reqs        []*base.CreateTaskBatchItem  `json:"reqs"`
+	Opts        *base.Options                `json:"opts,omitempty"`
+	integrity   *VerifiedHTTPIntegrityIntent // dedicated verified receiver only, never legacy wire Extra
 }
 type operationMember struct {
-	Index    int           `json:"index"`
-	TaskID   string        `json:"taskId"`
-	State    string        `json:"state"`
-	Error    string        `json:"error,omitempty"`
-	Protocol string        `json:"protocol,omitempty"`
-	Options  *base.Options `json:"options,omitempty"`
+	Index        int           `json:"index"`
+	TaskID       string        `json:"taskId"`
+	State        string        `json:"state"`
+	Error        string        `json:"error,omitempty"`
+	Protocol     string        `json:"protocol,omitempty"`
+	Options      *base.Options `json:"options,omitempty"`
+	CompletionID string        `json:"completionId,omitempty"`
 }
 type batchOperationRecord struct {
-	Version     int               `json:"version"`
-	Namespace   string            `json:"namespace"`
-	OperationID string            `json:"operationId"`
-	RequestHash string            `json:"requestHash"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	UpdatedAt   time.Time         `json:"updatedAt"`
-	Members     []operationMember `json:"members"`
+	Version     int                          `json:"version"`
+	Namespace   string                       `json:"namespace"`
+	OperationID string                       `json:"operationId"`
+	RequestHash string                       `json:"requestHash"`
+	CreatedAt   time.Time                    `json:"createdAt"`
+	UpdatedAt   time.Time                    `json:"updatedAt"`
+	Members     []operationMember            `json:"members"`
+	Integrity   *VerifiedHTTPIntegrityIntent `json:"integrity,omitempty"`
 }
 
 func (r *batchOperationRecord) UnmarshalJSON(b []byte) error {
@@ -125,6 +129,9 @@ func (t *Task) cloneExecutionMeta() (*fetcher.FetcherMeta, error) {
 }
 
 func canonicalBatch(r BatchOperationRequest) ([]*base.CreateTaskBatchItem, string, error) {
+	if r.integrity != nil && (!r.integrity.valid() || len(r.Reqs) != 1) {
+		return nil, "", ErrVerifiedHTTPInvalid
+	}
 	if r.Version != 1 || !operationIDPattern.MatchString(r.OperationID) || len(r.Reqs) == 0 || len(r.Reqs) > 10000 {
 		return nil, "", ErrOperationInvalid
 	}
@@ -155,10 +162,11 @@ func canonicalBatch(r BatchOperationRequest) ([]*base.CreateTaskBatchItem, strin
 		items[i] = copied
 	}
 	raw, err := json.Marshal(struct {
-		Version   int                         `json:"version"`
-		Namespace string                      `json:"namespace"`
-		Items     []*base.CreateTaskBatchItem `json:"items"`
-	}{1, batchOperationNamespace, items})
+		Version   int                          `json:"version"`
+		Namespace string                       `json:"namespace"`
+		Items     []*base.CreateTaskBatchItem  `json:"items"`
+		Integrity *VerifiedHTTPIntegrityIntent `json:"integrity,omitempty"`
+	}{1, batchOperationNamespace, items, r.integrity})
 	if err != nil {
 		return nil, "", ErrOperationInvalid
 	}
@@ -167,6 +175,9 @@ func canonicalBatch(r BatchOperationRequest) ([]*base.CreateTaskBatchItem, strin
 }
 func (r *batchOperationRecord) valid() bool {
 	if r.Version != 1 || r.Namespace != batchOperationNamespace || !operationIDPattern.MatchString(r.OperationID) || len(r.Members) == 0 || len(r.Members) > 10000 {
+		return false
+	}
+	if r.Integrity != nil && (!r.Integrity.valid() || len(r.Members) != 1) {
 		return false
 	}
 	hash, err := hex.DecodeString(r.RequestHash)
@@ -179,6 +190,13 @@ func (r *batchOperationRecord) valid() bool {
 			return false
 		}
 		ids[m.TaskID] = true
+		if r.Integrity != nil {
+			if m.CompletionID == "" || m.Protocol != "http" {
+				return false
+			}
+		} else if m.CompletionID != "" {
+			return false
+		}
 		if m.State != "pending" && m.State != "created" && m.State != "failed" {
 			return false
 		}
@@ -350,6 +368,10 @@ func (d *Downloader) reserveOperationInDataset(atomicStore AtomicStorage, r Batc
 	}
 	now := time.Now()
 	record := &batchOperationRecord{Version: 1, Namespace: batchOperationNamespace, OperationID: r.OperationID, RequestHash: hash, CreatedAt: now, UpdatedAt: now, Members: make([]operationMember, len(items))}
+	if r.integrity != nil {
+		copied := *r.integrity
+		record.Integrity = &copied
+	}
 	for i, item := range items {
 		m := operationMember{Index: i, TaskID: NewTask().ID, State: "pending"}
 		if item == nil || item.Req == nil {
@@ -367,6 +389,16 @@ func (d *Downloader) reserveOperationInDataset(atomicStore AtomicStorage, r Batc
 					m.State = "failed"
 					m.Error = "invalid_options"
 				}
+			}
+		}
+		if record.Integrity != nil {
+			if m.State != "pending" || m.Protocol != "http" {
+				return ErrVerifiedHTTPInvalid
+			}
+			m.CompletionID = NewTask().ID
+			m.Options, err = d.freezeVerifiedOptions(m.Options)
+			if err != nil {
+				return err
 			}
 		}
 		record.Members[i] = m
@@ -450,7 +482,12 @@ func (d *Downloader) createOperationMemberInDataset(store AtomicStorage, op, has
 		ref := operationRef(&r, i)
 		task.CreationOperation = &ref
 		// M: a callback error rolls back task, reverse link and member receipt together.
-		if e = tx.Put(bucketTask, task.ID, task); e != nil {
+		if r.Integrity != nil {
+			initial := transfer.VerifiedCompletionRecord{Version: 1, ID: m.CompletionID, Phase: transfer.CompletionPrepared, Size: -1, ExpectedSHA256: r.Integrity.ExpectedSHA256}
+			if e = prepareTaskCompletion(tx, dataset, task, initial); e != nil {
+				return e
+			}
+		} else if e = tx.Put(bucketTask, task.ID, task); e != nil {
 			return e
 		}
 		if e = tx.Put(bucketOperationTasks, task.ID, &operationTaskLink{task.ID, ref}); e != nil {
