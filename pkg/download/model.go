@@ -24,16 +24,17 @@ type ResolveResult struct {
 }
 
 type Task struct {
-	Handoff   *BrowserHandoff      `json:"handoff,omitempty"`
-	ID        string               `json:"id"`
-	Protocol  string               `json:"protocol"`
-	Meta      *fetcher.FetcherMeta `json:"meta"`
-	Status    base.Status          `json:"status"`
-	Uploading bool                 `json:"uploading"`
-	Progress  *Progress            `json:"progress"`
-	IsCreated bool                 `json:"isCreated"`
-	CreatedAt time.Time            `json:"createdAt"`
-	UpdatedAt time.Time            `json:"updatedAt"`
+	Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
+	CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
+	ID                string               `json:"id"`
+	Protocol          string               `json:"protocol"`
+	Meta              *fetcher.FetcherMeta `json:"meta"`
+	Status            base.Status          `json:"status"`
+	Uploading         bool                 `json:"uploading"`
+	Progress          *Progress            `json:"progress"`
+	IsCreated         bool                 `json:"isCreated"`
+	CreatedAt         time.Time            `json:"createdAt"`
+	UpdatedAt         time.Time            `json:"updatedAt"`
 
 	fetcherManager fetcher.FetcherManager
 	fetcher        fetcher.Fetcher
@@ -53,6 +54,9 @@ type Task struct {
 	notBefore time.Time
 	queuedAt  time.Time
 	queueWait time.Duration
+	// Set on startup from the durable reverse index, even if an old reader
+	// discarded CreationOperation while saving the task.
+	creationBlocked bool
 }
 
 func NewTask() *Task {
@@ -115,19 +119,20 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 	defer t.dataLock.RUnlock()
 	// An explicit view avoids copying mutexes and preserves the public JSON shape.
 	return json.Marshal(struct {
-		ID        string               `json:"id"`
-		Protocol  string               `json:"protocol"`
-		Meta      *fetcher.FetcherMeta `json:"meta"`
-		Status    base.Status          `json:"status"`
-		Uploading bool                 `json:"uploading"`
-		Progress  *Progress            `json:"progress"`
-		IsCreated bool                 `json:"isCreated"`
-		CreatedAt time.Time            `json:"createdAt"`
-		UpdatedAt time.Time            `json:"updatedAt"`
-		Name      string               `json:"name"`
-		Handoff   *BrowserHandoff      `json:"handoff,omitempty"`
+		ID                string               `json:"id"`
+		Protocol          string               `json:"protocol"`
+		Meta              *fetcher.FetcherMeta `json:"meta"`
+		Status            base.Status          `json:"status"`
+		Uploading         bool                 `json:"uploading"`
+		Progress          *Progress            `json:"progress"`
+		IsCreated         bool                 `json:"isCreated"`
+		CreatedAt         time.Time            `json:"createdAt"`
+		UpdatedAt         time.Time            `json:"updatedAt"`
+		Name              string               `json:"name"`
+		Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
+		CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation})
 }
 
 func (t *Task) getStatus() base.Status {

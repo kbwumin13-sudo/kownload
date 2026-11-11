@@ -140,6 +140,11 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	submissions := newSubmissionLedger()
 	r.Methods(http.MethodPost).Path("/api/v1/tasks").HandlerFunc(submissions.wrap(CreateTask))
 	r.Methods(http.MethodPost).Path("/api/v1/tasks/batch").HandlerFunc(submissions.wrap(CreateTaskBatch))
+	// Durable v1 operations are authoritative in storage, outside the legacy
+	// bounded response cache. Old single/batch response shapes remain unchanged.
+	r.Methods(http.MethodPost).Path("/api/v1/task-batches/operations").HandlerFunc(BatchOperation)
+	r.Methods(http.MethodGet).Path("/api/v1/task-batches/operations/{operationId}").HandlerFunc(BatchOperation)
+	r.Methods(http.MethodPost).Path("/api/v1/task-batches/operations/{operationId}/cancel").HandlerFunc(BatchOperation)
 	r.Methods(http.MethodPatch).Path("/api/v1/tasks/{id}").HandlerFunc(PatchTask)
 	r.Methods(http.MethodPut).Path("/api/v1/tasks/{id}/pause").HandlerFunc(PauseTask)
 	r.Methods(http.MethodPut).Path("/api/v1/tasks/pause").HandlerFunc(PauseTasks)
