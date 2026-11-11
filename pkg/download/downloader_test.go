@@ -2,6 +2,8 @@ package download
 
 import (
 	"archive/zip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	httpFetcher "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/internal/test"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/http"
@@ -828,6 +831,10 @@ func TestDownloader_PauseAndContinue(t *testing.T) {
 func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 	listener := test.StartTestSlowFileServer(time.Millisecond * 2000)
 	defer listener.Close()
+	wantMD5 := test.FileMd5(test.BuildFile)
+	if len(wantMD5) != 32 {
+		t.Fatal("fixture digest unavailable")
+	}
 
 	downloader := NewDownloader(nil)
 	if err := downloader.Setup(); err != nil {
@@ -835,14 +842,84 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 	}
 	defer downloader.Clear()
 
-	// Create multiple tasks
-	taskCount := 3
-	taskIds := make([]string, 0)
-
-	for i := 0; i < taskCount; i++ {
-		req := &base.Request{
-			URL: "http://" + listener.Addr().String() + "/" + test.BuildName,
+	// The callback may run under lifecycle locks. Copy only the event snapshot;
+	// never reenter the downloader, block, or call testing methods from it.
+	type fixtureEvent struct {
+		at         time.Duration
+		key        EventKey
+		id         string
+		status     base.Status
+		downloaded int64
+		err        error
+	}
+	started := time.Now()
+	events := make(chan fixtureEvent, 64)
+	overflow := make(chan struct{}, 1)
+	downloader.Listener(func(event *Event) {
+		switch event.Key {
+		case EventKeyStart, EventKeyPause, EventKeyDone, EventKeyError, EventKeyFinally:
+		default:
+			return
 		}
+		snapshot := fixtureEvent{at: time.Since(started), key: event.Key, id: event.Task.ID,
+			status: event.Task.Status, downloaded: event.Task.Progress.Downloaded, err: event.Err}
+		select {
+		case events <- snapshot:
+		default:
+			select {
+			case overflow <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	taskCount := 3
+	taskIds := make([]string, 0, taskCount)
+	taskSet := make(map[string]bool, taskCount)
+	done := make(map[string]bool, taskCount)
+	observe := func(stage string, event fixtureEvent) {
+		if !taskSet[event.id] {
+			t.Fatalf("fixture stage=%s unexpected task event id=%s", stage, event.id)
+		}
+		t.Logf("fixture stage=%s at=%s event=%s task=%s status=%s downloaded=%d",
+			stage, event.at, event.key, event.id, event.status, event.downloaded)
+		if event.key == EventKeyError || event.err != nil {
+			// Report actual error classification without printing a request, URL,
+			// arbitrary error text, headers, validator values, or fixture contents.
+			var requestError *httpFetcher.RequestError
+			statusCode := 0
+			if errors.As(event.err, &requestError) {
+				statusCode = requestError.Code
+			}
+			t.Fatalf("fixture task=%s stage=%s error_event=%s type=%T http_status=%d unsafe_resume=%t no_saved_overlap=%t canceled=%t deadline=%t unexpected_eof=%t",
+				event.id, stage, event.key, event.err, statusCode,
+				errors.Is(event.err, httpFetcher.ErrUnsafeResume),
+				event.err != nil && strings.HasSuffix(event.err.Error(), ": no saved overlap available"),
+				errors.Is(event.err, context.Canceled), errors.Is(event.err, context.DeadlineExceeded), errors.Is(event.err, io.ErrUnexpectedEOF))
+		}
+		if event.key == EventKeyDone {
+			if done[event.id] {
+				t.Fatalf("fixture task=%s duplicate done event", event.id)
+			}
+			done[event.id] = true
+		}
+	}
+	drain := func(stage string) {
+		for {
+			select {
+			case event := <-events:
+				observe(stage, event)
+			case <-overflow:
+				t.Fatalf("fixture stage=%s event diagnostics overflowed", stage)
+			default:
+				return
+			}
+		}
+	}
+
+	// Create multiple tasks using the original slow file fixture and options.
+	for i := 0; i < taskCount; i++ {
+		req := &base.Request{URL: "http://" + listener.Addr().String() + "/" + test.BuildName}
 		rr, err := downloader.Resolve(req, testDownloadOpt)
 		if err != nil {
 			t.Fatal(err)
@@ -852,23 +929,37 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 			t.Fatal(err)
 		}
 		taskIds = append(taskIds, taskId)
+		taskSet[taskId] = true
+		t.Logf("fixture stage=created task=%s member=%d/%d", taskId, i+1, taskCount)
+		drain("created")
 	}
 
-	// Wait for tasks to start
 	time.Sleep(time.Millisecond * 100)
-
-	// Pause all tasks with nil filter
-	err := downloader.Pause(nil)
-	if err != nil {
+	t.Logf("fixture stage=pause-requested tasks=%v", taskIds)
+	if err := downloader.Pause(nil); err != nil {
 		t.Fatal(err)
 	}
-
 	time.Sleep(time.Millisecond * 100)
+	drain("paused")
 
-	// Verify all tasks are paused
 	pausedCount := 0
 	for _, taskId := range taskIds {
-		task := downloader.GetTask(taskId)
+		// Same lookup/clone path as GetTask. This fixture's only pauseDone assignment
+		// is synchronous in the Pause call above; no further Pause/Close is issued
+		// while this test goroutine reads it. Closing the channel is asynchronous.
+		fixtureTask := downloader.getTask(taskId)
+		task := fixtureTask.clone()
+		pauseState := "unset"
+		if fixtureTask.pauseDone != nil {
+			select {
+			case <-fixtureTask.pauseDone:
+				pauseState = "closed"
+			default:
+				pauseState = "pending"
+			}
+		}
+		t.Logf("fixture stage=paused task=%s status=%s downloaded=%d pause_done=%s checkpoint=skipped",
+			taskId, task.Status, task.Progress.Downloaded, pauseState)
 		if task.Status == base.DownloadStatusPause {
 			pausedCount++
 		}
@@ -877,37 +968,50 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 		t.Errorf("Expected %d paused tasks, got %d", taskCount, pausedCount)
 	}
 
-	// Continue all tasks with nil filter
-	var wg sync.WaitGroup
-	wg.Add(taskCount)
-	downloader.Listener(func(event *Event) {
-		if event.Key == EventKeyDone {
-			wg.Done()
-		}
-	})
-
-	err = downloader.Continue(nil)
-	if err != nil {
+	// Continue all tasks with nil filter.
+	t.Logf("fixture stage=continue-requested tasks=%v done_events=%d", taskIds, len(done))
+	if err := downloader.Continue(nil); err != nil {
 		t.Fatal(err)
 	}
+	for _, taskId := range taskIds {
+		task := downloader.GetTask(taskId)
+		t.Logf("fixture stage=continue-returned task=%s status=%s downloaded=%d", taskId, task.Status, task.Progress.Downloaded)
+	}
+	for len(done) < taskCount {
+		select {
+		case event := <-events:
+			observe("waiting-for-done", event)
+		case <-overflow:
+			t.Fatal("fixture event diagnostics overflowed")
+		}
+	}
+	drain("all-done")
 
-	// Wait for all tasks to complete
-	wg.Wait()
-
-	// Verify all tasks are done
 	doneCount := 0
 	for _, taskId := range taskIds {
 		task := downloader.GetTask(taskId)
 		if task.Status == base.DownloadStatusDone {
 			doneCount++
 		}
+		path := task.Meta.SingleFilepath()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("fixture task=%s output stat: %T", taskId, err)
+		}
+		if info.Size() != test.BuildSize {
+			t.Errorf("fixture task=%s size=%d want=%d", taskId, info.Size(), test.BuildSize)
+		}
+		if got := test.FileMd5(path); got != wantMD5 {
+			t.Errorf("fixture task=%s output bytes differ from original 200MiB fixture", taskId)
+		}
 	}
 	if doneCount != taskCount {
 		t.Errorf("Expected %d done tasks, got %d", taskCount, doneCount)
 	}
-
-	// Clean up
-	downloader.Delete(nil, true)
+	if err := downloader.Delete(nil, true); err != nil {
+		t.Fatal(err)
+	}
+	drain("verified")
 }
 
 func TestDownloader_GetTask(t *testing.T) {
