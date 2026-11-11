@@ -173,6 +173,131 @@ void main() {
       .widget<TextFormField>(find.byKey(const ValueKey('panel-download-input')))
       .controller!
       .text;
+  for (final entry in {
+    'unsupported receiver': 'https://fixture.invalid/single',
+    'multiline': urls,
+    'BT': 'magnet:?xt=urn:btih:fixture',
+    'ED2K': 'ed2k://|file|fixture|1|abcdef|/',
+    'netdisk': 'https://pan.quark.cn/s/fixture',
+  }.entries) {
+    testWidgets(
+        'explicit checksum ${entry.key} sends no legacy request or journal write',
+        (t) async {
+      await mount(t);
+      await t.enterText(
+          find.byKey(const ValueKey('panel-download-input')), entry.value);
+      await t.tap(find.text('更多选项'));
+      await t.pumpAndSettle();
+      final digest = find.byKey(const ValueKey('http-expected-sha256'));
+      await t.ensureVisible(digest);
+      await t.enterText(digest, 'A' * 64);
+      await t.tap(find.text('confirm'.tr));
+      await t.pump();
+      expect(Get.find<CreateController>().isConfirming.value, isFalse);
+      expect(f.requests, isEmpty);
+      expect(journalBox.puts, 0);
+      expect(singles, 0);
+      expect(
+          find.text(entry.key == 'unsupported receiver'
+              ? '当前连接的 SHA-256 校验能力尚未确认，未提交任务。'
+              : 'SHA-256 校验目前仅支持手动单链接 HTTP(S)，未提交任务。'),
+          findsOneWidget);
+    });
+  }
+  testWidgets(
+      'digest remains bound to its original URL until explicitly edited',
+      (t) async {
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'https://fixture.invalid/first');
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, 'a' * 64);
+    final url = find.byType(TextFormField).first;
+    await t.ensureVisible(url);
+    await t.enterText(url, 'https://fixture.invalid/changed');
+    await t.tap(find.text('confirm'.tr));
+    await t.pump();
+    expect(find.text('链接已变化，请重新填写当前链接的 SHA-256，未提交任务。'), findsOneWidget);
+    expect(t.widget<TextFormField>(digest).controller!.text, 'a' * 64);
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+    expect(singles, 0);
+  });
+  testWidgets(
+      'invalid checksum cannot fall through to resolve or single create',
+      (t) async {
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'https://fixture.invalid/single');
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, 'a' * 63);
+    await t.tap(find.text('confirm'.tr));
+    await t.pump();
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+    expect(singles, 0);
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
+  });
+  testWidgets('explicitly empty checksum preserves the ordinary single path',
+      (t) async {
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'https://fixture.invalid/single');
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, '  ');
+    Get.find<CreateController>().directDownload.value = true;
+    await t.tap(find.text('confirm'.tr));
+    await spin(t,
+        () => singles == 1 && !Get.find<CreateController>().isConfirming.value);
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+  });
+  for (final outcome in ['partial', 'lostAck']) {
+    testWidgets(
+        '$outcome query preserves a new checksum draft without another POST',
+        (t) async {
+      f.mode = outcome;
+      await mount(t);
+      final urlController = t
+          .widget<TextFormField>(
+              find.byKey(const ValueKey('panel-download-input')))
+          .controller!;
+      await click(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      await t.tap(find.text('更多选项'));
+      await t.pumpAndSettle();
+      final digest = find.byKey(const ValueKey('http-expected-sha256'));
+      await t.ensureVisible(digest);
+      await t.enterText(digest, 'a' * 64);
+      final op = f.receipts.keys.single;
+      f.receipts[op] = f.receipt(op);
+      final gets = f.scopedGets;
+      final query = find.byKey(const ValueKey('manual-batch-query'));
+      await t.ensureVisible(query);
+      await t.tap(query);
+      await spin(
+          t,
+          () =>
+              f.scopedGets > gets &&
+              find.text('原批次已确认，当前修改后的草稿已保留。').evaluate().isNotEmpty);
+      expect(urlController.text, urls);
+      expect(t.widget<TextFormField>(digest).controller!.text, 'a' * 64);
+      expect(f.posts, 1);
+      expect(journalBox.puts, 1);
+    });
+  }
   testWidgets(
       'real button waits journal ACK then consumes exactly one POST and completes input',
       (t) async {

@@ -23,14 +23,16 @@ import '../controllers/task_downloaded_controller.dart';
 import '../controllers/task_downloading_controller.dart';
 import 'task_downloaded_view.dart';
 import 'task_batch_groups.dart';
+import 'http_completion_status.dart';
 import 'task_downloading_view.dart';
 
 class TaskView extends GetView<TaskController> {
-  const TaskView({Key? key}) : super(key: key);
+  final Map<String, HttpCompletionView> httpCompletions;
+  const TaskView({Key? key, this.httpCompletions = const {}}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    if (Util.isMacos()) return const _MacTaskView();
+    if (Util.isMacos()) return _MacTaskView(httpCompletions: httpCompletions);
     final selectTask = controller.selectTask;
 
     return DefaultTabController(
@@ -127,7 +129,8 @@ class TaskView extends GetView<TaskController> {
 }
 
 class _MacTaskView extends StatefulWidget {
-  const _MacTaskView();
+  final Map<String, HttpCompletionView> httpCompletions;
+  const _MacTaskView({required this.httpCompletions});
 
   @override
   State<_MacTaskView> createState() => _MacTaskViewState();
@@ -390,6 +393,8 @@ class _MacTaskViewState extends State<_MacTaskView> {
                                                   listFocus.requestFocus(),
                                               child: BuildTaskListView(
                                                 tasks: visible,
+                                                httpCompletions:
+                                                    widget.httpCompletions,
                                                 selectedTaskIds:
                                                     taskList.selectedTaskIds,
                                                 macos: true,

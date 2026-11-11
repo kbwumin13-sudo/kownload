@@ -52,6 +52,7 @@ import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
 import 'browser_media_view.dart';
+import 'http_checksum_input.dart';
 
 class CreateView extends StatefulWidget {
   final TaskBatchJournalStore? batchJournal;
@@ -134,6 +135,7 @@ class _CreateViewState extends State<CreateView> {
       attempt.api.snapshot.isCurrent;
   bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
       _manualReferenceCurrent(attempt, epoch) &&
+      _expectedSha256Controller.text.trim().isEmpty &&
       attempt.input == _urlController.text.trim() &&
       attempt.signature ==
           jsonEncode(_manualPayload(
@@ -530,6 +532,7 @@ class _CreateViewState extends State<CreateView> {
       _urlController,
       _renameController,
       _connectionsController,
+      _expectedSha256Controller,
       _pathController,
       _proxyIpController,
       _proxyPortController,
@@ -552,6 +555,8 @@ class _CreateViewState extends State<CreateView> {
   final _urlController = TextEditingController();
   final _renameController = TextEditingController();
   final _connectionsController = TextEditingController();
+  final _expectedSha256Controller = TextEditingController();
+  String? _expectedSha256Url;
   final _pathController = TextEditingController();
   final _confirmController = RoundedLoadingButtonController();
   final _proxyIpController = TextEditingController();
@@ -1180,6 +1185,14 @@ class _CreateViewState extends State<CreateView> {
                               ],
                             )),
                         if (Util.isMacos()) const SizedBox(height: 12),
+                        if (Util.isMacos()) ...[
+                          HttpChecksumInput(
+                            controller: _expectedSha256Controller,
+                            onChanged: (_) =>
+                                _expectedSha256Url = _urlController.text.trim(),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         _macLabeledField(
                             'downloadDir'.tr,
                             DirectorySelector(
@@ -1775,6 +1788,8 @@ class _CreateViewState extends State<CreateView> {
     }
     _originalRequest = null;
     _renameController.clear();
+    _expectedSha256Controller.clear();
+    _expectedSha256Url = null;
     _btTrackerController.clear();
     _archivePasswordController.clear();
     _proxyIpController.clear();
@@ -2508,10 +2523,39 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
+  bool _checksumInputBlocked() {
+    String? expected;
+    try {
+      expected = normalizedExpectedSha256(_expectedSha256Controller.text);
+    } on FormatException catch (error) {
+      _manualNotice.value = error.message;
+      return true;
+    }
+    if (expected == null) return false;
+    final input = _urlController.text.trim();
+    final urls = Util.textToLines(input);
+    if (urls.length != 1 ||
+        parseProtocol(urls.single) != Protocol.http ||
+        _panelRequest != null ||
+        _originalRequest != null ||
+        _netdiskRequest.value != null ||
+        Get.find<AppController>().pendingUpdateTask.value != null) {
+      _manualNotice.value = 'SHA-256 校验目前仅支持手动单链接 HTTP(S)，未提交任务。';
+    } else if (_expectedSha256Url != input) {
+      _manualNotice.value = '链接已变化，请重新填写当前链接的 SHA-256，未提交任务。';
+    } else {
+      // The guarded receiver/wire adapter is not connected yet. Never carry an
+      // expected hash into legacy create/resolve or treat it as unknown Extra.
+      _manualNotice.value = '当前连接的 SHA-256 校验能力尚未确认，未提交任务。';
+    }
+    return true;
+  }
+
   Future<void> _doConfirm() async {
     if (controller.isConfirming.value) {
       return;
     }
+    if (_checksumInputBlocked()) return;
     final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
