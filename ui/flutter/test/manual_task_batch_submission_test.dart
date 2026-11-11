@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:gopeed/app/views/directory_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
@@ -428,6 +430,76 @@ void main() {
       } else {
         expect(input(t), isEmpty);
       }
+    });
+  }
+  for (final outcome in ['partial', 'lostAck']) {
+    testWidgets(
+        '$outcome original query ignores edited options and preserves the changed draft',
+        (t) async {
+      f.mode = outcome;
+      await mount(t);
+      await click(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      final urlController = t
+          .widget<TextFormField>(
+              find.byKey(const ValueKey('panel-download-input')))
+          .controller!;
+      await t.tap(find.text('更多选项'));
+      await t.pumpAndSettle();
+      final changedPath = '${dir.path}/changed';
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+              MacPanel.channel,
+              (call) async =>
+                  call.method == 'chooseDirectory' ? changedPath : null);
+      final folder = find.descendant(
+          of: find.byType(DirectorySelector),
+          matching: find.byIcon(CupertinoIcons.folder));
+      await t.ensureVisible(folder);
+      await t.tap(folder);
+      await t.pumpAndSettle();
+      final directory =
+          t.widget<DirectorySelector>(find.byType(DirectorySelector));
+      expect(directory.controller.text, changedPath);
+      final connections = find
+          .byWidgetPredicate(
+              (w) => w is TextField && w.keyboardType == TextInputType.number)
+          .first;
+      await t.ensureVisible(connections);
+      await t.enterText(connections, '7');
+      final header = find
+          .byWidgetPredicate((w) =>
+              w is TextField && w.decoration?.hintText == 'httpHeaderValue')
+          .first;
+      await t.ensureVisible(header);
+      await t.enterText(header, 'changed-header');
+      await t.pump();
+      final op = f.receipts.keys.single;
+      f.receipts[op] = f.receipt(op);
+      final gets = f.scopedGets;
+      final query = find.byKey(const ValueKey('manual-batch-query'));
+      await t.ensureVisible(query);
+      await t.tap(query);
+      await spin(t, () => f.scopedGets > gets);
+      await spin(
+          t, () => find.text('原批次已确认，当前修改后的草稿已保留。').evaluate().isNotEmpty);
+      expect(urlController.text, urls);
+      expect(directory.controller.text, changedPath);
+      expect(t.widget<TextField>(connections).controller!.text, '7');
+      expect(t.widget<TextField>(header).controller!.text, 'changed-header');
+      expect(f.posts, 1);
+      expect(journalBox.puts, 1);
+      expect(
+          f.requests
+              .lastWhere((r) =>
+                  r['method'] == 'GET' &&
+                  (r['uri'] as Uri).path.contains('/datasets/'))['uri']
+              .pathSegments
+              .last,
+          op);
     });
   }
   testWidgets(

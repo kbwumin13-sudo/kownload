@@ -125,11 +125,13 @@ class _CreateViewState extends State<CreateView> {
               .map((url) =>
                   CreateTaskBatchItem(req: _requestForUrl(url), opts: opts))
               .toList());
-  bool _manualCurrent(_ManualBatchAttempt attempt, int epoch) =>
+  bool _manualReferenceCurrent(_ManualBatchAttempt attempt, int epoch) =>
       mounted &&
       epoch == _manualEpoch &&
       identical(_manualBatch, attempt) &&
-      attempt.api.snapshot.isCurrent &&
+      attempt.api.snapshot.isCurrent;
+  bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
+      _manualReferenceCurrent(attempt, epoch) &&
       attempt.input == _urlController.text.trim() &&
       attempt.signature ==
           jsonEncode(_manualPayload(
@@ -196,7 +198,7 @@ class _CreateViewState extends State<CreateView> {
 
   Future<void> _acceptManualReply(_ManualBatchAttempt attempt, int epoch,
       ScopedTaskBatchReply reply) async {
-    if (!_manualCurrent(attempt, epoch)) {
+    if (!_manualReferenceCurrent(attempt, epoch)) {
       return;
     }
     final receipt = reply.receipt;
@@ -218,6 +220,10 @@ class _CreateViewState extends State<CreateView> {
     if (!reply.requiresQuery &&
         receipt?.createdCount == count &&
         receipt?.failedCount == 0) {
+      if (!_manualDraftCurrent(attempt, epoch)) {
+        _manualNotice.value = '原批次已确认，当前修改后的草稿已保留。';
+        return;
+      }
       _createdIds.addAll(reply.createdTaskIds);
       _manualBatch = null;
       _manualBusy = false;
@@ -239,18 +245,17 @@ class _CreateViewState extends State<CreateView> {
     final epoch = ++_manualEpoch;
     setState(() => _manualBusy = true);
     try {
-      if (!_manualCurrent(attempt, epoch) ||
-          !await attempt.api.stillSameDataset()) {
-        _manualNotice.value = '连接、数据域或输入已变化，原批次引用继续保留。';
-        return;
-      }
-      if (!_manualCurrent(attempt, epoch)) {
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      final sameDataset = await attempt.api.stillSameDataset();
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      if (!sameDataset) {
+        _manualNotice.value = '数据域已变化，原批次引用继续保留。';
         return;
       }
       final reply = await attempt.api.query(attempt.operation);
       await _acceptManualReply(attempt, epoch, reply);
     } catch (_) {
-      if (_manualCurrent(attempt, epoch)) {
+      if (_manualReferenceCurrent(attempt, epoch)) {
         _manualNotice.value = '暂时无法查询原批次，请保留引用并稍后查询。';
       }
     } finally {
@@ -307,7 +312,7 @@ class _CreateViewState extends State<CreateView> {
         return;
       }
       _manualBatch = attempt;
-      if (!_manualCurrent(attempt, epoch)) {
+      if (!_manualDraftCurrent(attempt, epoch)) {
         return;
       }
       _manualNotice.value = '正在记录批次引用…';
@@ -316,14 +321,16 @@ class _CreateViewState extends State<CreateView> {
       final recorded = await journal.recordForQuery(attempt.scope, operation,
           acknowledgementTimeout: widget.batchAcknowledgementTimeout);
       TaskBatchGroups.referencesChanged();
-      if (!_manualCurrent(attempt, epoch)) {
+      if (!_manualDraftCurrent(attempt, epoch)) {
         return;
       }
       if (!recorded.confirmed || preflight.receipt?.state != 'unknown') {
         _manualNotice.value = '批次引用需要查询确认，未再次发送创建请求。';
         return;
       }
-      if (!await bound.stillSameDataset() || !_manualCurrent(attempt, epoch)) {
+      final sameDataset = await bound.stillSameDataset();
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      if (!sameDataset || !_manualDraftCurrent(attempt, epoch)) {
         _manualNotice.value = '连接或数据域已变化，未发送创建请求，原引用已保留。';
         return;
       }
