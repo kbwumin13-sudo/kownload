@@ -6,6 +6,36 @@ import FlutterMacOS
 // application Flutter engine or register the production plugins.
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {}
 
+private final class InteractiveGlassProbe: NSObject {
+  private(set) var enabled = false
+  private(set) var writes = 0
+  @objc(setEffectIsInteractive:)
+  func setInteractive(_ enabled: Bool) {
+    self.enabled = enabled
+    writes += 1
+  }
+}
+private final class LegacyGlassProbe: NSObject {
+  private(set) var writes = 0
+  override func setValue(_ value: Any?, forKey key: String) { writes += 1 }
+}
+
+private func verifyGlassEffectCompatibility() {
+  let legacy = LegacyGlassProbe()
+  precondition(!GlassEffectCompatibility.enableInteraction(on: legacy) && legacy.writes == 0,
+               "A runtime without the public setter must not receive a KVC write")
+  let supported = InteractiveGlassProbe()
+  precondition(GlassEffectCompatibility.enableInteraction(on: supported) && supported.enabled && supported.writes == 1,
+               "A supported runtime must receive the enabled BOOL through its public setter")
+  if #available(macOS 27.0, *) {
+    let glass = NSGlassEffectView(frame: .zero)
+    precondition(GlassEffectCompatibility.enableInteraction(on: glass))
+    precondition((glass.value(forKey: "effectIsInteractive") as? NSNumber)?.boolValue == true,
+                 "The real glass view must retain interactive feedback on new macOS")
+  }
+  print("PASS: public interactive-glass setter capability, legacy no-write, and real supported glass feedback")
+}
+
 private final class DropTarget: NSView {}
 private final class InputView: NSView {
   override var acceptsFirstResponder: Bool { true }
@@ -75,6 +105,7 @@ struct PanelHostTest {
     // First use of the shared application, so NSApp is the recording subclass.
     let testApp = TestApplication.shared as! TestApplication
     NSApp.setActivationPolicy(.accessory)
+    verifyGlassEffectCompatibility()
     let window = TestWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
       styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: true)
     window.isReleasedWhenClosed = false

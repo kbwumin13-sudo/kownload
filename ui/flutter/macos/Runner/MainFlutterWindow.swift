@@ -4,6 +4,17 @@ import FlutterMacOS
 import UniformTypeIdentifiers
 import window_manager
 
+enum GlassEffectCompatibility {
+  // This public setter is available at runtime on macOS 27, even when the app
+  // was compiled with an earlier SDK that cannot name the Swift property.
+  @discardableResult
+  static func enableInteraction(on view: NSObject) -> Bool {
+    guard view.responds(to: NSSelectorFromString("setEffectIsInteractive:")) else { return false }
+    view.setValue(true, forKey: "effectIsInteractive")
+    return true
+  }
+}
+
 @available(macOS 26.0, *)
 private final class PanelGlassEffectView: NSGlassEffectView {
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -289,7 +300,7 @@ class MainFlutterWindow: NSWindow {
         let glass = PanelGlassEffectView(frame: container.view.bounds)
         glass.style = .regular
         glass.cornerRadius = 22
-        if #available(macOS 27.0, *) { glass.effectIsInteractive = true }
+        if #available(macOS 27.0, *) { GlassEffectCompatibility.enableInteraction(on: glass) }
         glass.contentView = flutterView
         surface = glass
       } else {
