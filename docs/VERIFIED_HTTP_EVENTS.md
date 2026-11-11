@@ -37,6 +37,8 @@ data: {"version":1,"datasetId":"0123456789abcdef0123456789abcdef","taskId":"exam
 
 无id/retry/comment/heartbeat/hello/历史drain。任何query参数（含since/cursor）或任何
 Last-Event-ID头（包括空值）都在订阅前拒绝，不忽略恢复输入。不能发多行data或其它事件名。
+该GET无正文；Content-Length非零/未知或chunked正文在订阅前400并关闭连接，不等待drain，
+避免HTTP/1的首个Flush因未读请求正文而超出局部写期限。
 
 | HTTP/结束 | 含义与客户端行为 |
 | --- | --- |
