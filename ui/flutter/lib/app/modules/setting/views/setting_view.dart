@@ -35,6 +35,8 @@ import '../../../views/text_button_loading.dart';
 import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
 import 'mac_settings_view.dart';
+import 'api_endpoint_draft.dart';
+import '../../../../identity/app_identity.dart';
 
 const _padding = SizedBox(height: 10);
 final _divider = const Divider().paddingOnly(left: 10, right: 10);
@@ -73,6 +75,10 @@ class SettingView extends GetView<SettingController> {
     final appController = Get.find<AppController>();
     final downloaderCfg = draft ?? appController.downloaderConfig;
     final startCfg = startDraft ?? appController.startConfig;
+    final apiEndpoints = section == 'api'
+        ? ApiEndpointDraft(
+            defaultUnixAddress: () => Util.homePathJoin(AppIdentity.apiSocket))
+        : null;
 
     Timer? timer;
     Future<bool> debounceSave(
@@ -1425,10 +1431,15 @@ class SettingView extends GetView<SettingController> {
               value: startCfg.value.network,
               onChanged: Util.isDesktop() || Util.isAndroid()
                   ? (value) async {
-                      startCfg.update((val) {
-                        val!.network = value!;
-                      });
-
+                      if (value == null) return;
+                      if (apiEndpoints != null) {
+                        await apiEndpoints.select(startCfg.value, value);
+                        startCfg.refresh();
+                      } else {
+                        startCfg.update((val) {
+                          val!.network = value;
+                        });
+                      }
                       await debounceSave(needRestart: true);
                     }
                   : null,
@@ -1452,7 +1463,11 @@ class SettingView extends GetView<SettingController> {
           final arr = startCfg.value.address.split(':');
           var ip = '127.0.0.1';
           var port = '0';
-          if (arr.length > 1) {
+          if (apiEndpoints != null) {
+            final fields = ApiEndpointDraft.tcpFields(startCfg.value.address);
+            ip = fields?.$1 ?? '';
+            port = fields?.$2 ?? '';
+          } else if (arr.length > 1) {
             ip = arr[0];
             port = arr[1];
           }
@@ -1460,10 +1475,14 @@ class SettingView extends GetView<SettingController> {
           final ipController = TextEditingController(text: ip);
           final portController = TextEditingController(text: port);
           updateAddress() async {
-            if (ipController.text.isEmpty || portController.text.isEmpty) {
+            if (apiEndpoints == null &&
+                (ipController.text.isEmpty || portController.text.isEmpty)) {
               return;
             }
-            final newAddress = '${ipController.text}:${portController.text}';
+            final newAddress = apiEndpoints == null
+                ? '${ipController.text}:${portController.text}'
+                : ApiEndpointDraft.tcpAddress(
+                    ipController.text, portController.text);
             if (newAddress != startCfg.value.address) {
               startCfg.value.address = newAddress;
 
@@ -1511,7 +1530,8 @@ class SettingView extends GetView<SettingController> {
                 ),
                 keyboardType: TextInputType.number,
                 inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp('[0-9.]')),
+                  FilteringTextInputFormatter.allow(RegExp(
+                      apiEndpoints == null ? '[0-9.]' : '[A-Za-z0-9._-]')),
                 ],
               ),
             ),
@@ -1533,6 +1553,22 @@ class SettingView extends GetView<SettingController> {
           ]);
         }
 
+        if (apiEndpoints != null && startCfg.value.network == 'unix') {
+          final socket = TextEditingController(text: startCfg.value.address);
+          socket.addListener(() {
+            startCfg.value.address = socket.text;
+          });
+          items.addAll([
+            const SizedBox(width: 20),
+            Flexible(
+                child: TextFormField(
+              key: const ValueKey('api-unix-address'),
+              controller: socket,
+              decoration: const InputDecoration(
+                  labelText: 'Unix socket', contentPadding: EdgeInsets.zero),
+            ))
+          ]);
+        }
         return Form(
           child: Row(
             children: items,

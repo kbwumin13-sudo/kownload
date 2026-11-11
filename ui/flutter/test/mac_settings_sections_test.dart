@@ -25,6 +25,7 @@ import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:gopeed/macos/mac_shell.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/util/package_info.dart';
+import 'package:gopeed/util/util.dart';
 
 import 'support/onboarding_check_fixture.dart';
 
@@ -425,6 +426,23 @@ void main() {
     },
   );
 
+  Future<String> apiStorage(WidgetTester tester) async {
+    final root = Directory('/tmp').createTempSync('settings-api-review-');
+    await tester.runAsync(() => Util.initStorageDir(previewStorage: root.path));
+    addTearDown(() async {
+      await Util.initStorageDir();
+      await root.delete(recursive: true);
+    });
+    return '${root.path}/${AppIdentity.apiSocket}';
+  }
+
+  Future<void> selectApiProtocol(WidgetTester tester, String label) async {
+    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label).last);
+    await tester.pumpAndSettle();
+  }
+
   Future<void> nestedEntry(WidgetTester tester, String value,
       {bool chooseScript = false}) async {
     await tester.tap(find.widgetWithText(OutlinedButton, 'add').last);
@@ -525,6 +543,7 @@ void main() {
       (tester) async {
     if (!Platform.isMacOS) return;
     final app = await _mountSettings(tester, 'download');
+    final unixAddress = await apiStorage(tester);
     final current = app.startConfig.value;
     final original = (current.network, current.address, current.apiToken);
     await openEditor(tester, 'api');
@@ -548,7 +567,7 @@ void main() {
     expect(find.text('启动设置保存未完成，请重试。'), findsOneWidget);
     expect(app.savedStarts.single, {
       'network': 'unix',
-      'address': '127.0.0.9:12345',
+      'address': unixAddress,
       'apiToken': 'fixture-retry'
     });
     expect(app.savedConfigs, isEmpty);
@@ -557,9 +576,116 @@ void main() {
     await tester.pumpAndSettle();
     expect(current.apiToken, 'fixture-retry');
     expect(current.network, 'unix');
-    expect(current.address, '127.0.0.9:12345');
+    expect(current.address, unixAddress);
     expect(app.savedStarts, hasLength(2));
     expect(app.savedStarts.last, app.savedStarts.first);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final network in ['unix', 'tcp']) {
+    testWidgets(
+        'review API switches $network endpoint before saving without address edits',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final unixAddress = await apiStorage(tester);
+      final app = await _mountSettings(tester, 'download');
+      app.startConfig.value.network = network;
+      app.startConfig.value.address =
+          network == 'unix' ? unixAddress : '127.0.0.1:9999';
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      await selectApiProtocol(tester, network == 'unix' ? 'TCP' : 'Unix');
+      if (network == 'unix') {
+        expect(
+            tester
+                .widget<TextFormField>(find.widgetWithText(TextFormField, 'IP'))
+                .controller!
+                .text,
+            '127.0.0.1');
+        expect(
+            tester
+                .widget<TextFormField>(
+                    find.widgetWithText(TextFormField, 'port'))
+                .controller!
+                .text,
+            '0');
+      } else {
+        expect(
+            tester
+                .widget<TextFormField>(
+                    find.byKey(const ValueKey('api-unix-address')))
+                .controller!
+                .text,
+            unixAddress);
+      }
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedStarts.single['network'],
+          network == 'unix' ? 'tcp' : 'unix');
+      expect(app.savedStarts.single['address'],
+          network == 'unix' ? '127.0.0.1:0' : unixAddress);
+      expect(app.savedConfigs, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'review API restores separate drafts and rejects mismatched Unix path before saving',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final unixAddress = await apiStorage(tester);
+    final app = await _mountSettings(tester, 'download');
+    app.startConfig.value.network = 'unix';
+    app.startConfig.value.address = unixAddress;
+    await openEditor(tester, 'api');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    await selectApiProtocol(tester, 'TCP');
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '43210');
+    await tester.pumpAndSettle();
+    await selectApiProtocol(tester, 'Unix');
+    expect(
+        tester
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('api-unix-address')))
+            .controller!
+            .text,
+        unixAddress);
+    await tester.enterText(
+        find.byKey(const ValueKey('api-unix-address')), '127.0.0.1:0');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts, isEmpty);
+    expect(app.startConfig.value.address, unixAddress);
+    expect(find.textContaining('Unix 地址须为完整'), findsOneWidget);
+    await tester.enterText(find.byKey(const ValueKey('api-unix-address')),
+        unixAddress.replaceFirst('api.sock', 'custom.sock'));
+    await selectApiProtocol(tester, 'TCP');
+    expect(
+        tester
+            .widget<TextFormField>(find.widgetWithText(TextFormField, 'port'))
+            .controller!
+            .text,
+        '43210');
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('TCP 地址须包含'), findsOneWidget);
+    expect(app.savedStarts, isEmpty);
+    await selectApiProtocol(tester, 'Unix');
+    expect(
+        tester
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('api-unix-address')))
+            .controller!
+            .text,
+        unixAddress.replaceFirst('api.sock', 'custom.sock'));
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts.single['address'],
+        unixAddress.replaceFirst('api.sock', 'custom.sock'));
     expect(app.savedConfigs, isEmpty);
     expect(tester.takeException(), isNull);
   });

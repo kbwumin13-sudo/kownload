@@ -20,6 +20,7 @@ import '../../../views/directory_selector.dart';
 import '../../app/controllers/app_controller.dart';
 import '../../../services/browser_integration.dart';
 import '../controllers/setting_controller.dart';
+import 'api_endpoint_draft.dart';
 
 /// The macOS preferences expose everyday choices while preserving the full
 /// downloader configuration used by the other platforms and download engine.
@@ -769,6 +770,16 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                         onPressed: saving
                             ? null
                             : () async {
+                                if (section == 'api') {
+                                  final invalid =
+                                      ApiEndpointDraft.validationError(
+                                          startDraft.value.network,
+                                          startDraft.value.address);
+                                  if (invalid != null) {
+                                    update(() => error = invalid);
+                                    return;
+                                  }
+                                }
                                 update(() {
                                   saving = true;
                                   error = null;
