@@ -96,6 +96,7 @@ type Progress struct {
 }
 
 type Downloader struct {
+	operationMu       sync.Mutex
 	handoffMu         sync.Mutex
 	startupTaskPolicy StartupTaskPolicy
 	Logger            *logger.Logger
@@ -176,7 +177,7 @@ func (d *Downloader) Setup() error {
 		return ErrStartupTaskPolicy
 	}
 	// setup storage
-	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage}); err != nil {
+	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage, bucketTaskOperations, bucketOperationTasks}); err != nil {
 		return err
 	}
 	// load config from storage
@@ -225,6 +226,7 @@ func (d *Downloader) Setup() error {
 			}
 			d.assignFetcherManager(task)
 			initTask(task)
+			task.creationBlocked = d.checkCreationAssociation(task) != nil
 			if task.getStatus() != base.DownloadStatusDone && task.getStatus() != base.DownloadStatusError {
 				task.updateStatus(base.DownloadStatusPause)
 			}
@@ -260,6 +262,9 @@ func (d *Downloader) Setup() error {
 	go func() {
 		for _, task := range uploadTasks {
 			if d.startupTaskPolicy == StartupTaskPolicyImportedReview {
+				continue
+			}
+			if task.creationHeld() || task.handoffHeld() {
 				continue
 			}
 			task.lock.Lock()
@@ -358,6 +363,9 @@ func (d *Downloader) cleanupNonExistingTasks() {
 	var tasksToDelete []string
 
 	for _, task := range d.taskList() {
+		if task.creationHeld() {
+			continue
+		}
 		if task.Meta == nil || task.Meta.Res == nil {
 			continue
 		}
@@ -645,7 +653,7 @@ func (d *Downloader) notifyRunning() {
 		now := time.Now()
 		for i := 0; i < len(d.waitTasks); i++ {
 			wt := d.waitTasks[i]
-			if wt.handoffHeld() || wt.getStatus() != base.DownloadStatusWait {
+			if wt.handoffHeld() || wt.creationHeld() || wt.getStatus() != base.DownloadStatusWait {
 				d.dequeueLocked(i)
 				i--
 				continue
@@ -735,6 +743,9 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 		defer task.lock.Unlock()
 		task.statusLock.Lock()
 		defer task.statusLock.Unlock()
+		if task.creationHeld() {
+			return ErrOperationConflict
+		}
 		if task.handoffHeld() {
 			return ErrHandoffHeld
 		}
@@ -830,9 +841,12 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 
 	filter.NotStatuses = []base.Status{base.DownloadStatusRunning, base.DownloadStatusDone}
 	selectedTasks := d.getTasksByFilter(filter)
-	continueTasks := handoffEligible(selectedTasks)
+	continueTasks := creationEligible(handoffEligible(selectedTasks))
 	if len(continueTasks) == 0 {
 		if len(selectedTasks) > 0 {
+			if selectedTasks[0].creationHeld() {
+				return ErrOperationConflict
+			}
 			return ErrHandoffHeld
 		}
 		return ErrTaskNotFound
@@ -914,7 +928,7 @@ func (d *Downloader) continueAll() (err error) {
 		// calculate how many tasks can be continued, can't exceed maxRunning
 		remainCount := d.remainRunningCount()
 		for _, task := range d.tasks {
-			if !task.handoffHeld() && task.getStatus() != base.DownloadStatusRunning && task.getStatus() != base.DownloadStatusDone {
+			if !task.handoffHeld() && !task.creationHeld() && task.getStatus() != base.DownloadStatusRunning && task.getStatus() != base.DownloadStatusDone {
 				if len(continuedTasks) < remainCount {
 					continuedTasks = append(continuedTasks, task)
 				} else {
@@ -942,7 +956,7 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 		return d.continueAll()
 	}
 
-	continueTasks := handoffEligible(d.getTasksByFilter(filter))
+	continueTasks := creationEligible(handoffEligible(d.getTasksByFilter(filter)))
 	for _, task := range continueTasks {
 		if err = d.doStart(task); err != nil {
 			return
@@ -952,6 +966,8 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 }
 
 func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
+	d.operationMu.Lock()
+	defer d.operationMu.Unlock()
 	if filter == nil || filter.IsEmpty() {
 		return d.deleteAll(force)
 	}
@@ -1023,6 +1039,9 @@ func (d *Downloader) Stats(id string) (sr any, err error) {
 	task := d.getTask(id)
 	if task == nil {
 		return sr, ErrTaskNotFound
+	}
+	if task.creationHeld() {
+		return nil, ErrOperationConflict
 	}
 	task.statusLock.Lock()
 	defer task.statusLock.Unlock()
@@ -1106,7 +1125,9 @@ func (d *Downloader) closeNetdiskFetchers() error {
 
 func (d *Downloader) Close() error {
 	d.handoffMu.Lock()
+	d.operationMu.Lock()
 	d.closed.Store(true)
+	d.operationMu.Unlock()
 	d.handoffMu.Unlock()
 
 	closeArr := []func() error{
@@ -1705,6 +1726,9 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var runCtx context.Context
 	var runCancel context.CancelFunc
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
+		if task.creationHeld() {
+			return true, ErrOperationConflict
+		}
 		if task.handoffHeld() {
 			return true, ErrHandoffHeld
 		}
@@ -1718,6 +1742,12 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		if err != nil {
 			d.Logger.Error().Stack().Err(err).Msgf("restore fetcher failed, task id: %s", task.ID)
 			return
+		}
+		if task.CreationOperation != nil {
+			_, uploading := task.fetcher.(fetcher.Uploader)
+			task.dataLock.Lock()
+			task.Uploading = uploading
+			task.dataLock.Unlock()
 		}
 		task.dataLock.RLock()
 		needCreate = !task.IsCreated
