@@ -1449,8 +1449,17 @@ func (d *Downloader) watch(task *Task) {
 func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher) (bool, error) {
 	task.lock.Lock()
 	defer task.lock.Unlock()
-	// Wait has finished; take final protocol snapshots before the persistence
-	// guard. No protocol lifecycle or user callbacks are run under that guard.
+	// An old Wait may finish after Pause requeued the task. Discard that
+	// completion before attempting a membership lookup or final snapshot.
+	task.statusLock.Lock()
+	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
+		task.statusLock.Unlock()
+		return false, nil
+	}
+	generation := task.runGeneration
+	task.statusLock.Unlock()
+
+	// Protocol snapshots do not hold the main/state/persistence locks.
 	var finalMeta *fetcher.FetcherMeta
 	if task.Protocol == "media" || task.Protocol == "netdisk" {
 		finalMeta = util.DeepClone(f.Meta())
@@ -1458,45 +1467,64 @@ func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher) (bool, 
 	task.dataLock.RLock()
 	needSize := task.Meta.Res != nil && task.Meta.Res.Size == 0
 	task.dataLock.RUnlock()
+	if finalMeta != nil && finalMeta.Res != nil {
+		needSize = finalMeta.Res.Size == 0
+	}
 	var downloaded int64
 	if needSize {
 		downloaded = f.Progress().TotalDownloaded()
 	}
+
 	persistenceLock := d.errorPersistenceLock(task)
 	persistenceLock.Lock()
 	defer persistenceLock.Unlock()
-	task.statusLock.Lock()
-	defer task.statusLock.Unlock()
-	if d.closed.Load() || d.getTask(task.ID) != task || task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
-		return false, nil
-	}
-	task.dataLock.Lock()
-	if finalMeta != nil {
-		task.Meta = finalMeta
-	}
-	task.Progress.Used = task.timer.Used()
-	if task.Meta.Res.Size == 0 {
-		task.Meta.Res.Size = downloaded
-	}
-	used := task.Progress.Used / int64(time.Second)
-	if used == 0 {
-		used = 1
-	}
-	totalSize := task.Meta.Res.Size
-	task.Progress.Speed = totalSize / used
-	task.Progress.Downloaded = totalSize
-	task.dataLock.Unlock()
+	var candidate *Task
+	err := func() error {
+		// notifyRunning takes main->status; never take the opposite order.
+		d.lock.Lock()
+		task.statusLock.Lock()
+		present := !d.closed.Load() && d.getTaskLocked(task.ID) == task
+		d.lock.Unlock()
+		defer task.statusLock.Unlock()
+		if !present || task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation || task.Meta.Res == nil {
+			return nil
+		}
+		task.dataLock.Lock()
+		if finalMeta != nil {
+			task.Meta = finalMeta
+		}
+		task.Progress.Used = task.timer.Used()
+		if task.Meta.Res.Size == 0 {
+			task.Meta.Res.Size = downloaded
+		}
+		used := task.Progress.Used / int64(time.Second)
+		if used == 0 {
+			used = 1
+		}
+		totalSize := task.Meta.Res.Size
+		task.Progress.Speed = totalSize / used
+		task.Progress.Downloaded = totalSize
+		task.dataLock.Unlock()
 
-	candidate := task.clone()
-	candidate.updateStatus(base.DownloadStatusDone)
-	if err := d.storage.Put(bucketTask, task.ID, candidate); err != nil {
-		// An error may be an unknown commit acknowledgement. Never infer
-		// success or issue completion effects from it; preserve the file.
+		candidate = task.clone()
+		candidate.updateStatus(base.DownloadStatusDone)
+		// An error can mean an unknown ACK. It never authorizes success effects.
+		return d.storage.Put(bucketTask, task.ID, candidate)
+	}()
+	if err != nil {
 		return false, err
 	}
-	// Delete removes membership before waiting for this persistence guard.
-	// Its later durable deletion wins even if our Put was already in flight.
-	if d.closed.Load() || d.getTask(task.ID) != task {
+	if candidate == nil {
+		return false, nil
+	}
+
+	// Release status before reacquiring main. Delete may have removed membership
+	// while the Put was in flight; Pause/requeue may also have advanced the run.
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	task.statusLock.Lock()
+	defer task.statusLock.Unlock()
+	if d.closed.Load() || d.getTaskLocked(task.ID) != task || task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation {
 		return false, nil
 	}
 	task.dataLock.Lock()
