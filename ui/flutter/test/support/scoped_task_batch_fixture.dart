@@ -10,8 +10,9 @@ class ScopedBatchFixture {
   late StreamSubscription<HttpRequest> subscription;
   String dataset = 'a' * 32;
   String mode = 'success';
-  bool persistent = true, unsupportedPreflight = false;
+  bool persistent = true, unsupportedPreflight = false, verified = false;
   Completer<void>? postGate;
+  int inFlight = 0;
   final requests = <Map<String, dynamic>>[];
   final receipts = <String, Map<String, dynamic>>{};
   Future<void> Function(HttpRequest)? override;
@@ -24,19 +25,24 @@ class ScopedBatchFixture {
   Future<void> start() async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     subscription = server.listen((req) async {
-      req.response.persistentConnection = false;
-      final text = await utf8.decoder.bind(req).join();
-      requests.add({
-        'method': req.method,
-        'uri': req.uri,
-        'body': text.isEmpty ? null : jsonDecode(text),
-        'token': req.headers.value('X-Api-Token')
-      });
-      if (override != null) {
-        await override!(req);
-        return;
+      inFlight++;
+      try {
+        req.response.persistentConnection = false;
+        final text = await utf8.decoder.bind(req).join();
+        requests.add({
+          'method': req.method,
+          'uri': req.uri,
+          'body': text.isEmpty ? null : jsonDecode(text),
+          'token': req.headers.value('X-Api-Token')
+        });
+        if (override != null) {
+          await override!(req);
+          return;
+        }
+        await handle(req);
+      } finally {
+        inFlight--;
       }
-      await handle(req);
     });
     init();
   }
@@ -44,6 +50,7 @@ class ScopedBatchFixture {
   void reset() {
     dataset = 'a' * 32;
     mode = 'success';
+    verified = false;
     persistent = true;
     unsupportedPreflight = false;
     postGate = null;
@@ -85,7 +92,8 @@ class ScopedBatchFixture {
         'scopeVersion': 1,
         'datasetId': domain ?? dataset,
         'namespace': 'task-batch.create/v1',
-        'operation': operation
+        'operation': operation,
+        if (verified) 'capability': 'http-sha256-completion/v1'
       };
   Future<void> respond(HttpRequest req, Object? data,
       {int status = 200, int code = 0, String msg = ''}) async {
@@ -128,7 +136,28 @@ class ScopedBatchFixture {
       });
       return;
     }
-    final prefix = '/api/v1/datasets/$dataset/task-batches/v1/operations';
+    final root = '/api/v1/datasets/$dataset/verified-http/v1';
+    if (path == '$root/capability' && verified) {
+      if (unsupportedPreflight) {
+        req.response.statusCode = 404;
+        req.response.write('<html>old core</html>');
+        await req.response.close();
+      } else {
+        await respond(req, {
+          'scopeVersion': 1,
+          'datasetId': dataset,
+          'capability': 'http-sha256-completion/v1',
+          'requestVersion': 1,
+          'projectionVersion': 1,
+          'supported': true,
+          'methods': {'create': 'POST', 'query': 'GET', 'cancel': 'POST'}
+        });
+      }
+      return;
+    }
+    final prefix = verified
+        ? '$root/operations'
+        : '/api/v1/datasets/$dataset/task-batches/v1/operations';
     if (path != prefix && !path.startsWith('$prefix/')) {
       await respond(req, null,
           status: 409, code: 1000, msg: 'dataset_mismatch');
@@ -149,8 +178,9 @@ class ScopedBatchFixture {
     final body = requests.last['body'] as Map?;
     final op = body?['operationId'] as String? ?? 'cancel';
     if (postGate != null) await postGate!.future;
-    receipts[op] =
-        receipt(op, state: mode == 'partial' ? 'pending' : 'settled');
+    receipts[op] = receipt(op,
+        state: mode == 'partial' && !verified ? 'pending' : 'settled',
+        count: verified ? 1 : 2);
     if (mode == 'lostAck') {
       final socket = await req.response.detachSocket(writeHeaders: false);
       socket.destroy();

@@ -11,6 +11,8 @@ import '../../api/api.dart';
 import '../../api/model/request.dart';
 import '../../api/model/resolve_task.dart';
 import '../../api/model/task.dart';
+import '../modules/task/views/http_completion_status.dart';
+import '../modules/task/views/http_task_retry_button.dart';
 import '../../api/model/task_stats.dart';
 import '../../util/message.dart';
 import '../../util/util.dart';
@@ -42,12 +44,14 @@ class BuildTaskListView extends GetView {
   final List<Task> tasks;
   final List<String> selectedTaskIds;
   final bool macos;
+  final Map<String, HttpCompletionView> httpCompletions;
 
   const BuildTaskListView({
     Key? key,
     required this.tasks,
     required this.selectedTaskIds,
     this.macos = false,
+    this.httpCompletions = const {},
   }) : super(key: key);
 
   @override
@@ -87,6 +91,13 @@ class BuildTaskListView extends GetView {
   }
 
   Widget item(BuildContext context, Task task) {
+    final appController = Get.find<AppController>();
+    final taskController = Get.find<TaskController>();
+    final taskListController = macos
+        ? Get.find<MacTaskListController>()
+        : taskController.tabIndex.value == 0
+            ? Get.find<TaskDownloadingController>()
+            : Get.find<TaskDownloadedController>();
     bool isDone() {
       return task.status == Status.done;
     }
@@ -353,22 +364,33 @@ class BuildTaskListView extends GetView {
           );
         } else {
           list.add(
-            IconButton(
-              icon: const Icon(Icons.play_arrow),
-              onPressed: () async {
-                try {
-                  if (task.handoff?.blocked == true) {
-                    final result = await Get.find<AppController>()
-                        .checkBrowserHandoff(task);
-                    showMessage('浏览器交接', result.message);
-                  } else {
-                    await continueTask(task.id);
-                  }
-                } catch (e) {
-                  showErrorMessage(e);
-                }
-              },
-            ),
+            task.protocol == Protocol.http &&
+                    task.status == Status.error &&
+                    task.handoff?.blocked != true
+                ? HttpTaskRetryButton(
+                    key: ValueKey('retry-${task.id}'),
+                    task: task,
+                    legacyContinue: () => continueTask(task.id),
+                    refresh: () async {
+                      await taskListController.getTasksState();
+                    },
+                    notice: (message) => showMessage('重试', message))
+                : IconButton(
+                    icon: const Icon(Icons.play_arrow),
+                    onPressed: () async {
+                      try {
+                        if (task.handoff?.blocked == true) {
+                          final result = await Get.find<AppController>()
+                              .checkBrowserHandoff(task);
+                          showMessage('浏览器交接', result.message);
+                        } else {
+                          await continueTask(task.id);
+                        }
+                      } catch (e) {
+                        showErrorMessage(e);
+                      }
+                    },
+                  ),
           );
         }
       }
@@ -460,14 +482,6 @@ class BuildTaskListView extends GetView {
         return "${twoDigits(duration.inMinutes.remainder(60))}:${twoDigits(duration.inSeconds.remainder(60))}";
       }
     }
-
-    final appController = Get.find<AppController>();
-    final taskController = Get.find<TaskController>();
-    final taskListController = macos
-        ? Get.find<MacTaskListController>()
-        : taskController.tabIndex.value == 0
-            ? Get.find<TaskDownloadingController>()
-            : Get.find<TaskDownloadedController>();
 
     // Filter selected task ids that are still in the task list
     filterSelectedTaskIds(Iterable<String> selectedTaskIds) => selectedTaskIds
@@ -652,7 +666,9 @@ class BuildTaskListView extends GetView {
     if (macos && Util.isMacos()) {
       final colors = MacColors.of(context);
       final extraction = getExtractionStatusText();
-      final status = task.handoff?.blocked == true
+      final httpCompletion = HttpCompletionView.forTask(task) ??
+          (task.protocol == Protocol.http ? httpCompletions[task.id] : null);
+      var status = task.handoff?.blocked == true
           ? task.handoff!.label
           : isDone()
               ? 'downloaded'.tr
@@ -675,6 +691,9 @@ class BuildTaskListView extends GetView {
                               : (Get.locale?.languageCode == 'zh'
                                   ? '准备中'
                                   : 'Ready');
+      if (task.handoff?.blocked != true && httpCompletion != null) {
+        status = httpCompletion.labelFor(task.status);
+      }
       void selectRow({bool pointer = false}) {
         (taskListController as MacTaskListController).selectRow(
           tasks.map<String>((Task item) => item.id).toList(),
@@ -865,6 +884,18 @@ class BuildTaskListView extends GetView {
                           icon: const Icon(Icons.folder_open, size: 18),
                           onPressed: task.explorer,
                         )
+                      else if (task.protocol == Protocol.http &&
+                          task.status == Status.error &&
+                          task.handoff?.blocked != true)
+                        HttpTaskRetryButton(
+                            key: ValueKey('retry-${task.id}'),
+                            task: task,
+                            color: isSelect() ? Colors.white : colors.secondary,
+                            legacyContinue: () => continueTask(task.id),
+                            refresh: () async {
+                              await taskListController.getTasksState();
+                            },
+                            notice: (message) => showMessage('重试', message))
                       else
                         IconButton(
                           color: isSelect() ? Colors.white : colors.secondary,

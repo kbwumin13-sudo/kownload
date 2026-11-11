@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'http_completion_status.dart';
+
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/task.dart';
 import '../../../../api/model/task_batch_catalog.dart';
@@ -170,7 +172,10 @@ class _TaskBatchGroupsState extends State<TaskBatchGroups> {
         Status.error: '任务出错',
         Status.done: '已完成'
       };
-      detail = '${states[task.status]} · 已下载 ${task.progress.downloaded} 字节 · '
+      final completion =
+          HttpCompletionView.forTask(task, expectedDataset: _dataset);
+      final state = completion?.labelFor(task.status) ?? states[task.status];
+      detail = '$state · 已下载 ${task.progress.downloaded} 字节 · '
           '${(task.meta.res?.size ?? 0) <= 0 ? '大小未知' : '共 ${task.meta.res!.size} 字节'}';
     }
     return ListTile(

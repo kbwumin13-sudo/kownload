@@ -1,3 +1,4 @@
+import 'dart:async' as async;
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -21,6 +22,8 @@ import 'model/result.dart';
 import 'model/switch_extension.dart';
 import 'model/task.dart';
 import 'model/task_stats.dart';
+import 'model/task_batch_catalog.dart';
+import 'model/http_recovery.dart';
 import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
@@ -122,9 +125,18 @@ class ActiveApiSnapshot {
   const ActiveApiSnapshot._(
       this.network, this.address, this.taskBatchRoute, this._transport);
   bool get isCurrent => identical(_activeApiSnapshot, this);
+
+  /// RAM association with the actual initialized client, including transports
+  /// with no Mac host route. Not authentication or proof of dataset identity.
+  /// Reinit keeps this key if the legacy singleton keeps the same client;
+  /// isCurrent still gates every request and the dataset is read separately.
+  Object get httpRecoveryScope => _transport;
 }
 
 ActiveApiSnapshot? _activeApiSnapshot;
+final _activeApiChanges = ValueNotifier<ActiveApiSnapshot?>(null);
+ValueListenable<ActiveApiSnapshot?> get activeApiSnapshotChanges =>
+    _activeApiChanges;
 ActiveApiSnapshot? get activeApiSnapshot => _activeApiSnapshot;
 
 void init(String network, String address, String apiToken,
@@ -140,13 +152,16 @@ void init(String network, String address, String apiToken,
       _client.address,
       matches && taskBatchRoute?.supported == true ? taskBatchRoute : null,
       _client);
+  _activeApiChanges.value = _activeApiSnapshot;
 }
 
 /// Only the frozen read endpoints and dataset-scoped three actions. No redirect
 /// replay, arbitrary URL, legacy POST fallback or global parser changes.
 Future<Response<dynamic>> scopedTaskBatchRequest(
     ActiveApiSnapshot snapshot, String method, String path,
-    {Map<String, dynamic>? data, Map<String, dynamic>? queryParameters}) async {
+    {Map<String, dynamic>? data,
+    Map<String, dynamic>? queryParameters,
+    CancelToken? cancelToken}) async {
   var allowed = false;
   if (method == 'GET' && data == null) {
     if (path == '/api/v1/dataset/identity' && queryParameters == null) {
@@ -164,8 +179,18 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
                   q['cursor'].length <= 65536));
     }
   }
+  final cap =
+      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/verified-http/v1/capability$')
+          .firstMatch(path);
+  if (cap != null &&
+      cap[0] == path &&
+      method == 'GET' &&
+      data == null &&
+      queryParameters == null) {
+    allowed = true;
+  }
   final match = RegExp(
-          r'^/api/v1/datasets/([0-9a-f]{32})/task-batches/v1/operations(?:/([^/]+)(/cancel)?)?$')
+          r'^/api/v1/datasets/([0-9a-f]{32})/(?:task-batches/v1|verified-http/v1)/operations(?:/([^/]+)(/cancel)?)?$')
       .firstMatch(path);
   if (match != null && match[0] == path && queryParameters == null) {
     if (match[2] == null) {
@@ -192,6 +217,109 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
     return await snapshot._transport.dio.request(path,
         data: data,
         queryParameters: queryParameters,
+        cancelToken: cancelToken,
+        options: Options(method: method, followRedirects: false));
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
+}
+
+/// Only the live completion stream. No query, recovery header or redirect.
+Future<Response<dynamic>> verifiedCompletionEventsRequest(
+    ActiveApiSnapshot snapshot,
+    String datasetId,
+    CancelToken cancelToken) async {
+  if (RegExp(r'^[0-9a-f]{32}$').stringMatch(datasetId) != datasetId) {
+    throw ArgumentError('invalid_completion_dataset');
+  }
+  if (!snapshot.isCurrent || snapshot.taskBatchRoute?.supported != true) {
+    throw StateError('completion_api_changed');
+  }
+  final pending = snapshot._transport.dio.get<ResponseBody>(
+      '/api/v1/datasets/$datasetId/verified-http/v1/completion-events',
+      cancelToken: cancelToken,
+      options: Options(
+          responseType: ResponseType.stream,
+          followRedirects: false,
+          receiveTimeout: Duration.zero,
+          headers: {'Accept': 'text/event-stream'}));
+  try {
+    // A local header deadline; the established stream may be idle indefinitely.
+    return await pending.timeout(const Duration(seconds: 10));
+  } on async.TimeoutException {
+    cancelToken.cancel('completion_headers_timeout');
+    // Keep the real request fence until cancellation/late response settles.
+    try {
+      final late = await pending;
+      final raw = late.data;
+      if (raw != null) {
+        await raw.stream.listen((_) {}, onError: (Object _) {}).cancel();
+      }
+    } catch (_) {}
+    throw ConnectionException('completion_headers_timeout');
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
+}
+
+/// Only the versioned recovery read/retry routes, on the initialized client.
+/// A response error remains data; redirects never replay a retry POST.
+Future<Response<dynamic>> httpRecoveryRequest(
+    ActiveApiSnapshot snapshot, String method, String path,
+    {Map<String, dynamic>? data,
+    Map<String, dynamic>? queryParameters,
+    CancelToken? cancelToken}) async {
+  var allowed = method == 'GET' &&
+      path == '/api/v1/dataset/identity' &&
+      data == null &&
+      queryParameters == null;
+  final match = RegExp(
+          r'^/api/v1/datasets/[0-9a-f]{32}/tasks/[A-Za-z0-9_-]{1,128}/recovery/v1(/retry)?$')
+      .firstMatch(path);
+  if (match != null && match[0] == path) {
+    if (method == 'GET' && match[1] == null && data == null) {
+      allowed = queryParameters == null;
+      if (queryParameters != null && queryParameters.length == 3) {
+        final revision = queryParameters['expectedSourceRevision'];
+        final value = revision is String ? int.tryParse(revision) : null;
+        if (value != null && '$value' == revision) {
+          try {
+            final action = HttpRetryAction.fromJson({
+              'version': 1,
+              'decision': 'retry',
+              ...queryParameters,
+              'expectedSourceRevision': value
+            });
+            allowed =
+                action.toQuery().keys.toSet().containsAll(queryParameters.keys);
+          } on FormatException {
+            allowed = false;
+          }
+        }
+      }
+    } else if (method == 'POST' &&
+        match[1] == '/retry' &&
+        queryParameters == null &&
+        data != null) {
+      try {
+        HttpRetryAction.fromJson(data);
+        allowed = true;
+      } on FormatException {
+        allowed = false;
+      }
+    }
+  }
+  if (!allowed) throw ArgumentError('invalid_http_recovery_endpoint');
+  if (!snapshot.isCurrent) {
+    throw StateError('http_recovery_route_changed');
+  }
+  try {
+    return await snapshot._transport.dio.request(path,
+        data: data,
+        queryParameters: queryParameters,
+        cancelToken: cancelToken,
         options: Options(method: method, followRedirects: false));
   } on DioException catch (error) {
     if (error.response != null) return error.response!;
@@ -311,10 +439,13 @@ Future<void> patchTask(String id, ResolveTask patchTask) async {
 }
 
 Future<List<Task>> getTasks(List<Status> statuses) async {
-  return _parse<List<Task>>(
+  final snapshot = activeApiSnapshot;
+  final tasks = await _parse<List<Task>>(
       () => _client.dio.get(
           "/api/v1/tasks?${statuses.map((e) => "status=${e.name}").join("&")}"),
       (data) => (data as List).map((e) => Task.fromJson(e)).toList());
+  await _bindCompletionViews(snapshot, tasks);
+  return tasks;
 }
 
 /// Download diagnostics; older cores return only a connection list.
@@ -475,4 +606,36 @@ Future<String?> getCoreVersion() async {
     final version = data['version'];
     return version is String ? version : null;
   });
+}
+
+// Ordinary/legacy lists make no additional request. A decorated response is
+// displayed only after the actual client confirms its logical dataset.
+Future<void> _bindCompletionViews(
+    ActiveApiSnapshot? snapshot, List<Task> tasks) async {
+  if (tasks.every((task) => task.completionView == null) ||
+      snapshot?.taskBatchRoute?.supported != true ||
+      !snapshot!.isCurrent) {
+    return;
+  }
+  try {
+    final response = await scopedTaskBatchRequest(
+        snapshot, 'GET', '/api/v1/dataset/identity');
+    final body = response.data;
+    if (!snapshot.isCurrent ||
+        response.statusCode != 200 ||
+        body is! Map ||
+        body['code'] != 0 ||
+        body['data'] is! Map) {
+      return;
+    }
+    final identity =
+        DatasetIdentity.fromJson(Map<String, dynamic>.from(body['data']));
+    if (!identity.supported) return;
+    for (final task in tasks) {
+      task.completionView?.bindToDataset(identity.datasetId,
+          isCurrent: () => snapshot.isCurrent);
+    }
+  } catch (_) {
+    // Keep the Task list usable, with completion explicitly unconfirmed.
+  }
 }
