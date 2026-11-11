@@ -3,12 +3,14 @@ package rest
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -287,39 +289,227 @@ func TestPatchTaskNotFound(t *testing.T) {
 }
 
 func TestPauseAllAndContinueALLTasks(t *testing.T) {
-	doTest(func() {
-		cfg, err := Downloader.GetConfig()
-		if err != nil {
-			t.Fatal(err)
-		}
+	for _, kind := range []model.Storage{model.StorageMem, model.StorageBolt} {
+		t.Run(fmt.Sprint(kind), func(t *testing.T) {
+			output := t.TempDir()
+			_, endpoint, core, _ := datasetServer(t, kind, "")
+			cfg, err := core.GetConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			total := cfg.MaxRunning + 2
+			payload := bytes.Repeat([]byte("pause-all-body!\n"), 2048)
+			gate := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(gate) }) }
+			var mu sync.Mutex
+			active := map[string]int{}
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				entered := false
+				defer func() {
+					if entered {
+						mu.Lock()
+						active[r.URL.Path]--
+						mu.Unlock()
+					}
+				}()
+				writer := &pauseAllBodyWriter{ResponseWriter: w, request: r, gate: gate, entered: func() {
+					if !entered {
+						entered = true
+						mu.Lock()
+						active[r.URL.Path]++
+						mu.Unlock()
+					}
+				}}
+				// HEAD and a one-byte metadata probe complete normally. Actual
+				// download bodies stay incomplete until the test releases them.
+				http.ServeContent(writer, r, filepath.Base(r.URL.Path), time.Unix(1, 0), bytes.NewReader(payload))
+			}))
+			defer source.Close()
+			defer release()
+			transport := &http.Transport{}
+			defer transport.CloseIdleConnections()
+			client := &http.Client{Transport: transport}
+			call := func(method, path string, value, dest any) {
+				t.Helper()
+				var body io.Reader
+				if value != nil {
+					raw, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					body = bytes.NewReader(raw)
+				}
+				req, err := http.NewRequest(method, endpoint+path, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				var result model.Result[json.RawMessage]
+				if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+					t.Fatal(err)
+				}
+				if resp.StatusCode != http.StatusOK || result.Code != model.CodeOk {
+					t.Fatalf("%s %s: HTTP %d code %v", method, path, resp.StatusCode, result.Code)
+				}
+				if dest != nil {
+					if err := json.Unmarshal(result.Data, dest); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			ids := map[string]string{}
+			read := func() []*download.Task {
+				var rows []*download.Task
+				call(http.MethodGet, "/api/v1/tasks", nil, &rows)
+				if len(rows) != len(ids) {
+					t.Fatalf("own task count=%d want=%d", len(rows), len(ids))
+				}
+				for _, row := range rows {
+					if _, ok := ids[row.ID]; !ok {
+						t.Fatalf("foreign task %s", row.ID)
+					}
+				}
+				return rows
+			}
+			wait := func(stage string, predicate func([]*download.Task) bool) []*download.Task {
+				t.Helper()
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					rows := read()
+					if predicate(rows) {
+						for _, row := range rows {
+							t.Logf("%s storage=%v core=%p id=%s status=%s progress=%+v", stage, kind, core, row.ID, row.Status, row.Progress)
+						}
+						return rows
+					}
+					if time.Now().After(deadline) {
+						for _, row := range rows {
+							t.Logf("%s id=%s status=%s progress=%+v", stage, row.ID, row.Status, row.Progress)
+						}
+						t.Fatalf("%s did not reach expected state", stage)
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			for i := 0; i < total; i++ {
+				name := fmt.Sprintf("task-%d.bin", i)
+				var id string
+				call(http.MethodPost, "/api/v1/tasks", &model.CreateTask{Req: &base.Request{URL: source.URL + "/" + name}, Opts: &base.Options{Path: output, Name: name, Extra: map[string]any{"connections": 1}}}, &id)
+				if _, ok := ids[id]; ok || id == "" {
+					t.Fatalf("invalid/duplicate task ID %q", id)
+				}
+				ids[id] = name
 
-		createAndPause := func() {
-			taskId := httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", createReq)
-			time.Sleep(time.Millisecond * 5)
-			httpRequestCheckOk[*download.Task](http.MethodPut, "/api/v1/tasks/"+taskId+"/pause", nil)
-		}
+				// Establish an unfinished live body before pausing each owned task.
+				wait("started-before-pause", func(rows []*download.Task) bool { mu.Lock(); defer mu.Unlock(); return active["/"+name] > 0 })
 
-		total := cfg.MaxRunning + 2
-		for i := 0; i < total; i++ {
-			createAndPause()
-		}
-		time.Sleep(time.Millisecond * 50)
+				call(http.MethodPut, "/api/v1/tasks/"+id+"/pause", nil, nil)
 
-		// continue all
-		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/continue", nil)
-		time.Sleep(time.Millisecond * 100)
-		tasks := httpRequestCheckOk[[]*download.Task](http.MethodGet, fmt.Sprintf("/api/v1/tasks?status=%s", base.DownloadStatusRunning), nil)
-		if len(tasks) != cfg.MaxRunning {
-			t.Errorf("ContinueAllTasks() got = %v, want %v", len(tasks), cfg.MaxRunning)
-		}
-		// pause all
-		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/pause", nil)
-		time.Sleep(time.Millisecond * 100)
-		tasks = httpRequestCheckOk[[]*download.Task](http.MethodGet, fmt.Sprintf("/api/v1/tasks?status=%s", base.DownloadStatusPause), nil)
-		if len(tasks) != total {
-			t.Errorf("PauseAllTasks() got = %v, want %v", len(tasks), total)
-		}
-	})
+				wait("individual-pause", func(rows []*download.Task) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					for _, row := range rows {
+						if row.ID == id {
+							return row.Status == base.DownloadStatusPause && active["/"+name] == 0
+						}
+					}
+					return false
+				})
+
+			}
+			// Keep all bodies gated while checking running slots and queued tasks.
+			call(http.MethodPut, "/api/v1/tasks/continue", nil, nil)
+			wait("continue-all", func(rows []*download.Task) bool {
+				running, queued := 0, 0
+				mu.Lock()
+				defer mu.Unlock()
+				for _, row := range rows {
+					switch row.Status {
+					case base.DownloadStatusRunning:
+						if active["/"+ids[row.ID]] == 0 {
+							return false
+						}
+						running++
+					case base.DownloadStatusWait:
+						queued++
+					default:
+						return false
+					}
+				}
+				return running == cfg.MaxRunning && queued == 2
+			})
+			call(http.MethodPut, "/api/v1/tasks/pause", nil, nil)
+
+			wait("pause-all", func(rows []*download.Task) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, row := range rows {
+					if row.Status != base.DownloadStatusPause || active["/"+ids[row.ID]] != 0 {
+						return false
+					}
+				}
+				return len(rows) == total
+			})
+
+			release()
+			call(http.MethodPut, "/api/v1/tasks/continue", nil, nil)
+			rows := wait("all-done", func(rows []*download.Task) bool {
+				for _, row := range rows {
+					if row.Status != base.DownloadStatusDone {
+						return false
+					}
+				}
+				return len(rows) == total
+			})
+			expected := sha256.Sum256(payload)
+			for _, row := range rows {
+				raw, err := os.ReadFile(filepath.Join(output, ids[row.ID]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(raw) != len(payload) || sha256.Sum256(raw) != expected {
+					t.Fatalf("task %s file size/hash mismatch", row.ID)
+				}
+			}
+		})
+	}
+}
+
+// pauseAllBodyWriter makes the test's unfinished-work premise explicit without
+// altering the downloader: cancellation ends an active source request, and the
+// final continue is allowed to finish the same files through normal HTTP Range.
+type pauseAllBodyWriter struct {
+	http.ResponseWriter
+	request *http.Request
+	gate    <-chan struct{}
+	entered func()
+}
+
+func (w *pauseAllBodyWriter) Write(p []byte) (int, error) {
+	if len(p) <= 1 {
+		return w.ResponseWriter.Write(p)
+	}
+	n, err := w.ResponseWriter.Write(p[:1])
+	if err != nil {
+		return n, err
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	w.entered()
+	select {
+	case <-w.gate:
+		more, err := w.ResponseWriter.Write(p[n:])
+		return n + more, err
+	case <-w.request.Context().Done():
+		return n, w.request.Context().Err()
+	}
 }
 
 func TestDeleteTask(t *testing.T) {
