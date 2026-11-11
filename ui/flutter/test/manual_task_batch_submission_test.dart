@@ -91,6 +91,7 @@ void main() {
   late JournalBox journalBox;
   const urls = 'https://fixture.invalid/one\nhttps://fixture.invalid/two';
   int singles = 0;
+  TextEditingController? urlInput;
   Completer<String>? singleGate;
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
@@ -160,6 +161,10 @@ void main() {
               }))
     ]));
     await t.pumpAndSettle();
+    urlInput = t
+        .widget<TextFormField>(
+            find.byKey(const ValueKey('panel-download-input')))
+        .controller;
     await t.enterText(find.byKey(const ValueKey('panel-download-input')), urls);
     await t.pump();
   }
@@ -169,10 +174,206 @@ void main() {
     await t.pump();
   }
 
-  String input(WidgetTester t) => t
-      .widget<TextFormField>(find.byKey(const ValueKey('panel-download-input')))
-      .controller!
-      .text;
+  String input(WidgetTester t) => urlInput!.text;
+  Future<void> checksum(WidgetTester t) async {
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'https://fixture.invalid/single');
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, 'A' * 64);
+  }
+
+  Future<void> confirmChecksum(WidgetTester t) async {
+    await t.tap(find.text('confirm'.tr));
+    await t.pump();
+  }
+
+  testWidgets(
+      'verified single journal ACK gates exactly one dedicated POST, no legacy resolve/create',
+      (t) async {
+    f.verified = true;
+    journalBox.gate = Completer<void>();
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t, () => journalBox.started.isCompleted);
+    expect(f.posts, 0);
+    expect(singles, 0);
+    journalBox.gate!.complete();
+    await spin(t,
+        () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    expect(journalBox.puts, 1);
+    expect(singles, 0);
+    final request = f.requests.firstWhere((r) => r['method'] == 'POST');
+    expect(
+        (request['uri'] as Uri).path, contains('/verified-http/v1/operations'));
+    expect(request['body']['integrity'],
+        {'algorithm': 'sha256', 'expectedSHA256': 'a' * 64});
+    expect(input(t), '');
+  });
+  for (final outcome in [
+    'lostAck',
+    'html',
+    'partial',
+    'redirect',
+    'wrongDomain'
+  ]) {
+    testWidgets(
+        'verified $outcome keeps original reference; changed digest/options query only',
+        (t) async {
+      f.verified = true;
+      f.mode = outcome;
+      await checksum(t);
+      await confirmChecksum(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      expect(journalBox.puts, 1);
+      expect(singles, 0);
+      expect(input(t), 'https://fixture.invalid/single');
+      final digest = find.byKey(const ValueKey('http-expected-sha256'));
+      if (digest.evaluate().isEmpty) {
+        await t.tap(find.text('更多选项'));
+        await t.pumpAndSettle();
+      }
+      await t.ensureVisible(digest);
+      await t.enterText(digest, 'b' * 64);
+      final directory = find.byType(DirectorySelector);
+      t.widget<DirectorySelector>(directory).controller.text =
+          '/tmp/changed-fixture-only';
+      f.mode = 'success';
+      final gets = f.scopedGets;
+      final query = find.byKey(const ValueKey('manual-batch-query'));
+      await t.ensureVisible(query);
+      await t.tap(query);
+      await spin(
+          t,
+          () =>
+              f.scopedGets > gets &&
+              find.text('原批次已确认，当前修改后的草稿已保留。').evaluate().isNotEmpty);
+      expect(f.posts, 1);
+      expect(journalBox.puts, 1);
+      expect(singles, 0);
+      expect(t.widget<TextFormField>(digest).controller!.text, 'b' * 64);
+      expect(input(t), 'https://fixture.invalid/single');
+      expect(
+          f.requests.where(
+              (r) => (r['uri'] as Uri).path.contains('/task-batches/v1')),
+          isEmpty);
+    });
+  }
+  testWidgets(
+      'clearing checksum after unknown ACK still only queries original verified operation',
+      (t) async {
+    f.verified = true;
+    f.mode = 'lostAck';
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t,
+        () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, '');
+    f.mode = 'success';
+    final gets = f.scopedGets;
+    await confirmChecksum(t);
+    await spin(
+        t,
+        () =>
+            f.scopedGets > gets &&
+            !Get.find<CreateController>().isConfirming.value);
+    expect(f.posts, 1);
+    expect(singles, 0);
+    expect(journalBox.puts, 1);
+    expect(input(t), 'https://fixture.invalid/single');
+    expect(find.text('原批次已确认，当前修改后的草稿已保留。'), findsOneWidget);
+    expect(
+        f.requests
+            .where((r) => (r['uri'] as Uri).path.contains('/task-batches/v1')),
+        isEmpty);
+  });
+  testWidgets(
+      'verified stop while POST hangs permits original GET; late response cannot clear edited digest',
+      (t) async {
+    f.verified = true;
+    f.postGate = Completer<void>();
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t, () => f.posts == 1);
+    final stop = find.byKey(const ValueKey('manual-batch-stop'));
+    await t.ensureVisible(stop);
+    await t.tap(stop);
+    await t.pump();
+    expect(Get.find<CreateController>().isConfirming.value, false);
+    expect(f.postGate!.isCompleted, false);
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, 'b' * 64);
+    final gets = f.scopedGets;
+    final query = find.byKey(const ValueKey('manual-batch-query'));
+    await t.ensureVisible(query);
+    await t.tap(query);
+    await spin(
+        t,
+        () =>
+            f.scopedGets > gets &&
+            find.text('批次结果尚未确认，请查询原批次。').evaluate().isNotEmpty);
+    expect(f.posts, 1);
+    expect(f.postGate!.isCompleted, false);
+    f.postGate!.complete();
+    await spin(t, () => f.inFlight == 0 && f.receipts.isNotEmpty);
+    await t.pumpAndSettle();
+    expect(input(t), 'https://fixture.invalid/single');
+    expect(t.widget<TextFormField>(digest).controller!.text, 'b' * 64);
+    expect(Get.find<CreateController>().isConfirming.value, false);
+    expect(f.posts, 1);
+  });
+  testWidgets(
+      'verified digest edit releases hung confirmation without releasing real Hive fence',
+      (t) async {
+    f.verified = true;
+    journalBox.gate = Completer<void>();
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t, () => journalBox.started.isCompleted);
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await t.ensureVisible(digest);
+    await t.enterText(digest, 'b' * 64);
+    await t.pump();
+    expect(Get.find<CreateController>().isConfirming.value, false);
+    expect(journalBox.gate!.isCompleted, false);
+    expect(f.posts, 0);
+    journalBox.gate!.complete();
+    await spin(t, () => journalBox.settled.isCompleted);
+    expect(f.posts, 0);
+    expect(journalBox.puts, 1);
+    final query = find.byKey(const ValueKey('manual-batch-query'));
+    await t.ensureVisible(query);
+    await t.tap(query);
+    await spin(t, () => find.text('批次结果尚未确认，请查询原批次。').evaluate().isNotEmpty);
+    expect(f.posts, 0);
+    expect(t.widget<TextFormField>(digest).controller!.text, 'b' * 64);
+  });
+  testWidgets(
+      'verified dataset change after journal ACK prevents POST and retains reference',
+      (t) async {
+    f.verified = true;
+    journalBox.gate = Completer<void>();
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t, () => journalBox.started.isCompleted);
+    f.dataset = 'c' * 32;
+    journalBox.gate!.complete();
+    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    expect(f.posts, 0);
+    expect(journalBox.puts, 1);
+    expect(singles, 0);
+    expect(input(t), 'https://fixture.invalid/single');
+    expect(find.byKey(const ValueKey('manual-batch-query')), findsOneWidget);
+  });
   for (final entry in {
     'unsupported receiver': 'https://fixture.invalid/single',
     'multiline': urls,
@@ -183,6 +384,10 @@ void main() {
     testWidgets(
         'explicit checksum ${entry.key} sends no legacy request or journal write',
         (t) async {
+      if (entry.key == 'unsupported receiver') {
+        f.verified = true;
+        f.unsupportedPreflight = true;
+      }
       await mount(t);
       await t.enterText(
           find.byKey(const ValueKey('panel-download-input')), entry.value);
@@ -193,13 +398,18 @@ void main() {
       await t.enterText(digest, 'A' * 64);
       await t.tap(find.text('confirm'.tr));
       await t.pump();
+      if (entry.key == 'unsupported receiver') {
+        await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+        expect(f.posts, 0);
+      } else {
+        expect(f.requests, isEmpty);
+      }
       expect(Get.find<CreateController>().isConfirming.value, isFalse);
-      expect(f.requests, isEmpty);
       expect(journalBox.puts, 0);
       expect(singles, 0);
       expect(
           find.text(entry.key == 'unsupported receiver'
-              ? '当前连接的 SHA-256 校验能力尚未确认，未提交任务。'
+              ? '当前下载服务未确认 SHA-256 校验能力，未提交任务。'
               : 'SHA-256 校验目前仅支持手动单链接 HTTP(S)，未提交任务。'),
           findsOneWidget);
     });

@@ -1,4 +1,5 @@
 import '../../../../api/model/task.dart';
+import '../../../../api/model/http_completion_projection.dart';
 
 enum HttpCompletionPhase {
   unknown,
@@ -10,13 +11,14 @@ enum HttpCompletionPhase {
   committed,
 }
 
-/// Read-only view input. A future wire adapter must validate its own scope and
-/// Task association; private filesystem completion records are not a UI DTO.
+/// Read-only display input; wire projections require current scope and Task
+/// association. Private filesystem completion records are not a UI DTO.
 class HttpCompletionView {
   static const capability = 'http-sha256-completion/v1';
   final HttpCompletionPhase phase;
+  final String? errorCategory;
 
-  const HttpCompletionView(this.phase);
+  const HttpCompletionView(this.phase, {this.errorCategory});
 
   factory HttpCompletionView.fromProjection({
     required Object? version,
@@ -39,7 +41,30 @@ class HttpCompletionView {
     });
   }
 
+  factory HttpCompletionView.fromTaskProjection(
+      HttpCompletionProjection projection) {
+    final phase = projection.available
+        ? HttpCompletionView.fromProjection(
+                version: 1, capability: capability, phase: projection.phase)
+            .phase
+        : HttpCompletionPhase.unknown;
+    return HttpCompletionView(phase,
+        errorCategory: projection.trustedErrorCategory);
+  }
+
   String labelFor(Status status) {
+    if (errorCategory != null) {
+      if (status == Status.done) return '校验完成状态未确认';
+      return switch (errorCategory) {
+        'integrity_mismatch' => 'SHA-256 不匹配',
+        'publish_conflict' => '目标文件已存在，未覆盖',
+        'cancelled' => '校验任务已取消',
+        'run_changed' => '校验运行状态已变化',
+        'io_error' => '校验或保存文件失败',
+        'unsupported_option' => '当前校验能力不支持此下载选项',
+        _ => '校验完成状态未确认',
+      };
+    }
     if (phase == HttpCompletionPhase.unknown) return '校验完成状态未确认';
     if (status == Status.done && phase != HttpCompletionPhase.committed) {
       return '校验完成状态未确认';
