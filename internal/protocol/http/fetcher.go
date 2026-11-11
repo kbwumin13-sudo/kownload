@@ -328,6 +328,7 @@ type Fetcher struct {
 	redirectMethod       string // In-memory final-method override; original request remains the fallback.
 	redirectDropBody     bool
 	redirectLock         sync.Mutex
+	readPublished        atomic.Pointer[PublishedReadStats]
 
 	// Lifecycle control
 	ctx    context.Context
@@ -2830,7 +2831,6 @@ func (f *Fetcher) phase(transferring int, cooling bool) string {
 
 func (f *Fetcher) Progress() fetcher.Progress {
 	f.connMu.Lock()
-	defer f.connMu.Unlock()
 	p := make(fetcher.Progress, 0)
 
 	total := int64(0)
@@ -2838,9 +2838,15 @@ func (f *Fetcher) Progress() fetcher.Progress {
 		total += f.resolveConn.Downloaded
 	}
 
+	active := int64(0)
 	for _, conn := range f.connections {
 		total += conn.Downloaded
+		if conn.State == connConnecting || conn.State == connDownloading {
+			active++
+		}
 	}
+	f.connMu.Unlock()
+	f.publishReadObservation(active)
 
 	p = append(p, total)
 	return p

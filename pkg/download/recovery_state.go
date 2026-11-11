@@ -44,6 +44,13 @@ type recoveryAction struct {
 	Finished       []string `json:"finished"`
 	State          string   `json:"state"`
 }
+type recoveryExplicitRetry struct {
+	Version        int    `json:"version"`
+	ActionID       string `json:"actionId"`
+	FromEpisode    string `json:"fromEpisode"`
+	ToEpisode      string `json:"toEpisode"`
+	SourceRevision uint64 `json:"sourceRevision"`
+}
 type recoveryRecord struct {
 	Version               int                    `json:"version"`
 	TaskID                string                 `json:"taskId"`
@@ -60,7 +67,10 @@ type recoveryRecord struct {
 	NotBefore             string                 `json:"notBefore,omitempty"`
 	NextAction            uint64                 `json:"nextAction"`
 	Actions               []recoveryAction       `json:"actions"`
+	LastExplicitRetry     *recoveryExplicitRetry `json:"lastExplicitRetry,omitempty"`
 }
+
+func supportedRecoveryVersion(version int) bool { return version == 1 || version == 2 }
 
 // The projection is shared with HTTP's capture/send checks. Pure owner tests
 // use a synthetic direct/empty-UA context; Core always supplies a captured D.
@@ -79,8 +89,21 @@ func recoverySourceHash(req *base.Request, defaults ...string) (string, error) {
 }
 func validRecoveryHash(hash string) bool { return transfer.ValidExecutionHash(hash) }
 func (r *recoveryRecord) valid(id string) bool {
-	if r.Version != 1 || r.TaskID != id || r.NotBefore != "" || r.Episode == "" || r.SourceRevision == 0 || !validRecoveryHash(r.SourceHash) || !validRecoveryHash(r.ExecutionDefaultsHash) || r.TotalUsed < 0 || r.TotalUsed > recoveryMaxTotal || r.TransportUsed < 0 || r.TransportUsed > recoveryMaxTransport || r.RefreshUsed != 0 || r.DeferralUsed != 0 || len(r.Actions) > recoveryMaxTotal {
+	if !supportedRecoveryVersion(r.Version) || r.TaskID != id || r.NotBefore != "" || r.Episode == "" || r.SourceRevision == 0 || !validRecoveryHash(r.SourceHash) || !validRecoveryHash(r.ExecutionDefaultsHash) || r.TotalUsed < 0 || r.TotalUsed > recoveryMaxTotal || r.TransportUsed < 0 || r.TransportUsed > recoveryMaxTransport || r.RefreshUsed != 0 || r.DeferralUsed != 0 || len(r.Actions) > recoveryMaxTotal {
 		return false
+	}
+	if r.Version == 1 && r.LastExplicitRetry != nil || r.Version == 2 && r.LastExplicitRetry == nil {
+		return false
+	}
+	if r.Version == 2 && (r.Generation == 0 || r.InitialAttempt.State == "ungranted" || r.InitialAttempt.State == "uncertain") {
+		return false
+	}
+	if last := r.LastExplicitRetry; last != nil {
+		// The receipt is historical. Later legitimate source/default CAS may
+		// advance SourceRevision without rewriting the original user action.
+		if last.Version != 1 || !operationIDPattern.MatchString(last.ActionID) || last.FromEpisode == "" || last.ToEpisode != r.Episode || last.FromEpisode == last.ToEpisode || last.SourceRevision == 0 || last.SourceRevision > r.SourceRevision {
+			return false
+		}
 	}
 	switch r.InitialAttempt.State {
 	case "ungranted", "uncertain":
@@ -163,16 +186,17 @@ func hasRecoveryMember(m []string, w string) bool {
 // This owner never takes Downloader/task locks from a protocol callback. Core
 // invalidates the atomic run fence before Pause/Delete/Close waits on protocol IO.
 type taskRecoveryOwner struct {
-	mu               sync.Mutex
-	store            AtomicStorage
-	taskID           string
-	record           recoveryRecord
-	active           atomic.Bool
-	closed           *atomic.Bool
-	token            transfer.RecoveryToken
-	runContext       context.Context // guarded by mu; runtime lease is tied to preparation cancellation
-	permits          map[uint64]map[string]*transfer.RecoveryPermit
-	verificationOnly bool // mu; verifier tokens cannot authorize transport work
+	mu                 sync.Mutex
+	store              AtomicStorage
+	taskID             string
+	record             recoveryRecord
+	active             atomic.Bool
+	closed             *atomic.Bool
+	token              transfer.RecoveryToken
+	runContext         context.Context // guarded by mu; runtime lease is tied to preparation cancellation
+	permits            map[uint64]map[string]*transfer.RecoveryPermit
+	retryAuthorization atomic.Pointer[recoveryRetryAuthorization]
+	verificationOnly   bool // mu; verifier tokens cannot authorize transport work
 }
 
 type recoveryReader interface {
@@ -195,7 +219,7 @@ func readRecovery(tx recoveryReader, id string) (Task, recoveryRecord, error) {
 	if e != nil {
 		return task, record, transfer.ErrRecoveryUnavailable
 	}
-	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || task.Protocol != "http" || task.Recovery == nil || task.Recovery.Version != 1 || required.Version != 1 || required.Capability != recoveryCapability || !record.valid(id) {
+	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || task.Protocol != "http" || task.Recovery == nil || !supportedRecoveryVersion(task.Recovery.Version) || task.Recovery.Version != record.Version || required.Version != record.Version || required.Capability != recoveryCapability || !record.valid(id) {
 		return task, record, transfer.ErrRecoveryHeld
 	}
 	hash, e := recoverySourceHash(task.Meta.Req, record.ExecutionDefaultsHash)
@@ -274,7 +298,10 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 	}
 	return &taskRecoveryOwner{store: store, taskID: task.ID, record: record, permits: map[uint64]map[string]*transfer.RecoveryPermit{}}, nil
 }
-func (o *taskRecoveryOwner) invalidate() { o.active.Store(false) }
+func (o *taskRecoveryOwner) invalidate() {
+	o.active.Store(false)
+	o.retryAuthorization.Store(nil)
+}
 func (o *taskRecoveryOwner) invalidateToken(token transfer.RecoveryToken) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -317,6 +344,9 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 	defer o.mu.Unlock()
 	o.active.Store(false)
 	o.runContext = nil
+	// An acknowledged explicit user action may fund exactly this one attempt.
+	// Neither the durable receipt nor a reloaded owner can reconstruct it.
+	explicit := o.retryAuthorization.Swap(nil)
 	var committed recoveryRecord
 	err := o.store.UpdateAtomic(func(tx StorageTransaction) error {
 		task, r, e := readRecovery(tx, o.taskID)
@@ -339,7 +369,14 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 			digest, hashErr := checkpointDigest(checkpoint)
 			clean = exists && hashErr == nil && digest == r.InitialAttempt.CheckpointHash
 		}
-		if r.InitialAttempt.State != "ungranted" && !clean {
+		freshRetry := false
+		if explicit != nil && r.LastExplicitRetry != nil && explicit.Episode == r.Episode && explicit.ActionID == r.LastExplicitRetry.ActionID {
+			// Defaults may legitimately advance while the raw interpreted
+			// request must still be the one explicitly authorized by the user.
+			bound, err := recoverySourceHash(task.Meta.Req, explicit.DefaultsHash)
+			freshRetry = err == nil && bound == explicit.SourceHash
+		}
+		if r.InitialAttempt.State != "ungranted" && !clean && !freshRetry {
 			if e = appendRecoveryAction(&r, generation, []string{"start"}); e != nil {
 				return e
 			}

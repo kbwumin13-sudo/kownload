@@ -5,7 +5,7 @@ import "github.com/GopeedLab/gopeed/internal/transfer"
 func (t *Task) recoveryHeld() bool {
 	t.dataLock.RLock()
 	defer t.dataLock.RUnlock()
-	return t.recoveryBlocked || t.Completion != nil || (t.Recovery != nil && t.Recovery.Version != 1)
+	return t.recoveryBlocked || t.Completion != nil || (t.Recovery != nil && !supportedRecoveryVersion(t.Recovery.Version))
 }
 
 // Read-only capability check. Missing all three parts is a legacy task, never
@@ -35,7 +35,7 @@ func (d *Downloader) checkTaskRecovery(task *Task) error {
 	if !r && !q && ref == nil {
 		return nil
 	}
-	if ref == nil || ref.Version != 1 {
+	if ref == nil || !supportedRecoveryVersion(ref.Version) {
 		return transfer.ErrRecoveryHeld
 	}
 	_, _, err = readRecovery(d.storage, task.ID)

@@ -42,13 +42,19 @@ type MCPReadPage struct {
 	NextCursor string        `json:"nextCursor"`
 }
 
-// No detached protocol stats or classified error history exists on Task yet.
-// Unavailable is not equivalent to zero peers or no historical errors.
+// Only explicitly published observations are available. Missing fields are
+// unknown, not zero; unavailable errors do not assert error-free history.
 type MCPReadStats struct {
-	Available bool `json:"available"`
+	Available     bool   `json:"available"`
+	ActiveStreams *int64 `json:"activeStreams,omitempty"`
+	TargetStreams *int64 `json:"targetStreams,omitempty"`
+	Peers         *int64 `json:"peers,omitempty"`
 }
 type MCPReadErrors struct {
-	Available bool `json:"available"`
+	Available  bool   `json:"available"`
+	Category   string `json:"category,omitempty"`
+	Retryable  *bool  `json:"retryable,omitempty"`
+	OccurredAt string `json:"occurredAt,omitempty"`
 }
 
 type mcpReadReference struct {
@@ -112,12 +118,26 @@ func (d *Downloader) MCPReadGetProgress(ctx context.Context, id string) (MCPRead
 	return task.Progress, err
 }
 func (d *Downloader) MCPReadGetStats(ctx context.Context, id string) (MCPReadStats, error) {
-	_, err := d.mcpReadFind(ctx, id)
-	return MCPReadStats{Available: false}, err
+	task, err := d.mcpReadFind(ctx, id)
+	if err != nil {
+		return MCPReadStats{}, err
+	}
+	value, err := mcpReadPublishedSnapshot(ctx, task)
+	if err != nil {
+		return MCPReadStats{}, err
+	}
+	return mcpReadStatsDTO(value.Stats)
 }
 func (d *Downloader) MCPReadGetErrors(ctx context.Context, id string) (MCPReadErrors, error) {
-	_, err := d.mcpReadFind(ctx, id)
-	return MCPReadErrors{Available: false}, err
+	task, err := d.mcpReadFind(ctx, id)
+	if err != nil {
+		return MCPReadErrors{}, err
+	}
+	value, err := mcpReadPublishedSnapshot(ctx, task)
+	if err != nil {
+		return MCPReadErrors{}, err
+	}
+	return mcpReadErrorsDTO(value.Error)
 }
 
 // Main lock is held only to copy membership/immutable IDs. Never acquire a

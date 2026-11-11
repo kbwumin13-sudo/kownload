@@ -322,10 +322,29 @@ func (d *Downloader) Setup() error {
 							}
 						}
 						current := task.fetcher.Progress().TotalDownloaded()
+						var observed httpProtocol.PublishedReadStats
+						if task.Protocol == "http" {
+							if publisher, ok := task.fetcher.(interface {
+								PublishedReadSnapshot() httpProtocol.PublishedReadStats
+							}); ok {
+								observed = publisher.PublishedReadSnapshot()
+							}
+						}
 						if progressLease != nil && progressLease.Check() != nil {
 							return
 						}
 						task.dataLock.Lock()
+						if task.Protocol == "http" {
+							value := MCPReadPublishedStats{}
+							valid := observed.Observed && observed.Context != nil && observed.Context.Err() == nil
+							if progressLease != nil {
+								valid = valid && observed.Managed && observed.Token == progressLease.Token && progressLease.Check() == nil
+							}
+							if valid {
+								value = MCPReadPublishedStats{ActiveStreamsKnown: true, ActiveStreams: observed.ActiveStreams, TargetStreamsKnown: observed.TargetStreamsKnown, TargetStreams: observed.TargetStreams}
+							}
+							_ = task.publishReadStatsLocked(value)
+						}
 						tick := float64(d.cfg.RefreshInterval) / 1000
 						downloadDataChanged := false
 						if task.Status == base.DownloadStatusRunning {
@@ -808,6 +827,7 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 				return err
 			}
 			invalidateTaskRecovery(task)
+			task.clearReadPublishedLocked()
 			task.Meta = task.fetcher.Meta()
 			if task.Protocol == "media" || task.Protocol == "netdisk" {
 				task.Meta = util.DeepClone(task.Meta)
@@ -1062,6 +1082,9 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 		if err = d.doDelete(task, force); err != nil {
 			return
 		}
+		task.dataLock.Lock()
+		task.clearReadPublishedLocked()
+		task.dataLock.Unlock()
 		deleted = append(deleted, task)
 	}
 	d.notifyRunning()
@@ -1658,6 +1681,7 @@ func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher, expecte
 	}
 	task.dataLock.Lock()
 	task.Status = candidate.Status
+	task.clearReadPublishedLocked()
 	task.UpdatedAt = candidate.UpdatedAt
 	task.notBefore = time.Time{}
 	task.dataLock.Unlock()
@@ -1719,6 +1743,12 @@ func (d *Downloader) doOnError(task *Task, err error, generation ...uint64) {
 		}
 		failureLog.Msgf("task download failed, task id: %s", task.ID)
 		task.updateStatus(base.DownloadStatusError)
+		task.dataLock.Lock()
+		task.clearReadPublishedLocked()
+		if task.Protocol == "http" {
+			_ = task.publishReadErrorLocked(acceptedHTTPReadError(err))
+		}
+		task.dataLock.Unlock()
 		if saveErr := d.saveTask(task); saveErr != nil {
 			d.Logger.Error().Err(saveErr).Msgf("persist failed task: %s", task.ID)
 		}
@@ -1760,9 +1790,10 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 			deferred.Until.Format(time.RFC3339), task.ID)
 		task.runGeneration++
 		task.timer.Pause()
-		task.updateStatus(base.DownloadStatusWait)
 		task.dataLock.Lock()
+		task.updateStatusLocked(base.DownloadStatusWait)
 		task.notBefore = deferred.Until
+		task.clearReadPublishedLocked()
 		task.dataLock.Unlock()
 		if saveErr := d.saveTask(task); saveErr != nil {
 			d.Logger.Error().Err(saveErr).Msgf("persist deferred task: %s", task.ID)
@@ -1985,8 +2016,15 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.dataLock.RLock()
 		needCreate = !task.IsCreated
 		task.dataLock.RUnlock()
-		invalidateTaskRecovery(task)
+		// Starting an acknowledged explicit retry consumes its private permit
+		// in begin; cancellation/patch/delete still clear it via invalidate.
+		if owner := task.recoveryOwner.Load(); owner != nil {
+			owner.active.Store(false)
+		}
 		task.runGeneration = d.recoveryGenerationBase(task) + 1
+		task.dataLock.Lock()
+		task.clearReadPublishedLocked()
+		task.dataLock.Unlock()
 		generation = task.runGeneration
 		if task.runCancel != nil {
 			task.runCancel()
@@ -2255,6 +2293,9 @@ func (d *Downloader) doPause(task *Task) (err error) {
 
 		invalidateTaskRecovery(task)
 		previousPauseDone = task.pauseDone
+		task.dataLock.Lock()
+		task.clearReadPublishedLocked()
+		task.dataLock.Unlock()
 		pauseDone = make(chan struct{})
 		task.pauseDone = pauseDone
 		if task.runCancel != nil {

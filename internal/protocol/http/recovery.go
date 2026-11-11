@@ -138,6 +138,7 @@ func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 	f.doneCh = make(chan error, 1)
 	result := f.doneCh
 	f.boundRun.Store(&httpBoundRun{ctx: ctx})
+	f.readPublished.Store(nil)
 	return func() error {
 		select {
 		case err := <-result:
@@ -145,6 +146,30 @@ func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+// CaptureRunQuiescence captures this run's writer completion, never a channel
+// looked up later after replacement. Core calls while its lifecycle decision
+// excludes a new Start, then waits without holding Task/Downloader locks.
+// A run that failed before Start has no download writer to join.
+func (f *Fetcher) CaptureRunQuiescence() func(context.Context) error {
+	writers := []<-chan struct{}{f.downloadLoopDone, f.prefetchDoneCh}
+	return func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for _, done := range writers {
+			if done == nil {
+				continue
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return ctx.Err()
 	}
 }
 func (f *Fetcher) recoveryContext(ctx context.Context) context.Context {
