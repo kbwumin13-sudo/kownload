@@ -57,7 +57,9 @@ S0 验证仅在临时 fixture 执行，不安装或运行生产 App，也不启�
   系统 Python 和内部 framework 相对链接也覆盖。
 - MCP 受控旧负例：二进制和 mode700 保留，但原工具 exit0/pairVerified 后副本丢安装
   xattr。修复只显式复制固定产品 marker；真实 macOS roundtrip、缺失/未知/坏/超长拒绝、
-  写入/复读失败及源变化不发布计划均由 fixture 覆盖。旧负例不改写为“从未支持”，也不
+  写入/复读失败及源变化不发布计划均由 fixture 覆盖。属性读写绑定到逐级无链接打开并
+  持有的已验证 inode；末级文件/父目录换成链接的回归验证外部 marker 与源字节不变，
+  不把事后拒绝计划当成阻止外部写入的替代。旧负例不改写为“从未支持”，也不
   把丢标记称为 Task 损坏；生产恢复和旧 App 标准根升级仍未验。
 - `go test ./internal/identitymigration` 与相关 `-race`：新空根 normal、导入 review、
   旧 marker 保持 review、未知政策写前拒绝，旧数据和目标 marker 不被重写为兼容。

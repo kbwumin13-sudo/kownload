@@ -5,6 +5,9 @@ Never installs/starts an App, changes live data/preferences/manifests, or grants
 execution permission. The former live-database backfill is deliberately refused.
 """
 import argparse
+import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -13,10 +16,9 @@ import plistlib
 import re
 import shutil
 import stat
-import subprocess
+import sys
 from xml.parsers.expat import ExpatError
 
-MCP_RELATIVE = pathlib.Path('bin/kownload-mcp')
 MCP_MARKER = 'io.github.kbwumin13-sudo.kownload.mcp-install'
 MCP_MARKER_LIMIT = 2048
 
@@ -51,62 +53,115 @@ def tree_digest(root, app=False):
     return hashlib.sha256(raw).hexdigest()
 
 
-def read_mcp_marker(path):
-    # macOS Python does not always expose os.getxattr. Read exactly this key,
-    # with a bounded hex result, and never list attributes or touch quarantine.
-    process = subprocess.Popen(['/usr/bin/xattr', '-s', '-px', MCP_MARKER, str(path)],
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    try:
-        encoded = process.stdout.read(MCP_MARKER_LIMIT * 4 + 1)
-        if len(encoded) > MCP_MARKER_LIMIT * 4:
-            raise ValueError('snapshot_mcp_marker_oversized')
-        if process.wait() != 0:
-            raise ValueError('snapshot_mcp_marker_unavailable')
-    finally:
-        process.stdout.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-    try:
-        raw = bytes.fromhex(encoded.decode('ascii'))
-    except (ValueError, UnicodeError):
-        raise ValueError('snapshot_mcp_marker_invalid') from None
+def mcp_attribute_functions():
+    if sys.platform != 'darwin':
+        raise ValueError('snapshot_mcp_marker_unsupported_platform')
+    # Public Darwin fd APIs; fixed library and attribute, no path-based write
+    # fallback when Python does not expose its own fd xattr operations.
+    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    get = library.fgetxattr
+    get.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                   ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    get.restype = ctypes.c_ssize_t
+    put = library.fsetxattr
+    put.argtypes = get.argtypes
+    put.restype = ctypes.c_int
+    return get, put
+
+
+def read_mcp_marker(fd):
+    get, _ = mcp_attribute_functions()
+    name = MCP_MARKER.encode('ascii')
+    size = get(fd, name, None, 0, 0, 0)
+    if size < 0:
+        raise OSError(ctypes.get_errno(), 'snapshot_mcp_marker_unavailable')
+    if not 0 < size <= MCP_MARKER_LIMIT:
+        raise ValueError('snapshot_mcp_marker_oversized')
+    buffer = ctypes.create_string_buffer(size)
+    count = get(fd, name, buffer, size, 0, 0)
+    if count != size:
+        raise ValueError('snapshot_mcp_marker_changed')
+    return buffer.raw
+
+
+def write_mcp_marker(fd, raw):
     if not 0 < len(raw) <= MCP_MARKER_LIMIT:
         raise ValueError('snapshot_mcp_marker_oversized')
-    return raw
+    _, put = mcp_attribute_functions()
+    buffer = ctypes.create_string_buffer(raw)
+    if put(fd, MCP_MARKER.encode('ascii'), buffer, len(raw), 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), 'snapshot_mcp_marker_write_failed')
 
 
-def write_mcp_marker(path, raw):
-    result = subprocess.run(['/usr/bin/xattr', '-s', '-wx', MCP_MARKER, raw.hex(), str(path)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if result.returncode != 0:
-        raise ValueError('snapshot_mcp_marker_write_failed')
-
-
-def mcp_helper_info(data):
-    try:
-        parent = (data / 'bin').lstat()
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(parent.st_mode):
-        raise ValueError('snapshot_mcp_helper_invalid')
-    if not stat.S_ISDIR(parent.st_mode):
-        return None  # Legacy non-MCP data may have an unrelated ordinary bin file.
-    try:
-        info = (data / MCP_RELATIVE).lstat()
-    except FileNotFoundError:
-        return None
+def mcp_fd_info(fd):
+    info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
             info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError('snapshot_mcp_helper_invalid')
     return info
 
 
+@contextlib.contextmanager
+def mcp_helper_file(data, writable=False):
+    if not data.is_absolute() or '..' in data.parts:
+        raise ValueError('snapshot_mcp_helper_invalid')
+    directories = []
+    entry = None
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        # Walk every ancestor from / with openat + O_NOFOLLOW. A checked
+        # pathname is never resolved again to perform the attribute write.
+        directories.append(os.open('/', flags))
+        for part in data.parts[1:]:
+            directories.append(os.open(part, flags, dir_fd=directories[-1]))
+        try:
+            parent = os.stat('bin', dir_fd=directories[-1], follow_symlinks=False)
+        except FileNotFoundError:
+            yield None
+            return
+        if stat.S_ISLNK(parent.st_mode):
+            raise ValueError('snapshot_mcp_helper_invalid')
+        if not stat.S_ISDIR(parent.st_mode):
+            yield None  # Preserve unrelated legacy ordinary bin files.
+            return
+        directories.append(os.open('bin', flags, dir_fd=directories[-1]))
+        try:
+            entry = os.open('kownload-mcp', (os.O_RDWR if writable else os.O_RDONLY) |
+                            os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directories[-1])
+        except FileNotFoundError:
+            yield None
+            return
+        mcp_fd_info(entry)
+        yield entry
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError('snapshot_mcp_helper_invalid') from None
+        raise
+    finally:
+        if entry is not None:
+            os.close(entry)
+        for directory in reversed(directories):
+            os.close(directory)
+
+
+def mcp_fd_digest(fd):
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            return digest.hexdigest()
+        digest.update(block)
+
+
 def mcp_install_state(data):
-    info = mcp_helper_info(data)
-    if info is None:
-        return None
-    raw = read_mcp_marker(data / MCP_RELATIVE)
+    with mcp_helper_file(data) as fd:
+        return None if fd is None else mcp_state_from_fd(fd)
+
+
+def mcp_state_from_fd(fd):
+    info = mcp_fd_info(fd)
+    raw = read_mcp_marker(fd)
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -131,11 +186,11 @@ def mcp_install_state(data):
             not marker['version'].endswith('+' + marker['sourceCommit']) or
             not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._+-]{0,79}', marker['version'][:-41])):
         raise ValueError('snapshot_mcp_marker_unsupported')
-    digest = file_digest(data / MCP_RELATIVE)
+    digest = mcp_fd_digest(fd)
     if marker['sha256'] != digest:
         raise ValueError('snapshot_mcp_marker_digest_mismatch')
-    after = mcp_helper_info(data)
-    if after is None or (after.st_dev, after.st_ino, after.st_mode) != (info.st_dev, info.st_ino, info.st_mode):
+    after = mcp_fd_info(fd)
+    if (after.st_dev, after.st_ino, after.st_mode) != (info.st_dev, info.st_ino, info.st_mode):
         raise ValueError('snapshot_mcp_source_changed')
     return {'raw': raw, 'sha256': digest, 'mode': info.st_mode & 0o777,
             'device': info.st_dev, 'inode': info.st_ino}
@@ -144,18 +199,23 @@ def mcp_install_state(data):
 def copy_mcp_marker(source, destination, original):
     if mcp_install_state(source) != original:
         raise ValueError('snapshot_mcp_source_changed')
-    copied = mcp_helper_info(destination)
-    if original is None:
-        if copied is not None:
+    with mcp_helper_file(destination, writable=True) as fd:
+        if original is None:
+            if fd is not None:
+                raise ValueError('snapshot_mcp_copy_changed')
+            return
+        if fd is None or mcp_fd_digest(fd) != original['sha256']:
             raise ValueError('snapshot_mcp_copy_changed')
-        return
-    if copied is None or file_digest(destination / MCP_RELATIVE) != original['sha256']:
-        raise ValueError('snapshot_mcp_copy_changed')
-    write_mcp_marker(destination / MCP_RELATIVE, original['raw'])
-    result = mcp_install_state(destination)
-    if (result is None or any(result[key] != original[key] for key in ['raw', 'sha256', 'mode']) or
-            mcp_install_state(source) != original):
-        raise ValueError('snapshot_mcp_copy_changed')
+        # Retain this verified inode for both the write and its immediate read.
+        write_mcp_marker(fd, original['raw'])
+        result = mcp_state_from_fd(fd)
+        if any(result[key] != original[key] for key in ['raw', 'sha256', 'mode']):
+            raise ValueError('snapshot_mcp_copy_changed')
+        # Also reject renamed/replaced path entries before publishing a plan.
+        if mcp_install_state(destination) != result:
+            raise ValueError('snapshot_mcp_copy_changed')
+    if mcp_install_state(source) != original:
+        raise ValueError('snapshot_mcp_source_changed')
 
 
 def canonical(path):

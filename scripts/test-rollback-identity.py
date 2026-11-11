@@ -331,16 +331,47 @@ class SnapshotPair(Rollback):
         module = self.rollback_module()
         pair = module.verify_pair(self.manifest)
         write_marker = module.write_mcp_marker
-        def swapped_copy(path, original):
+        def swapped_copy(fd, original):
+            path = self.output / 'data/bin/kownload-mcp'
             path.rename(path.with_name('copied-before-swap'))
             path.symlink_to(other)
-            write_marker(path, original)
+            write_marker(fd, original)
         with mock.patch.object(module, 'write_mcp_marker', side_effect=swapped_copy):
             with self.assertRaises(ValueError):
                 module.prepare_copy(self.manifest, self.output, pair)
         self.assertEqual(self.marker_read(other), b'untouched marker')
         self.assertEqual(other.read_bytes(), b'untouched outside staging')
         self.assertEqual(self.marker_read(entry), raw)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_parent_link_swap_never_changes_external_marker(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        source_hash = hashlib.sha256(entry.read_bytes()).hexdigest()
+        outside = self.dir / 'outside-parent'
+        outside.mkdir()
+        target = outside / 'kownload-mcp'
+        target.write_bytes(b'outside helper must remain untouched')
+        target.chmod(0o700)
+        self.marker_write(target, b'outside marker must remain untouched')
+        original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        write_marker = module.write_mcp_marker
+        def swapped_parent(path_or_fd, original):
+            parent = self.output / 'data/bin'
+            parent.rename(parent.with_name('bin-before-swap'))
+            parent.symlink_to(outside, target_is_directory=True)
+            write_marker(path_or_fd, original)
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=swapped_parent):
+            with self.assertRaises((ValueError, OSError)):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertEqual(self.marker_read(target), b'outside marker must remain untouched')
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), original_hash)
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertEqual(hashlib.sha256(entry.read_bytes()).hexdigest(), source_hash)
         self.assertFalse((self.output / 'restore-plan.json').exists())
 
     @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
