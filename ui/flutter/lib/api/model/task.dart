@@ -2,6 +2,7 @@ import 'package:json_annotation/json_annotation.dart';
 
 import 'meta.dart';
 import 'browser_handoff.dart';
+import 'http_completion_projection.dart';
 
 part 'task.g.dart';
 
@@ -27,6 +28,8 @@ enum ExtractStatus {
 class Task {
   @JsonKey(includeFromJson: false, includeToJson: false)
   TaskHandoff? handoff;
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  HttpCompletionProjection? completionView;
   String id;
   String name;
   Protocol? protocol;
@@ -57,6 +60,13 @@ class Task {
         : _$TaskFromJson(json);
     if (json['handoff'] is Map)
       task.handoff = TaskHandoff.fromJson(json['handoff']);
+    if (task.protocol == Protocol.http &&
+        (json.containsKey('completionView') ||
+            json.containsKey('completion'))) {
+      task.completionView = HttpCompletionProjection.fromJson(
+          json['completionView'],
+          taskId: task.id);
+    }
     return task;
   }
 

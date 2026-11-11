@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart' hide Progress;
 import 'package:gopeed/api/model/meta.dart';
+import 'package:gopeed/api/model/http_completion_projection.dart';
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/resource.dart';
@@ -93,6 +94,48 @@ void main() {
   test('paused and failed tasks do not claim an active verification run', () {
     expect(phase('verifying').labelFor(Status.pause), '校验任务已暂停');
     expect(phase('verified').labelFor(Status.error), '校验任务失败');
+  });
+  testWidgets(
+      'normal TaskView consumes bound response projection and keeps unknown completion visible',
+      (tester) async {
+    final http = sample('http', Protocol.http);
+    final unknown = sample('unknown', Protocol.http)..status = Status.done;
+    http.completionView = HttpCompletionProjection.fromJson({
+      'version': 1,
+      'scopeVersion': 1,
+      'datasetId': 'a' * 32,
+      'taskId': 'http',
+      'completionId': 'completion',
+      'available': true,
+      'phase': 'verifying',
+      'recordedMatch': null,
+      'errorCategory': null
+    }, taskId: 'http')
+      ..bindToDataset('a' * 32, isCurrent: () => true);
+    unknown.completionView =
+        HttpCompletionProjection.fromJson(null, taskId: 'unknown');
+    final list = _Tasks([http, unknown]);
+    Get.put<AppController>(_App());
+    Get.put(TaskController());
+    Get.put<MacTaskListController>(list);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+    await tester.binding.setSurfaceSize(const Size(1000, 850));
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      Get.reset();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, null);
+      await tester.binding.setSurfaceSize(null);
+    });
+    await tester.pumpWidget(GetMaterialApp(
+        theme: macTheme(Brightness.light), home: const TaskView()));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正在校验 SHA-256'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, '已完成'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('校验完成状态未确认'), findsOneWidget);
+    expect(find.textContaining('校验并保存完成'), findsNothing);
   });
   testWidgets(
       'actual TaskView rows consume only explicit HTTP phase projections',

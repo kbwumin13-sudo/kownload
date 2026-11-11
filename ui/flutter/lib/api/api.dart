@@ -21,6 +21,7 @@ import 'model/result.dart';
 import 'model/switch_extension.dart';
 import 'model/task.dart';
 import 'model/task_stats.dart';
+import 'model/task_batch_catalog.dart';
 import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
@@ -164,8 +165,18 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
                   q['cursor'].length <= 65536));
     }
   }
+  final cap =
+      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/verified-http/v1/capability$')
+          .firstMatch(path);
+  if (cap != null &&
+      cap[0] == path &&
+      method == 'GET' &&
+      data == null &&
+      queryParameters == null) {
+    allowed = true;
+  }
   final match = RegExp(
-          r'^/api/v1/datasets/([0-9a-f]{32})/task-batches/v1/operations(?:/([^/]+)(/cancel)?)?$')
+          r'^/api/v1/datasets/([0-9a-f]{32})/(?:task-batches/v1|verified-http/v1)/operations(?:/([^/]+)(/cancel)?)?$')
       .firstMatch(path);
   if (match != null && match[0] == path && queryParameters == null) {
     if (match[2] == null) {
@@ -311,10 +322,13 @@ Future<void> patchTask(String id, ResolveTask patchTask) async {
 }
 
 Future<List<Task>> getTasks(List<Status> statuses) async {
-  return _parse<List<Task>>(
+  final snapshot = activeApiSnapshot;
+  final tasks = await _parse<List<Task>>(
       () => _client.dio.get(
           "/api/v1/tasks?${statuses.map((e) => "status=${e.name}").join("&")}"),
       (data) => (data as List).map((e) => Task.fromJson(e)).toList());
+  await _bindCompletionViews(snapshot, tasks);
+  return tasks;
 }
 
 /// Download diagnostics; older cores return only a connection list.
@@ -475,4 +489,36 @@ Future<String?> getCoreVersion() async {
     final version = data['version'];
     return version is String ? version : null;
   });
+}
+
+// Ordinary/legacy lists make no additional request. A decorated response is
+// displayed only after the actual client confirms its logical dataset.
+Future<void> _bindCompletionViews(
+    ActiveApiSnapshot? snapshot, List<Task> tasks) async {
+  if (tasks.every((task) => task.completionView == null) ||
+      snapshot?.taskBatchRoute?.supported != true ||
+      !snapshot!.isCurrent) {
+    return;
+  }
+  try {
+    final response = await scopedTaskBatchRequest(
+        snapshot, 'GET', '/api/v1/dataset/identity');
+    final body = response.data;
+    if (!snapshot.isCurrent ||
+        response.statusCode != 200 ||
+        body is! Map ||
+        body['code'] != 0 ||
+        body['data'] is! Map) {
+      return;
+    }
+    final identity =
+        DatasetIdentity.fromJson(Map<String, dynamic>.from(body['data']));
+    if (!identity.supported) return;
+    for (final task in tasks) {
+      task.completionView?.bindToDataset(identity.datasetId,
+          isCurrent: () => snapshot.isCurrent);
+    }
+  } catch (_) {
+    // Keep the Task list usable, with completion explicitly unconfirmed.
+  }
 }

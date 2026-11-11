@@ -53,6 +53,7 @@ import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
 import 'browser_media_view.dart';
 import 'http_checksum_input.dart';
+import '../../../../../api/verified_http_api.dart';
 
 class CreateView extends StatefulWidget {
   final TaskBatchJournalStore? batchJournal;
@@ -91,9 +92,11 @@ class _ManualBatchAttempt {
   final TaskBatchOperationRef operation;
   final CreateTaskBatch batch;
   final String input, signature;
+  final String? expectedSha256;
   bool sent = false;
   _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
-      this.input, this.signature);
+      this.input, this.signature,
+      {this.expectedSha256});
 }
 
 class _CreateViewState extends State<CreateView> {
@@ -135,17 +138,40 @@ class _CreateViewState extends State<CreateView> {
       attempt.api.snapshot.isCurrent;
   bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
       _manualReferenceCurrent(attempt, epoch) &&
-      _expectedSha256Controller.text.trim().isEmpty &&
+      _checksumDraftMatches(attempt) &&
       attempt.input == _urlController.text.trim() &&
       attempt.signature ==
           jsonEncode(_manualPayload(
                   Util.textToLines(attempt.input),
                   Options(
-                      name: '',
+                      name: attempt.expectedSha256 == null
+                          ? ''
+                          : _renameController.text,
                       path: _pathController.text,
                       selectFiles: [],
                       extra: parseReqOptsExtra()))
               .toJson());
+  bool _checksumDraftMatches(_ManualBatchAttempt attempt) {
+    try {
+      return normalizedExpectedSha256(_expectedSha256Controller.text) ==
+              attempt.expectedSha256 &&
+          (attempt.expectedSha256 == null ||
+              _expectedSha256Url == attempt.input);
+    } on FormatException {
+      return false;
+    }
+  }
+
+  void _checksumChanged() {
+    _expectedSha256Url = _urlController.text.trim();
+    if (_manualBusy) {
+      ++_manualEpoch;
+      _manualBusy = false;
+      _endManualConfirmationWait();
+      _manualNotice.value = '摘要已变化，原引用只可查询，当前草稿已保留。';
+    }
+  }
+
   void _releaseConfirmation() {
     _confirmController.reset();
     _confirmingCapture = null;
@@ -271,7 +297,8 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
-  Future<void> _submitManualBatch(List<String> urls, Options opts) async {
+  Future<void> _submitManualBatch(List<String> urls, Options opts,
+      {String? expectedSha256}) async {
     if (_manualBatch != null) {
       await _queryManualBatch();
       return;
@@ -292,7 +319,19 @@ class _CreateViewState extends State<CreateView> {
       if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) {
         return;
       }
-      final bound = ScopedTaskBatchApi(snapshot: snapshot, identity: identity);
+      final ScopedTaskBatchApi bound = expectedSha256 == null
+          ? ScopedTaskBatchApi(snapshot: snapshot, identity: identity)
+          : VerifiedHttpApi(
+              snapshot: snapshot,
+              identity: identity,
+              expectedSHA256: expectedSha256);
+      if (bound is VerifiedHttpApi && !await bound.supported()) {
+        if (mounted && epoch == _manualEpoch && snapshot.isCurrent) {
+          _manualNotice.value = '当前下载服务未确认 SHA-256 校验能力，未提交任务。';
+        }
+        return;
+      }
+      if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) return;
       final id =
           'manual-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
       final operation = TaskBatchOperationRef(
@@ -304,7 +343,8 @@ class _CreateViewState extends State<CreateView> {
           operation,
           frozen,
           input,
-          raw);
+          raw,
+          expectedSha256: expectedSha256);
       // Preflight is a pure capability/domain query, never a recovered submit permit.
       final preflight = await bound.query(operation);
       if (!mounted ||
@@ -1188,8 +1228,7 @@ class _CreateViewState extends State<CreateView> {
                         if (Util.isMacos()) ...[
                           HttpChecksumInput(
                             controller: _expectedSha256Controller,
-                            onChanged: (_) =>
-                                _expectedSha256Url = _urlController.text.trim(),
+                            onChanged: (_) => _checksumChanged(),
                           ),
                           const SizedBox(height: 12),
                         ],
@@ -2536,6 +2575,8 @@ class _CreateViewState extends State<CreateView> {
     final urls = Util.textToLines(input);
     if (urls.length != 1 ||
         parseProtocol(urls.single) != Protocol.http ||
+        !const {'http', 'https'}.contains(Uri.tryParse(urls.single)?.scheme) ||
+        (Uri.tryParse(urls.single)?.host.isEmpty ?? true) ||
         _panelRequest != null ||
         _originalRequest != null ||
         _netdiskRequest.value != null ||
@@ -2544,9 +2585,7 @@ class _CreateViewState extends State<CreateView> {
     } else if (_expectedSha256Url != input) {
       _manualNotice.value = '链接已变化，请重新填写当前链接的 SHA-256，未提交任务。';
     } else {
-      // The guarded receiver/wire adapter is not connected yet. Never carry an
-      // expected hash into legacy create/resolve or treat it as unknown Extra.
-      _manualNotice.value = '当前连接的 SHA-256 校验能力尚未确认，未提交任务。';
+      return false;
     }
     return true;
   }
@@ -2676,6 +2715,8 @@ class _CreateViewState extends State<CreateView> {
         1. Direct download option is checked
         2. Muli line urls
         */
+        final expectedSha256 =
+            normalizedExpectedSha256(_expectedSha256Controller.text);
         final isMultiLine = urls.length > 1;
         final isDirect = controller.directDownload.value || isMultiLine;
         final opt = Options(
@@ -2686,7 +2727,7 @@ class _CreateViewState extends State<CreateView> {
         );
         if (Util.isMacos() &&
             netdiskInputs.isEmpty &&
-            isMultiLine &&
+            (isMultiLine || expectedSha256 != null || _manualBatch != null) &&
             _panelRequest == null &&
             _originalRequest == null &&
             _netdiskRequest.value == null &&
@@ -2695,7 +2736,10 @@ class _CreateViewState extends State<CreateView> {
           final stop = Completer<void>();
           _manualConfirmationEpoch = confirmation;
           _manualConfirmationStop = stop;
-          await Future.any<void>([_submitManualBatch(urls, opt), stop.future]);
+          await Future.any<void>([
+            _submitManualBatch(urls, opt, expectedSha256: expectedSha256),
+            stop.future
+          ]);
           return;
         }
         if (isDirect) {
