@@ -15,9 +15,13 @@ App、不转发业务请求。返回 `version/product/nativeProtocol/identityPro
 routeScope 是实际 host.sock 规范路径的 SHA-256，一致性线索而非秘密或发布者认证。
 构建 SHA/版本由同一次构建输入注入；缺失/格式未知返回 `unknown`。
 
-当前 Native 首段仅用只读 socket 探测填 `app.reachable`；`app.identity`、
-`core.reachable`、`core.handoffVersion` 为 null，表示未检测，而非 Core 不存在或完整连接
-已通过。App 身份和 Core 能力需要后续只读接线；不能用 ping 或 host 自报版本推断。
+Native 用只读 socket 探测填 `app.reachable`，随后仅向该 socket 的 `/identity` POST
+`{method:"hostInfo",params:{version:1}}`。配套 App 的无状态端点返回版本1、产品、
+identityProtocol、build 与实际 routeScope；不读写 sync/client/Hive。Native 只保留
+白名单类型字段，不透传额外正文。旧 App 404、未支持或读取失败时 `app.identity=null`，
+可达性不等于身份已验证。`core.reachable` 和 `core.handoffVersion` 仍为 null，表示
+未检测；显式流程在锁定路由后另走已有只读 handoffCapabilities，不能从 host/App
+版本推断 Core 能力，也不自动探测用户配置的网络 API。
 
 新客户端在首次修改请求**之前**持久保存
 `bridgeBinding:{version:1,hostName,routeScope}`，每个业务请求附顶层

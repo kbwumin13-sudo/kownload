@@ -49,13 +49,21 @@ type HostInfo struct {
 	CallerOrigin       string    `json:"callerOrigin"`
 	RouteScope         string    `json:"routeScope"`
 	App                struct {
-		Reachable bool `json:"reachable"`
-		Identity  any  `json:"identity"`
+		Reachable bool     `json:"reachable"`
+		Identity  *AppInfo `json:"identity"`
 	} `json:"app"`
 	Core struct {
 		Reachable      *bool `json:"reachable"`
 		HandoffVersion *int  `json:"handoffVersion"`
 	} `json:"core"`
+}
+
+type AppInfo struct {
+	Version          int       `json:"version"`
+	Product          string    `json:"product"`
+	IdentityProtocol int       `json:"identityProtocol"`
+	Build            HostBuild `json:"build"`
+	RouteScope       string    `json:"routeScope"`
 }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -114,9 +122,43 @@ func (d Dispatcher) hostInfo(ctx context.Context, req Request) Response {
 	probe, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	info.App.Reachable = d.Client.Available(probe)
-	// Reachable is only the socket probe. App identity and Core capability are
-	// untested here, rather than inferred from host build metadata or a ping.
+	if info.App.Reachable {
+		info.App.Identity = d.readAppIdentity(probe)
+	}
+	// Missing/old App identity and Core capability stay untested, rather than
+	// inferred from a socket probe or host build metadata.
 	return Response{Data: info, OperationID: req.OperationID, Message: ""}
+}
+
+func (d Dispatcher) readAppIdentity(ctx context.Context) *AppInfo {
+	// UnixClient forwards Params as the HTTP body (not the Native envelope).
+	status, body, err := d.Client.Post(ctx, "/identity", Request{Method: "hostInfo", Params: json.RawMessage(`{"method":"hostInfo","params":{"version":1}}`)})
+	if err != nil || status != 200 {
+		return nil
+	}
+	var reply struct {
+		Code *int     `json:"code"`
+		Data *AppInfo `json:"data"`
+	}
+	if json.Unmarshal(body, &reply) != nil || reply.Code == nil || *reply.Code != 0 || reply.Data == nil {
+		return nil
+	}
+	info := reply.Data
+	if info.Version != 1 || info.Product != appidentity.ProductName || info.IdentityProtocol != 1 || len(info.RouteScope) != 64 {
+		return nil
+	}
+	if _, err := hex.DecodeString(info.RouteScope); err != nil || strings.ToLower(info.RouteScope) != info.RouteScope {
+		return nil
+	}
+	// Only typed identity fields are returned. Unknown App payload fields or
+	// malformed build metadata must not leak credentials/paths into diagnosis.
+	if !sourceCommitPattern.MatchString(info.Build.SourceCommit) {
+		info.Build.SourceCommit = "unknown"
+	}
+	if !releaseVersionPattern.MatchString(info.Build.ReleaseVersion) {
+		info.Build.ReleaseVersion = "unknown"
+	}
+	return info
 }
 
 func (d Dispatcher) validateBinding(req Request) string {

@@ -3,6 +3,8 @@ package nativehost
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,7 +78,7 @@ func TestHostInfoIsReadOnlyAndDoesNotClaimAppOrCoreIdentity(t *testing.T) {
 	info, ok := r.Data.(HostInfo)
 	if r.Code != 0 || !ok || info.CallerOrigin != identity.CallerOrigin || info.RouteScope == "" ||
 		info.Build != identity.Build || !info.App.Reachable || info.App.Identity != nil || info.Core.Reachable != nil || info.Core.HandoffVersion != nil ||
-		f.probes != 1 || f.wakes != 0 || f.calls != 0 {
+		f.probes != 1 || f.wakes != 0 || f.calls != 1 || f.lastPath != "/identity" || f.last.Method != "hostInfo" {
 		t.Fatalf("incorrect read-only handshake: %+v counters=%+v", r, f)
 	}
 	payload, _ := json.Marshal(r)
@@ -88,6 +90,68 @@ func TestHostInfoIsReadOnlyAndDoesNotClaimAppOrCoreIdentity(t *testing.T) {
 	r = (Dispatcher{Client: f, Wakeup: f, Identity: identity}).Dispatch(context.Background(), []byte(`{"method":"hostInfo","params":{"version":1,"reportedBrowser":"chrome","clientId":"profile-A"}}`))
 	if info = r.Data.(HostInfo); info.Build.SourceCommit != "unknown" || info.Build.ReleaseVersion != "unknown" {
 		t.Fatal("untrusted build metadata must remain unknown")
+	}
+}
+
+func TestHostInfoReadsOnlyTypedAppIdentityOverActualUnixSocket(t *testing.T) {
+	// Keep the socket short enough for the macOS sockaddr_un limit.
+	root, err := os.MkdirTemp("/tmp", "k14-id-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	identity := testIdentity(t)
+	identity.Socket = filepath.Join(root, "host.sock")
+	scope, err := identity.routeScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", identity.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestedPath := make(chan string, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath <- r.Method + " " + r.URL.Path
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Method != "hostInfo" || string(req.Params) != `{"version":1}` {
+			t.Error("unexpected identity request")
+		}
+		json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+			"version": 1, "identityProtocol": 1, "product": "kownload", "routeScope": scope,
+			"build":  HostBuild{SourceCommit: strings.Repeat("b", 40), ReleaseVersion: "1.9.3-kownload.26"},
+			"Cookie": "private-secret", "url": "https://private.invalid/",
+		}})
+	})}
+	defer server.Close()
+	go server.Serve(listener)
+	f := &fixture{}
+	d := Dispatcher{Client: UnixClient{Socket: identity.Socket}, Wakeup: f, Identity: identity}
+	r := d.Dispatch(context.Background(), []byte(`{"method":"hostInfo","params":{"version":1,"reportedBrowser":"chrome","clientId":"profile-A"}}`))
+	info := r.Data.(HostInfo)
+	if !info.App.Reachable || info.App.Identity == nil || info.App.Identity.RouteScope != scope || info.App.Identity.Build.SourceCommit != strings.Repeat("b", 40) || f.wakes != 0 || <-requestedPath != "POST /identity" {
+		t.Fatalf("failed typed UDS identity: %+v", r)
+	}
+	payload, _ := json.Marshal(r)
+	if strings.Contains(string(payload), "private") || info.Core.Reachable != nil {
+		t.Fatal("identity leaked business payload or guessed Core state")
+	}
+}
+
+func TestOldOrUnsupportedAppIdentityRemainsUnverified(t *testing.T) {
+	identity := testIdentity(t)
+	for _, body := range []string{
+		`{"code":1000,"data":null}`,
+		`{"code":0,"data":{"version":2,"identityProtocol":1,"product":"kownload"}}`,
+		`{"code":0,"data":{"version":1,"identityProtocol":1,"product":"foreign"}}`,
+		`{"code":0,"data":{"version":1,"identityProtocol":1,"product":"kownload","routeScope":"bad"}}`,
+	} {
+		f := &fixture{available: true, status: 200, body: body}
+		r := (Dispatcher{Client: f, Wakeup: f, Identity: identity}).Dispatch(context.Background(), []byte(`{"method":"hostInfo","params":{"version":1,"reportedBrowser":"edge","clientId":"profile-A"}}`))
+		info := r.Data.(HostInfo)
+		if !info.App.Reachable || info.App.Identity != nil || f.wakes != 0 {
+			t.Fatal("old/foreign App claimed verified")
+		}
 	}
 }
 

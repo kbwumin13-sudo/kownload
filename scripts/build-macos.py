@@ -123,6 +123,7 @@ def main():
     run(flutter_bin, 'pub', 'get', '--enforce-lockfile', cwd=ui, env=env)
     flags = ['--release', '--no-pub', '--build-name=' + version, '--build-number=' + str(build),
              '--dart-define=KOWNLOAD_RELEASE_VERSION=' + release,
+             '--dart-define=KOWNLOAD_SOURCE_COMMIT=' + commit,
              '--split-debug-info=' + str(work / 'symbols')]
     preview_storage = work / 'preview-data'
     if a.preview:
