@@ -46,6 +46,14 @@ func (b unsupportedVerifiedHTTPEvents) SubscribeVerifiedHTTPDone(_ context.Conte
 
 func registerVerifiedHTTPEventRoutes(router *mux.Router, source verifiedHTTPDoneSource) {
 	router.Methods(http.MethodGet).Path("/api/v1/datasets/{datasetId}/verified-http/v1/completion-events").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Before every error response: net/http may otherwise wait for an
+		// unread HTTP/1 body before flushing even a rejection. A write deadline
+		// cannot bound that read. Close without draining this bodyless GET.
+		if r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+			w.Header().Set("Connection", "close")
+			WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_completion_events_request"))
+			return
+		}
 		domain := mux.Vars(r)["datasetId"]
 		if !scopedDatasetPattern.MatchString(domain) {
 			WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_dataset_request"))
@@ -56,14 +64,6 @@ func registerVerifiedHTTPEventRoutes(router *mux.Router, source verifiedHTTPDone
 			hasResumeHeader = hasResumeHeader || strings.EqualFold(name, "Last-Event-ID")
 		}
 		if r.URL.RawQuery != "" || hasResumeHeader {
-			WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_completion_events_request"))
-			return
-		}
-		// net/http may otherwise wait for an unread HTTP/1 request body before
-		// flushing headers. A write deadline cannot bound that read. This GET
-		// has no body; close rejected connections without draining attacker IO.
-		if r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
-			w.Header().Set("Connection", "close")
 			WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_completion_events_request"))
 			return
 		}

@@ -189,29 +189,42 @@ func TestCompletionEventsMalformedValueAndEOF(t *testing.T) {
 func TestCompletionEventsRejectsUnsentBodyWithoutDrain(t *testing.T) {
 	for _, header := range []string{"Content-Length: 100", "Transfer-Encoding: chunked"} {
 		t.Run(header, func(t *testing.T) {
-			fixture := &completionEventsFixture{}
-			server := httptest.NewServer(eventRouter(fixture))
-			defer server.Close()
-			conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer conn.Close()
-			if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			_, err = io.WriteString(conn, "GET "+eventRoute(eventFixtureValue().DatasetID)+" HTTP/1.1\r\nHost: localhost\r\n"+header+"\r\n\r\n")
-			if err != nil {
-				t.Fatal(err)
-			}
-			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
-			if err != nil {
-				t.Fatal("response blocked on missing request body", err)
-			}
-			defer response.Body.Close()
-			body, err := io.ReadAll(response.Body)
-			if err != nil || response.StatusCode != 400 || !response.Close || fixture.calls.Load() != 0 || !bytes.Contains(body, []byte("invalid_completion_events_request")) {
-				t.Fatalf("body was drained/subscribed: %d %s %v", response.StatusCode, body, err)
+			for _, rejection := range []string{"plain", "query", "last-event-id", "bad-dataset"} {
+				t.Run(rejection, func(t *testing.T) {
+					fixture := &completionEventsFixture{}
+					server := httptest.NewServer(eventRouter(fixture))
+					defer server.Close()
+					conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer conn.Close()
+					if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+						t.Fatal(err)
+					}
+					path, extra := eventRoute(eventFixtureValue().DatasetID), ""
+					switch rejection {
+					case "query":
+						path += "?since=0"
+					case "last-event-id":
+						extra = "Last-Event-ID: saved-event\r\n"
+					case "bad-dataset":
+						path = eventRoute("bad")
+					}
+					_, err = io.WriteString(conn, "GET "+path+" HTTP/1.1\r\nHost: localhost\r\n"+header+"\r\n"+extra+"\r\n")
+					if err != nil {
+						t.Fatal(err)
+					}
+					response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+					if err != nil {
+						t.Fatal("response blocked on missing request body", err)
+					}
+					defer response.Body.Close()
+					body, err := io.ReadAll(response.Body)
+					if err != nil || response.StatusCode != 400 || !response.Close || fixture.calls.Load() != 0 || !bytes.Contains(body, []byte("invalid_completion_events_request")) {
+						t.Fatalf("body was drained/subscribed: %d %s %v", response.StatusCode, body, err)
+					}
+				})
 			}
 		})
 	}
