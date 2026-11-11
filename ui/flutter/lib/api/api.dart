@@ -1,3 +1,4 @@
+import 'dart:async' as async;
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -126,6 +127,9 @@ class ActiveApiSnapshot {
 }
 
 ActiveApiSnapshot? _activeApiSnapshot;
+final _activeApiChanges = ValueNotifier<ActiveApiSnapshot?>(null);
+ValueListenable<ActiveApiSnapshot?> get activeApiSnapshotChanges =>
+    _activeApiChanges;
 ActiveApiSnapshot? get activeApiSnapshot => _activeApiSnapshot;
 
 void init(String network, String address, String apiToken,
@@ -141,13 +145,16 @@ void init(String network, String address, String apiToken,
       _client.address,
       matches && taskBatchRoute?.supported == true ? taskBatchRoute : null,
       _client);
+  _activeApiChanges.value = _activeApiSnapshot;
 }
 
 /// Only the frozen read endpoints and dataset-scoped three actions. No redirect
 /// replay, arbitrary URL, legacy POST fallback or global parser changes.
 Future<Response<dynamic>> scopedTaskBatchRequest(
     ActiveApiSnapshot snapshot, String method, String path,
-    {Map<String, dynamic>? data, Map<String, dynamic>? queryParameters}) async {
+    {Map<String, dynamic>? data,
+    Map<String, dynamic>? queryParameters,
+    CancelToken? cancelToken}) async {
   var allowed = false;
   if (method == 'GET' && data == null) {
     if (path == '/api/v1/dataset/identity' && queryParameters == null) {
@@ -203,7 +210,47 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
     return await snapshot._transport.dio.request(path,
         data: data,
         queryParameters: queryParameters,
+        cancelToken: cancelToken,
         options: Options(method: method, followRedirects: false));
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
+}
+
+/// Only the live completion stream. No query, recovery header or redirect.
+Future<Response<dynamic>> verifiedCompletionEventsRequest(
+    ActiveApiSnapshot snapshot,
+    String datasetId,
+    CancelToken cancelToken) async {
+  if (RegExp(r'^[0-9a-f]{32}$').stringMatch(datasetId) != datasetId) {
+    throw ArgumentError('invalid_completion_dataset');
+  }
+  if (!snapshot.isCurrent || snapshot.taskBatchRoute?.supported != true) {
+    throw StateError('completion_api_changed');
+  }
+  final pending = snapshot._transport.dio.get<ResponseBody>(
+      '/api/v1/datasets/$datasetId/verified-http/v1/completion-events',
+      cancelToken: cancelToken,
+      options: Options(
+          responseType: ResponseType.stream,
+          followRedirects: false,
+          receiveTimeout: Duration.zero,
+          headers: {'Accept': 'text/event-stream'}));
+  try {
+    // A local header deadline; the established stream may be idle indefinitely.
+    return await pending.timeout(const Duration(seconds: 10));
+  } on async.TimeoutException {
+    cancelToken.cancel('completion_headers_timeout');
+    // Keep the real request fence until cancellation/late response settles.
+    try {
+      final late = await pending;
+      final raw = late.data;
+      if (raw != null) {
+        await raw.stream.listen((_) {}, onError: (Object _) {}).cancel();
+      }
+    } catch (_) {}
+    throw ConnectionException('completion_headers_timeout');
   } on DioException catch (error) {
     if (error.response != null) return error.response!;
     rethrow;
