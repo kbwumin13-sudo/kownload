@@ -23,6 +23,12 @@ jobs:
           channel: stable
       - name: Go tests
         run: go test -tags nosqlite ./...
+      - name: MCP dependency verification
+        working-directory: cmd/kownload-mcp
+        run: go mod verify
+      - name: MCP module tests (race)
+        working-directory: cmd/kownload-mcp
+        run: go test -race ./...
       - name: Flutter dependencies
         working-directory: ui/flutter
         run: flutter pub get --enforce-lockfile
