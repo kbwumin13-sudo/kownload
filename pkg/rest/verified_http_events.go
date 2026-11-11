@@ -26,22 +26,33 @@ type verifiedHTTPDoneSource interface {
 	SubscribeVerifiedHTTPDone(context.Context, string) (<-chan download.VerifiedHTTPDoneEvent, func(), error)
 }
 
-// No fresh-C publisher is connected yet. Capture this server's owner and decline
-// after a read-only domain check. A pure broker must not turn the capability on.
-type unsupportedVerifiedHTTPEvents struct{ core *download.Downloader }
+type verifiedHTTPEventsCore interface {
+	verifiedHTTPDoneSource
+	VerifiedHTTPCapabilityForDataset(string) (download.VerifiedHTTPCapability, error)
+}
 
-func (b unsupportedVerifiedHTTPEvents) SubscribeVerifiedHTTPDone(_ context.Context, expected string) (<-chan download.VerifiedHTTPDoneEvent, func(), error) {
-	identity, err := b.core.DatasetIdentity()
+// Capture this server's full Core seam. A compiled broker or subscriber alone
+// never enables SSE: the domain-checked writer/publication capability must be
+// supported before allocating a live subscription or writing stream headers.
+type verifiedHTTPEventsAdapter struct{ core verifiedHTTPEventsCore }
+
+func (a verifiedHTTPEventsAdapter) SubscribeVerifiedHTTPDone(ctx context.Context, expected string) (<-chan download.VerifiedHTTPDoneEvent, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	capability, err := a.core.VerifiedHTTPCapabilityForDataset(expected)
 	if err != nil {
 		return nil, nil, err
 	}
-	if identity.Version != 1 || !scopedDatasetPattern.MatchString(identity.DatasetID) {
-		return nil, nil, download.ErrDatasetInvalid
+	if capability.Version != 1 || capability.Capability != verifiedHTTPCapability || !capability.Supported {
+		return nil, nil, errCompletionEventsUnsupported
 	}
-	if identity.DatasetID != expected {
-		return nil, nil, download.ErrDatasetMismatch
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
-	return nil, nil, errCompletionEventsUnsupported
+	// Subscribe checks the same expected dataset again in its own owned View;
+	// never substitute an identity read or subscribe to a different domain.
+	return a.core.SubscribeVerifiedHTTPDone(ctx, expected)
 }
 
 func registerVerifiedHTTPEventRoutes(router *mux.Router, source verifiedHTTPDoneSource) {
@@ -86,7 +97,7 @@ func registerVerifiedHTTPEventRoutes(router *mux.Router, source verifiedHTTPDone
 func writeCompletionEventsError(w http.ResponseWriter, err error) {
 	status, message := http.StatusServiceUnavailable, "completion_events_unavailable"
 	switch {
-	case errors.Is(err, errCompletionEventsUnsupported):
+	case errors.Is(err, errCompletionEventsUnsupported), errors.Is(err, download.ErrVerifiedHTTPUnsupported):
 		status, message = http.StatusNotImplemented, "verified_http_unsupported"
 	case errors.Is(err, download.ErrVerifiedHTTPEventsCapacity):
 		message = "completion_events_capacity"

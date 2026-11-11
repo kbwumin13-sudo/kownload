@@ -12,6 +12,12 @@
 完整Core接点缺失时返回unsupported JSON，不打开SSE头，不因broker可用而开放capability。
 旧单Listener不被替换。查询、恢复、重放和unknown C ACK均不得调用publish。
 
+REST adapter先调用同Core的`VerifiedHTTPCapabilityForDataset(D)`，严格核version=1、
+capability=http-sha256-completion/v1及supported=true；否则501 JSON且零订阅。
+通过后才以原请求ctx/原D调用真实Subscribe，后者再次守域；订阅错误仍在SSE头之前处理。
+本地读取接线底座82a54的能力仍false。注入事件的HTTP测试只证明传输，不替代最终
+Core fresh C ACK→API线性化→事件及恢复零补发的同源验证；不修改首包40/5e6候选。
+
 事件只有四字段：`{version:1,datasetId:<32lowerhex>,taskId:<ID>,completionId:<R冻结CID>}`。
 新事件的Task/CID为非空有效UTF-8，各不超过128 UTF-8字节；这只是传输边界，不改Task格式。
 没有fresh bool、SHA、路径、凭据、时间或eventId。

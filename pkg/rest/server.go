@@ -134,7 +134,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	registerDatasetCatalogRoutes(r, Downloader)
 	registerScopedBatchOperationRoutes(r, Downloader)
 	registerVerifiedHTTPRoutes(r, verifiedHTTPAdapter{core: Downloader})
-	registerVerifiedHTTPEventRoutes(r, unsupportedVerifiedHTTPEvents{core: Downloader})
+	registerVerifiedHTTPEventRoutes(r, verifiedHTTPEventsAdapter{core: Downloader})
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
 	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(BrowserHandoff)
