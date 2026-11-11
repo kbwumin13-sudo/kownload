@@ -86,6 +86,7 @@ def verify_packaged_mcp(app, manifest, execute_version=False):
 def seal_candidate(app, entitlements, manifest, mcp_sdk=None):
     # Sign all inner code first; outer signing deliberately omits --deep, so
     # it cannot mutate an already hashed Helper behind the manifest's back.
+    prestripped_mcp = mcp_helper(app) if mcp_sdk is not None else None
     mach = []
     for file in app.rglob('*'):
         if file.is_file() and not file.is_symlink():
@@ -94,7 +95,10 @@ def seal_candidate(app, entitlements, manifest, mcp_sdk=None):
             if magic in [b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe']:
                 mach.append(file)
     for file in mach:
-        run('xcrun', 'strip', '-S', '-x', file)
+        # Go already linked this helper with -w -s. Apple strip rejects its
+        # cgo indirect symbols on supported SDKs; signing still applies below.
+        if file != prestripped_mcp:
+            run('xcrun', 'strip', '-S', '-x', file)
         run('codesign', '--force', '--sign', '-', file)
     for framework in sorted(app.rglob('*.framework'), key=lambda x: len(x.parts), reverse=True):
         if not framework.is_symlink():

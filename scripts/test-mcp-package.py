@@ -73,6 +73,23 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(self.manifest['mcp']['sourceCommit'], self.manifest['sourceCommit'])
         self.assertEqual(self.manifest['mcp']['readApiVersion'], 1)
 
+    def test_go_mcp_skips_apple_strip_but_keeps_signing_and_other_stripping(self):
+        executable = self.app / 'Contents/MacOS/kownload'
+        executable.parent.mkdir()
+        executable.write_bytes(b'\xcf\xfa\xed\xfeApp fixture')
+        sign = self.signer
+
+        def reject_mcp_strip(*args, **kwargs):
+            if args[:2] == ('xcrun', 'strip') and args[-1] == self.helper:
+                raise RuntimeError('indirect symbols cannot be stripped')
+            sign(*args, **kwargs)
+
+        with mock.patch.object(build, 'run', reject_mcp_strip), mock.patch.object(build, 'output', self.version):
+            build.seal_candidate(self.app, self.root / 'entitlements', self.manifest, build.MCP_SDK_VERSION)
+        self.assertIn(('xcrun', 'strip', '-S', '-x', executable), self.calls)
+        self.assertIn(('codesign', '--force', '--sign', '-', self.helper), self.calls)
+        self.assertTrue(self.verified)
+
     def test_unexpected_outer_resigning_is_detected_before_version_execution(self):
         self.break_outer = True
         with self.assertRaisesRegex(RuntimeError, 'digest differs'):
