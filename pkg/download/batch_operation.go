@@ -12,6 +12,7 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/pkg/base"
+	"github.com/GopeedLab/gopeed/pkg/util"
 )
 
 const (
@@ -95,6 +96,34 @@ func cloneOperationJSON[T any](v T) (T, error) {
 	err = decodeStoredJSON(raw, &copied)
 	return copied, err
 }
+
+// initOperationOptions freezes Extra without passing opaque numbers through
+// the legacy Options.Clone decoder. Defaults and path validation stay shared.
+func (d *Downloader) initOperationOptions(input *base.Options) (*base.Options, error) {
+	copied, err := cloneOperationJSON(input)
+	if err != nil {
+		return nil, err
+	}
+	var extra any
+	if copied != nil {
+		extra, copied.Extra = copied.Extra, nil
+	}
+	opts, err := d.initOptions(copied)
+	if err != nil {
+		return nil, err
+	}
+	opts.Extra = extra
+	return opts, nil
+}
+
+// Caller owns the task's metadata lock when it may change concurrently.
+func (t *Task) cloneExecutionMeta() (*fetcher.FetcherMeta, error) {
+	if t.CreationOperation != nil {
+		return cloneOperationJSON(t.Meta)
+	}
+	return util.DeepClone(t.Meta), nil
+}
+
 func canonicalBatch(r BatchOperationRequest) ([]*base.CreateTaskBatchItem, string, error) {
 	if r.Version != 1 || !operationIDPattern.MatchString(r.OperationID) || len(r.Reqs) == 0 || len(r.Reqs) > 10000 {
 		return nil, "", ErrOperationInvalid
@@ -311,7 +340,7 @@ func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperatio
 				m.Error = "unsupported_protocol"
 			} else {
 				m.Protocol = fm.Name()
-				m.Options, e = d.initOptions(item.Opts)
+				m.Options, e = d.initOperationOptions(item.Opts)
 				if e != nil {
 					m.State = "failed"
 					m.Error = "invalid_options"

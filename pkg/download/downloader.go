@@ -966,72 +966,50 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 }
 
 func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
+	// Serialize removal and persistence with operation publication. Listeners
+	// may reenter lifecycle APIs, so deliver events only after releasing this lock.
 	d.operationMu.Lock()
-	defer d.operationMu.Unlock()
+	var deleted []*Task
+	defer func() {
+		d.operationMu.Unlock()
+		for _, task := range deleted {
+			d.emit(EventKeyDelete, task)
+		}
+	}()
+
+	var selected []*Task
 	if filter == nil || filter.IsEmpty() {
-		return d.deleteAll(force)
-	}
-
-	deleteTasks := d.getTasksByFilter(filter)
-	if len(deleteTasks) == 0 {
-		return
-	}
-
-	deleteIds := make([]string, 0)
-	deleteTasksPtr := make([]*Task, 0)
-	for _, task := range deleteTasks {
-		deleteIds = append(deleteIds, task.ID)
-		deleteTasksPtr = append(deleteTasksPtr, task)
-	}
-	func() {
 		d.lock.Lock()
-		defer d.lock.Unlock()
-
-		for _, id := range deleteIds {
+		selected = append(selected, d.tasks...)
+		d.tasks = make([]*Task, 0)
+		d.clearQueueLocked()
+		d.lock.Unlock()
+	} else {
+		selected = d.getTasksByFilter(filter)
+		d.lock.Lock()
+		for _, task := range selected {
 			for i, t := range d.tasks {
-				if t.ID == id {
+				if t.ID == task.ID {
 					d.tasks = append(d.tasks[:i], d.tasks[i+1:]...)
 					break
 				}
 			}
 			for i, t := range d.waitTasks {
-				if t.ID == id {
+				if t.ID == task.ID {
 					d.dequeueLocked(i)
 					break
 				}
 			}
 		}
-	}()
-
-	for _, task := range deleteTasksPtr {
-		err = d.doDelete(task, force)
-		if err != nil {
-			return
-		}
+		d.lock.Unlock()
 	}
-
-	d.notifyRunning()
-	return
-}
-
-func (d *Downloader) deleteAll(force bool) (err error) {
-	var deleteTasksTemp []*Task
-	func() {
-		d.lock.Lock()
-		defer d.lock.Unlock()
-
-		for _, task := range d.tasks {
-			deleteTasksTemp = append(deleteTasksTemp, task)
-		}
-		d.tasks = make([]*Task, 0)
-		d.clearQueueLocked()
-	}()
-
-	for _, task := range deleteTasksTemp {
+	for _, task := range selected {
 		if err = d.doDelete(task, force); err != nil {
 			return
 		}
+		deleted = append(deleted, task)
 	}
+	d.notifyRunning()
 	return
 }
 
@@ -1100,7 +1078,6 @@ func (d *Downloader) doDelete(task *Task, force bool) (err error) {
 		d.Logger.Error().Stack().Err(err).Msgf("delete task failed, task id: %s", task.ID)
 		return
 	}
-	d.emit(EventKeyDelete, task)
 	return
 }
 
@@ -1613,7 +1590,11 @@ func (d *Downloader) restoreFetcher(task *Task) error {
 			return err
 		}
 	}
-	task.fetcher = f(util.DeepClone(task.Meta), v)
+	meta, err := task.cloneExecutionMeta()
+	if err != nil {
+		return err
+	}
+	task.fetcher = f(meta, v)
 	if task.fetcher == nil {
 		task.fetcher = task.fetcherManager.Build()
 	}
@@ -1791,8 +1772,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		// Resolve owns its request/options. Keep the published task view detached
 		// so Pause can cancel resolution without waiting for a snapshot lock.
 		task.dataLock.RLock()
-		resolveMeta := util.DeepClone(task.Meta)
+		resolveMeta, cloneErr := task.cloneExecutionMeta()
 		task.dataLock.RUnlock()
+		if cloneErr != nil {
+			return cloneErr
+		}
 		if resolveMeta.Res == nil {
 			var resolveErr error
 			if resolver, ok := task.fetcher.(fetcher.TaskResolver); ok {
