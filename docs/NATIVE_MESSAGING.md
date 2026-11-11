@@ -6,6 +6,37 @@
 
 ## 请求
 
+### 身份握手与绑定（identityProtocol 1）
+
+`hostInfo` 接受 `params:{version:1,reportedBrowser:"chrome"|"edge",clientId}`，不唤醒
+App、不转发业务请求。返回 `version/product/nativeProtocol/identityProtocol/build`、
+`supportedHostNames/callerOrigin/routeScope` 和分层 App/Core 状态。callerOrigin 来自
+主程序实际匹配的浏览器 argv，不能由 params 覆写。reportedBrowser 只是客户端自报。
+routeScope 是实际 host.sock 规范路径的 SHA-256，一致性线索而非秘密或发布者认证。
+构建 SHA/版本由同一次构建输入注入；缺失/格式未知返回 `unknown`。
+
+Native 用只读 socket 探测填 `app.reachable`，随后仅向该 socket 的 `/identity` POST
+`{method:"hostInfo",params:{version:1}}`。配套 App 的无状态端点返回版本1、产品、
+identityProtocol、build 与实际 routeScope；不读写 sync/client/Hive。Native 只保留
+白名单类型字段，不透传额外正文。旧 App 404、未支持或读取失败时 `app.identity=null`，
+可达性不等于身份已验证。`core.reachable` 和 `core.handoffVersion` 仍为 null，表示
+未检测；显式流程在锁定路由后另走已有只读 handoffCapabilities，不能从 host/App
+版本推断 Core 能力，也不自动探测用户配置的网络 API。
+
+新客户端在首次修改请求**之前**持久保存
+`bridgeBinding:{version:1,hostName,routeScope}`，每个业务请求附顶层
+`identityProtocol:1` 和该 binding。存储失败不得发送写请求。Native 实际写入进程在
+唤醒和转发前重新核路由，不信任另一个 sendNativeMessage 进程的旧握手；唤醒后再次核对。
+未知协议、缺绑定、路由变化分别返回 `identity_unsupported/binding_required/route_mismatch`，
+不转发。原 origin/manifest 校验仍必需。hostName 只校验属于支持集合；浏览器选择的
+manifest 名由调用端记录，host 无法凭 argv 认证所选名称。
+
+旧客户端无这两个顶层字段时保持既有 wire 兼容，不具有新路由保证。发出写请求后无 ACK
+不切 host 重放；重启只能沿原绑定、同 operationId 先查权威结果。旧未绑定 pending
+保持未知，不自动迁移、清空或重造。助手本地接线分别验证存储失败零写、worker 重启和跨路由拒绝；尚未作日常浏览器切换或安装验收。
+
+### 既有业务请求
+
 ```json
 {"method":"create","operationId":"550e8400-e29b-41d4-a716-446655440000","meta":{"silent":false},"params":{"req":{"url":"https://example.org/file"}}}
 ```
@@ -17,7 +48,22 @@
 | `meta` | 可省略的对象；`silent` 可省略，默认 false；其余产品元数据透传给 Flutter |
 | `params` | ping/wakeup 可省略；create/forward 必须是对象，保持既有产品参数结构 |
 
-同一次用户提交及其查询/重试必须沿用 operationId，新的显式提交使用新 ID。ID 不从 URL、文件名或 Cookie 推导。助手的做法：每次点击生成新 ID；同一次点击只在结果未知时（`request_failed`、`ipc_unavailable`、5xx 的 `http_error`）用原 ID 自动重发，最多两次；`invalid_response` 不重发。旧版 host（build 25 及更早）的应答没有 `httpStatus` 等字段，归为 `legacy_host`：旧版应用可能已经建好任务，而旧 host 不去重，所以这次点击就此结束、不保留 ID，提示“下载器版本较旧，本次提交可能已创建任务，请在下载器中查看；回退旧版时请同时换回旧版助手”。仍未得到确定答复的 ID 留在会话里，下一次点击先用它收尾：已创建就直接返回原任务，否则清除后再用新 ID 提交。accepted、业务失败、4xx 都是确定答复，所以关闭确认面板或修正条件后再点会重新打开或重新执行。去重与持久化由 Flutter/REST 权威实现；host 不做去重，不保存请求，不在超时或应答丢失后重发 POST。没有 ID 的旧请求不能承诺跨请求幂等。
+同一次用户提交及其查询必须沿用 operationId，新的显式提交使用新 ID，不从 URL、文件名
+或 Cookie 推导。S1 助手先在 profile local `nativeBridgeBindingV1` 保存版本1的
+hostName/routeScope，capture 的既有 pending 和媒体既有 session operation 再保存同一
+不可变绑定。profile 保存成功但 job 保存失败仍不发 wake/prepare/create；明确尚未发送
+的普通下载恢复浏览器，已发送 ACK 未知沿原两阶段规则保持/查询。
+
+媒体只在首次明确提交时发送一次 create。无 ACK/5xx/无效回执及 worker 重启先按原绑定、
+原 op 查询 App `browser/submission`；created 复用原 taskIds，accepted 仍是待确认。
+unknown 或查询失联不重发 create、不另换 host、不清 journal 后新建。旧未绑定字符串
+operation、未知版本或坏 shape 保持未知；已明确取消的旧确认可由下一次显式点击开启新 op。
+旧助手的重发 delay 常量仅保留内部兼容导出，S1 提交路径不使用。
+
+App 已明确受理的 accepted、业务失败、4xx 仍沿原回执契约，不把 accepted 说成建任务。
+旧格式 create 回执（没有 httpStatus 等字段）仍按 `legacy_host` 处理：可能已创建，
+单次点击不重发；旧客户端与兼容 alias 能力保留。新助手的只读身份握手失败时不降级
+到旧 alias 或旧一阶段捕获。无 ID 的旧请求不能承诺幂等；host 从不自动重试 POST。
 
 | 方法 | 参数与行为 | 成功条件 |
 | --- | --- | --- |

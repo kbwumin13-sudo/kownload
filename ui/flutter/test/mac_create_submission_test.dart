@@ -24,6 +24,9 @@ import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
+import 'package:gopeed/util/util.dart';
+
+import 'support/onboarding_check_fixture.dart';
 
 class _App extends AppController {
   final browserResults = <Map<String, dynamic>>[];
@@ -83,6 +86,91 @@ Task _task(String id, Status status) => Task(
     );
 
 void main() {
+  for (final preview in [true, false]) {
+    testWidgets(
+        'clipboard isolation preserves explicit paste; preview=$preview',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final root = Directory('/tmp').createTempSync('create-clipboard-');
+      await tester.runAsync(() =>
+          Util.initStorageDir(previewStorage: preview ? root.path : null));
+      Database.instance.box = _Box()..onboardingCompleted = true;
+      final app = Get.put<AppController>(_App());
+      app.downloaderConfig.value.downloadDir = root.path;
+      Get.put(CreateController());
+      MacPanel.presentation.value = 'panel';
+      MacPanel.incoming.value = null;
+      MacPanel.taskResult.value = null;
+      var clipboard = 'https://fixture.test/automatic';
+      var reads = 0;
+      var writes = 0;
+      var creates = 0;
+      var resolves = 0;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.getData') {
+          reads++;
+          expect(call.arguments, 'text/plain');
+          return {'text': clipboard};
+        }
+        if (call.method == 'Clipboard.setData') writes++;
+        return null;
+      });
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+      await tester.binding.setSurfaceSize(const Size(640, 760));
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        MacPanel.incoming.value = null;
+        MacPanel.taskResult.value = null;
+        MacPanel.cancelAutoHide();
+        Get.reset();
+        Get.routerDelegate = null;
+        Get.routeInformationParser = null;
+        await tester.binding.setSurfaceSize(null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(MacPanel.channel, null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+        await Util.initStorageDir();
+        root.deleteSync(recursive: true);
+      });
+      await tester.pumpWidget(
+          GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+        GetPage(
+            name: '/',
+            page: () => CreateView(
+                  taskCreator: (_) async {
+                    creates++;
+                    return 'unexpected';
+                  },
+                  taskResolver: (_) async {
+                    resolves++;
+                    throw StateError('unexpected resolve');
+                  },
+                ))
+      ]));
+      await tester.pumpAndSettle();
+      final input = find.byKey(const ValueKey('panel-download-input'));
+      expect(reads, preview ? 0 : 1);
+      expect(tester.widget<TextFormField>(input).controller!.text,
+          preview ? '' : clipboard);
+      // Rebuilding an empty input retains the original once-only automatic contract.
+      await tester.enterText(input, '');
+      await tester.pumpAndSettle();
+      expect(reads, preview ? 0 : 1);
+      clipboard = 'https://fixture.test/explicit-paste';
+      await tester.tap(find.byTooltip('粘贴'));
+      await tester.pumpAndSettle();
+      expect(reads, preview ? 1 : 2);
+      expect(tester.widget<TextFormField>(input).controller!.text, clipboard);
+      expect(writes, 0);
+      expect(creates, 0);
+      expect(resolves, 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets(
       'native panel confirms the original operation and queues a second capture',
       (tester) async {
@@ -622,6 +710,8 @@ void main() {
       'successful capture clears authentication for the next site and advanced errors stay visible',
       (tester) async {
     if (!Platform.isMacOS) return;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
+    addTearDown(() => MacOnboarding.checksOverride = null);
     final requests = <Map<String, dynamic>>[];
     var reject = false;
     Future<String> submitTask(CreateTask request) async {
@@ -692,6 +782,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.enterText(find.byKey(const ValueKey('onboarding-directory')),
         '/tmp/first-download');
+    await checkOnboardingDirectory(tester, settle: false);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     MacPanel.cancelAutoHide();

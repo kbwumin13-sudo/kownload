@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as path;
 import 'app_identity.dart';
@@ -16,48 +15,6 @@ Map<String, dynamic> nativeManifest(String name, String executable,
             .map((id) => 'chrome-extension://$id/')
             .toList(),
     };
-
-/// The caller chooses an explicit destination. Startup never switches a browser.
-/// Backups stay private and preserve the original bytes for simple rollback.
-Future<void> writeNativeManifests(
-    {required String directory,
-    required String executable,
-    required String backupDirectory,
-    bool firefox = false}) async {
-  if (!path.isAbsolute(directory) ||
-      !path.isAbsolute(executable) ||
-      !path.isAbsolute(backupDirectory)) {
-    throw ArgumentError('absolute paths required');
-  }
-  await Directory(directory).create(recursive: true);
-  await Directory(backupDirectory).create(recursive: true);
-  await Process.run('/bin/chmod', ['700', backupDirectory]);
-  for (final name in [AppIdentity.hostName, AppIdentity.legacyHostName]) {
-    final file = File(path.join(directory, '$name.json'));
-    final bytes = utf8.encode(const JsonEncoder.withIndent('  ')
-        .convert(nativeManifest(name, executable, firefox: firefox)));
-    if (await file.exists()) {
-      final previous = await file.readAsBytes();
-      if (base64Encode(previous) == base64Encode(bytes)) continue;
-      // Never overwrite the first rollback copy of this installation.
-      final backup = File(path.join(backupDirectory, '$name.json'));
-      final absent = File(path.join(backupDirectory, '$name.absent'));
-      if (!await backup.exists() && !await absent.exists()) {
-        await backup.writeAsBytes(previous, flush: true);
-        await Process.run('/bin/chmod', ['600', backup.path]);
-      }
-    } else {
-      final absent = File(path.join(backupDirectory, '$name.absent'));
-      final backup = File(path.join(backupDirectory, '$name.json'));
-      if (!await absent.exists() && !await backup.exists()) {
-        await absent.writeAsString('', flush: true);
-      }
-    }
-    final temp = File('${file.path}.tmp');
-    await temp.writeAsBytes(bytes, flush: true);
-    await temp.rename(file.path);
-  }
-}
 
 /// Chromium browsers whose manifests the installed app switches on macOS.
 const switchableBrowsers = ['chrome', 'edge'];
@@ -97,42 +54,16 @@ String macManifestDirectory(String browser,
 
 enum ManifestRoute { thisApp, elsewhere, none }
 
-/// Where the browser's two host names lead now. The old version may have
-/// rewritten the legacy name since, so this is shown, never assumed.
+/// The old path-only helper cannot establish current App ownership. Call the
+/// read-only NativeManifestService instead. Kept for older call sites until
+/// the settings UI consumes per-browser evidence.
 Future<ManifestRoute> manifestRoute(String directory, String executable) async {
-  var present = 0, ours = 0;
   for (final name in [AppIdentity.hostName, AppIdentity.legacyHostName]) {
-    final file = File(path.join(directory, '$name.json'));
-    if (!await file.exists()) continue;
-    present++;
-    try {
-      final value = jsonDecode(await file.readAsString());
-      if (value is Map && value['path'] == executable) ours++;
-    } catch (_) {}
+    if (await FileSystemEntity.type(path.join(directory, '$name.json'),
+            followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      return ManifestRoute.elsewhere;
+    }
   }
-  if (ours == 2) return ManifestRoute.thisApp;
-  return present == 0 ? ManifestRoute.none : ManifestRoute.elsewhere;
-}
-
-/// Explicit, reversible switch of every installed Chromium browser (its
-/// profile directory exists) to [executable]: the new name is written and the
-/// legacy name com.gopeed.gopeed is pointed at the same host. The first
-/// original of each file is kept in <storage>/native-manifest-backups/<browser>
-/// for scripts/rollback-identity.py. Returns the switched browsers.
-Future<List<String>> switchBrowserManifests(
-    {required String home,
-    required String executable,
-    required String storageDir}) async {
-  final switched = <String>[];
-  for (final browser in switchableBrowsers) {
-    final directory = macNativeHostsDirectory(browser, home: home)!;
-    if (!await Directory(path.dirname(directory)).exists()) continue;
-    await writeNativeManifests(
-        directory: directory,
-        executable: executable,
-        backupDirectory:
-            path.join(storageDir, 'native-manifest-backups', browser));
-    switched.add(browser);
-  }
-  return switched;
+  return ManifestRoute.none;
 }

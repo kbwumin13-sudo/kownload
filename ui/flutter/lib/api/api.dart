@@ -112,6 +112,37 @@ void init(String network, String address, String apiToken) {
   _client = _Client(network, address, apiToken);
 }
 
+/// S2-only raw envelope transport, sharing authentication and Unix routing.
+/// Non-2xx data is retained; all other API parsing/redirect policies stay intact.
+Future<Response<dynamic>> taskBatchOperationRequest(String method, String path,
+    {Map<String, dynamic>? data}) async {
+  const prefix = '/api/v1/task-batches/operations';
+  var allowed = method == 'POST' && path == prefix;
+  final match = RegExp(r'^/api/v1/task-batches/operations/([^/]+)(/cancel)?$')
+      .firstMatch(path);
+  if (match != null && data == null) {
+    try {
+      final id = Uri.decodeComponent(match[1]!);
+      allowed =
+          RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$').stringMatch(id) ==
+                  id &&
+              Uri.encodeComponent(id) == match[1] &&
+              ((method == 'GET' && match[2] == null) ||
+                  (method == 'POST' && match[2] == '/cancel'));
+    } on FormatException {
+      allowed = false;
+    }
+  }
+  if (!allowed) throw ArgumentError('invalid_task_batch_endpoint');
+  try {
+    return await _client.dio.request(path,
+        data: data, options: Options(method: method, followRedirects: false));
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
+}
+
 Future<T> _parse<T>(
   Future<Response> Function() fetch,
   T Function(dynamic json)? fromJsonT, {

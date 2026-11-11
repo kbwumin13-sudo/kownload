@@ -39,13 +39,13 @@ export function newOperationId() {
 }
 export const LEGACY_HOST_MESSAGE = '下载器版本较旧，本次提交可能已创建任务，请在下载器中查看；回退旧版时请同时换回旧版助手';
 export function bridgeFailure(kind = 'request_failed') {
-  const kinds = new Set(['invalid_request','unknown_method','wakeup_failed','ipc_unavailable','request_failed','invalid_response','http_error','business_error','legacy_host']);
+  const kinds = new Set(['invalid_request','unknown_method','wakeup_failed','ipc_unavailable','request_failed','invalid_response','http_error','business_error','legacy_host','binding_required','route_mismatch','identity_unsupported','submission_unknown','submission_cancelled']);
   const category = kinds.has(kind) ? kind : 'request_failed';
   return Object.assign(new Error(category === 'legacy_host' ? LEGACY_HOST_MESSAGE : `下载请求未完成（${category}），请重试或查看 kownload`),{category});
 }
-// One explicit click owns one operation ID. Only a failure whose effect is
-// unknown is resent with that ID: the current host, Flutter and REST
-// deduplicate by ID. A legacy host (build 25 and earlier) answers without
+// One explicit click owns one operation ID. S1 queries uncertain outcomes on
+// the original bound route rather than replaying create. The delay constants
+// stay exported for compatibility with older clients/tests. A legacy host answers without
 // the bridge fields and does not deduplicate, so its answer ends the click:
 // the old app may already have created the task. Everything else is a
 // definitive answer, so the next click starts a new operation.
@@ -53,6 +53,7 @@ export const SUBMIT_RESEND_DELAYS = [300,1200];
 export const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
 export function submissionOutcome(error) {
   const category = error?.category;
+  if (category === 'submission_unknown') return 'unknown';
   if (category === 'request_failed' || category === 'ipc_unavailable') return 'resend';
   if (category === 'http_error') return error.httpStatus >= 400 && error.httpStatus < 500 ? 'final' : 'resend';
   return category === 'invalid_response' ? 'unknown' : 'final'; // legacy_host and definitive answers
@@ -344,3 +345,4 @@ export function mediaContextUrls(info,rootUrl) {
 export {installDownloadCapture} from './download-capture.js';
 export {createAppBridge} from './app-bridge.js';
 export {createAppMediaBridge} from './app-media.js';
+export {sendNativeBound,nativeBinding,validBridgeBinding} from './native-identity.js';

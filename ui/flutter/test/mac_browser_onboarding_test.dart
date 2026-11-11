@@ -11,6 +11,8 @@ import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 
+import 'support/onboarding_check_fixture.dart';
+
 class _RealHttp extends HttpOverrides {}
 
 class _App extends AppController {
@@ -39,6 +41,8 @@ void main() {
       (tester) async {
     if (!Platform.isMacOS) return;
     Get.testMode = true;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
+    addTearDown(() => MacOnboarding.checksOverride = null);
     final box = _Box();
     Database.instance.box = box;
     final app = Get.put<AppController>(_App());
@@ -103,6 +107,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const ValueKey('onboarding-directory')),
         '/tmp/chosen-downloads');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(MacOnboarding.completed, isTrue);

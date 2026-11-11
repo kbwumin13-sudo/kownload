@@ -33,9 +33,31 @@ bootstrap 将政策作为非持久 `StartConfig.startupTaskPolicy` 传给 core�
 
 ## Native 清单切换
 
-host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名 `io.github.kbwumin13_sudo.kownload` 与旧名 `com.gopeed.gopeed` 两份 manifest 指向同一个 `kownload-native-host`。清单生成器保留原文件的私密逐字节备份；原本不存在的清单记为 absent，供回退恢复。启动流程不写正式浏览器清单。
+host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名
+`io.github.kbwumin13_sudo.kownload` 是自有助手目标；兼容名 `com.gopeed.gopeed`
+独立检查。启动流程不写正式浏览器清单，存在旧 alias 不表示必须覆盖或可以回退重放。
 
-切换是显式动作：设置 › 通用 › 浏览器助手 › “连接…”，确认后对已有配置目录的 Chrome、Edge 写入新名清单，并把旧名清单改为指向新 host；没有安装的浏览器不创建目录，Firefox 不处理。每个文件第一次被改写前，原字节私密备份到 `<新根>/native-manifest-backups/<chrome|edge>/`（原本不存在的记为 `.absent`），以后重复连接不会覆盖这份备份。设置页同时显示每个浏览器当前的连接归属（本应用、其他程序或未连接）：旧版再次启动可能把旧名清单改回去，这时页面会显示“指向其他程序”，需要时再点一次连接。预览变体只允许 `KOWNLOAD_NATIVE_MANIFEST_DIR` 指定的临时目录，从不写浏览器目录。连接后浏览器下次启动 host 时就用新 host，已加载的助手不必重新安装。
+S1 的单浏览器服务 `inspectBrowser(browser)` 只读；`connectBrowser(browser,
+legacyCompatibility:false)` 必须明确 chrome/edge，不猜默认浏览器、不循环两个目录。
+默认只注册新名。旧无参 connectBrowsers 拒绝并要求选择；设置呈现由对应增量接此接口，
+不能把旧双浏览器按钮当作新服务已完整接线。
+
+归属检查包含 name/type、固定ID allowlist、绝对自有路径、无重定向symlink、当前UID/
+权限及可执行文件与当前App资源的SHA256。路径相同但asset不符为unknown/mismatch；
+不能仅凭旧Bundle ID、文件名或自报product认定属于本App。Gopeed/foreign/unknown
+既有manifest均保留。新名正常时不要求旧alias同path；显式legacyCompatibility仅创建
+缺失alias或更新已证明属于本App的记录，不能用确认框绕过归属。
+
+每browser/name首次原字节或absent先私密保存到
+`<新根>/native-manifest-backups/<chrome|edge>/`，失败不写该manifest；重复操作不覆盖
+首份备份。每文件原子替换，多个文件只报告各自实际结果，不宣称跨文件事务。
+恢复也明确browser/name，只在当前文件仍为本App的预期canonical字节且备份可信时恢复；
+后来被第三方修改则拒绝。预览只在显式临时目录内生成清单，不写日常浏览器目录。
+
+服务输出 `native=untested` 和 App/Core/pending 连接状态null，磁盘configured不等于
+真实Native连接、Core能力或发布者认证。活动Port/助手握手另验，不能杀旧进程强制换载。
+当前本地服务fixture/相关设置回归通过，不代表日常清单已切换；助手写前绑定接线仍需
+完成且在独立候选中验证，见[Native契约](NATIVE_MESSAGING.md)。
 
 ## 预览隔离
 

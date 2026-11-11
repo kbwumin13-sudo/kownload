@@ -10,13 +10,18 @@ import (
 )
 
 var previewBuild string
+var sourceCommit = "unknown"
+var releaseVersion = "unknown"
 
 func main() {
-	allowed := false
+	callerOrigin := ""
 	for _, arg := range os.Args[1:] {
-		allowed = allowed || nativehost.AllowedOrigin(arg)
+		if nativehost.AllowedOrigin(arg) {
+			callerOrigin = arg
+			break
+		}
 	}
-	if !allowed {
+	if callerOrigin == "" {
 		os.Stderr.WriteString("invalid_origin\n")
 		os.Exit(1)
 	}
@@ -30,7 +35,10 @@ func main() {
 	if previewBuild == "true" {
 		wakeup.Open = func(context.Context, string) error { return os.ErrPermission }
 	}
-	dispatch := nativehost.Dispatcher{Client: client, Wakeup: wakeup}
+	dispatch := nativehost.Dispatcher{Client: client, Wakeup: wakeup, Identity: &nativehost.HostIdentity{
+		Socket: client.Socket, CallerOrigin: callerOrigin,
+		Build: nativehost.HostBuild{SourceCommit: sourceCommit, ReleaseVersion: releaseVersion, Preview: previewBuild == "true"},
+	}}
 	if nativehost.Serve(os.Stdin, os.Stdout, func(body []byte) nativehost.Response { return dispatch.Dispatch(context.Background(), body) }) != nil {
 		os.Stderr.WriteString("native_protocol_error\n")
 		os.Exit(1)
