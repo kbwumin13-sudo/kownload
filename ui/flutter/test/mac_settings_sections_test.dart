@@ -18,7 +18,7 @@ import 'package:gopeed/app/modules/setting/views/setting_view.dart';
 import 'package:gopeed/app/routes/app_pages.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/identity/browser_connection.dart';
-import 'package:gopeed/identity/native_manifests.dart';
+import 'package:gopeed/identity/app_identity.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
@@ -27,6 +27,20 @@ import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/util/package_info.dart';
 
 import 'support/onboarding_check_fixture.dart';
+
+ManifestEvidence _manifest(String name, String owner) => ManifestEvidence(name,
+    present: owner != 'missing',
+    schemaValid: owner != 'missing' && owner != 'unknown',
+    allowedOrigin: owner == 'this_app',
+    owner: owner,
+    executable: owner == 'this_app' ? 'current_asset' : 'unavailable');
+BrowserConnectionReport _report(String browser,
+        {String owner = 'missing',
+        String alias = 'foreign',
+        List<String> issues = const []}) =>
+    BrowserConnectionReport(browser, _manifest(AppIdentity.hostName, owner),
+        _manifest(AppIdentity.legacyHostName, alias),
+        issues: issues);
 
 class _App extends AppController {
   @override
@@ -186,14 +200,25 @@ void main() {
     Get.testMode = true;
     // Settings must never read or write the real browser directories.
     BrowserConnection.routes =
-        () async => {'chrome': ManifestRoute.none, 'edge': null};
-    BrowserConnection.connect = () async => throw StateError('unexpected');
+        () async => throw StateError('combined presentation forbidden');
+    BrowserConnection.connect =
+        () async => throw StateError('combined registration forbidden');
+    BrowserConnection.inspect = (browser) async => _report(browser);
+    BrowserConnection.connectOne = (browser,
+            {bool legacyCompatibility = false}) async =>
+        throw StateError('unexpected registration');
+    BrowserConnection.restoreOne = (browser,
+            {String hostName = AppIdentity.hostName}) async =>
+        throw StateError('unexpected restore');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, (call) async => null);
   });
   tearDown(() {
     BrowserConnection.routes = browserRoutes;
     BrowserConnection.connect = connectBrowsers;
+    BrowserConnection.inspect = inspectBrowser;
+    BrowserConnection.connectOne = connectBrowser;
+    BrowserConnection.restoreOne = restoreBrowser;
     Get.reset();
     Get.routerDelegate = null;
     Get.routeInformationParser = null;
@@ -840,36 +865,245 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('browser connection asks first, then switches and refreshes',
+  Future<void> openBrowser(WidgetTester tester, String browser) async {
+    final button = find.byKey(ValueKey('browser-open-$browser'));
+    await tester.scrollUntilVisible(button, 160,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(ValueKey('browser-diagnostics-$browser')), findsOneWidget);
+  }
+
+  testWidgets(
+      'browser diagnostics inspect only disk and never claim a live connection',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final reads = <String>[];
+    BrowserConnection.inspect = (browser) async {
+      reads.add(browser);
+      return _report(browser, owner: 'this_app', alias: 'unknown');
+    };
+    final app = await _mountSettings(tester, 'general');
+    expect(reads, ['chrome', 'edge']);
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('归属：本应用'), findsOneWidget);
+    expect(find.textContaining('归属未知，保留原文件'), findsWidgets);
+    expect(find.textContaining('App IPC：未测试'), findsOneWidget);
+    expect(find.textContaining('绑定冲突及当前权限：未检测'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(reads, ['chrome', 'edge', 'chrome', 'chrome']);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final browser in ['chrome', 'edge']) {
+    testWidgets(
+        'browser diagnostics register only $browser after explicit confirmation',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final calls = <(String, bool)>[];
+      final alias = _manifest(AppIdentity.legacyHostName, 'foreign');
+      BrowserConnection.connectOne =
+          (selected, {bool legacyCompatibility = false}) async {
+        calls.add((selected, legacyCompatibility));
+        return BrowserConnectionReport(
+            selected, _manifest(AppIdentity.hostName, 'this_app'), alias,
+            changedHostNames: const [AppIdentity.hostName]);
+      };
+      final app = await _mountSettings(tester, 'general');
+      await openBrowser(tester, browser);
+      final register = find.byKey(ValueKey('browser-register-$browser'));
+      await tester.tap(register);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('均不修改'), findsOneWidget);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(calls, isEmpty);
+      await tester.tap(register);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, '注册'));
+      await tester.pumpAndSettle();
+      expect(calls, [(browser, false)]);
+      expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+      expect(find.textContaining('App IPC：未测试'), findsOneWidget);
+      expect(find.textContaining('归属：其他程序，保留原文件'), findsOneWidget);
+      expect(alias.owner, 'foreign');
+      expect(app.savedConfigs, isEmpty);
+      await tester.tap(find.text('完成').last);
+      await tester.pumpAndSettle();
+      await openBrowser(tester, browser == 'chrome' ? 'edge' : 'chrome');
+      expect(find.textContaining('配置文件：缺失'), findsOneWidget);
+      expect(calls, hasLength(1));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final owner in ['foreign', 'unknown']) {
+    testWidgets('browser diagnostics preserve $owner new-host ownership',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      BrowserConnection.inspect =
+          (browser) async => _report(browser, owner: owner, alias: 'this_app');
+      final app = await _mountSettings(tester, 'general');
+      await openBrowser(tester, 'chrome');
+      final button = tester.widget<TextButton>(
+          find.byKey(const ValueKey('browser-register-chrome')));
+      expect(button.onPressed, isNull);
+      expect(find.textContaining('已禁止覆盖'), findsOneWidget);
+      expect(find.textContaining('旧名称不受本操作影响'), findsOneWidget);
+      expect(find.textContaining('归属：本应用'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'browser diagnostics registration failure keeps explicit retry and never changes settings',
       (tester) async {
     if (!Platform.isMacOS) return;
     var calls = 0;
-    var connected = false;
-    BrowserConnection.routes = () async => {
-          'chrome': connected ? ManifestRoute.thisApp : ManifestRoute.elsewhere,
-          'edge': null,
-        };
-    BrowserConnection.connect = () async {
+    BrowserConnection.connectOne =
+        (browser, {bool legacyCompatibility = false}) async {
       calls++;
-      connected = true;
-      return ['chrome'];
+      if (calls == 1) {
+        throw const FileSystemException('fixture permission denied');
+      }
+      return _report(browser, owner: 'this_app');
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.byKey(const ValueKey('browser-register-chrome')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, '注册'));
+      await tester.pumpAndSettle();
+      expect(calls, attempt + 1);
+      if (attempt == 0) expect(find.textContaining('注册失败。请检查'), findsOneWidget);
+    }
+    expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+    expect(find.textContaining('Native 实际会话：未测试'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics read failure is unknown and retry affects only selected browser',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    var fail = true;
+    final reads = <String>[];
+    BrowserConnection.inspect = (browser) async {
+      reads.add(browser);
+      if (browser == 'chrome' && fail) {
+        throw const FileSystemException('fixture cannot read');
+      }
+      return _report(browser);
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.text('磁盘状态尚未取得，请点“重新检查”。'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-chrome')))
+            .onPressed,
+        isNull);
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('上次结果不能代表当前状态'), findsOneWidget);
+    fail = false;
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-chrome')))
+            .onPressed,
+        isNotNull);
+    expect(reads, ['chrome', 'edge', 'chrome', 'chrome', 'chrome']);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics do not acknowledge registration before pending service result',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final pending = Completer<BrowserConnectionReport>();
+    var calls = 0;
+    BrowserConnection.connectOne =
+        (browser, {bool legacyCompatibility = false}) {
+      calls++;
+      return pending.future;
     };
     await _mountSettings(tester, 'general');
-    await _reveal(tester, '浏览器连接');
-    expect(find.text('Chrome：指向其他程序（如旧版） · Edge：未检测到'), findsOneWidget);
-    await tester.tap(find.text('连接…'));
+    await openBrowser(tester, 'edge');
+    await tester.tap(find.byKey(const ValueKey('browser-register-edge')));
     await tester.pumpAndSettle();
-    expect(find.text('连接浏览器助手'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(calls, 0);
-    await tester.tap(find.text('连接…'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(TextButton, '连接'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '注册'));
+    await tester.pump();
     expect(calls, 1);
-    expect(find.text('Chrome：已连接本应用 · Edge：未检测到\n已连接，下次在网页上点击下载时生效。'),
-        findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '完成'))
+            .onPressed,
+        isNull);
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-edge')))
+            .onPressed,
+        isNull);
+    pending.complete(_report('edge', owner: 'this_app'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+    expect(find.textContaining('Core 交接能力：未检测'), findsOneWidget);
+    expect(calls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics route mismatch asks to inspect binding without resetting helper data',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    BrowserConnection.inspect = (browser) async =>
+        _report(browser, owner: 'this_app', issues: const ['route_mismatch']);
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('助手绑定与当前注册不一致'), findsOneWidget);
+    expect(find.textContaining('不自动清除助手数据或迁移未决操作'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics ignore late initial disk evidence after a fresh check',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final initial = Completer<BrowserConnectionReport>();
+    var chromeReads = 0;
+    BrowserConnection.inspect = (browser) {
+      if (browser == 'chrome' && ++chromeReads == 1) return initial.future;
+      return Future.value(_report(browser, owner: 'this_app'));
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('归属：本应用'), findsOneWidget);
+    initial.complete(_report('chrome'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('完成').last);
+    await tester.pumpAndSettle();
+    expect(find.text('新名称的磁盘注册可用 · Native 未测试'), findsNWidgets(2));
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
     expect(tester.takeException(), isNull);
   });
 
@@ -903,6 +1137,9 @@ void main() {
         tester.widget<DropdownButton<String>>(find.byWidgetPredicate((w) =>
             w is DropdownButton<String> &&
             w.items!.any((i) => i.value == 'confirm')));
+    expect(find.textContaining('最近一次上报（本机时间）'), findsOneWidget);
+    expect(find.textContaining('助手版本 0.4.3'), findsOneWidget);
+    expect(find.textContaining('下载权限：上报为允许；当前权限和连接未检测。'), findsOneWidget);
     expect(mode().value, 'direct');
     mode().onChanged!('confirm');
     await tester.pumpAndSettle();
@@ -917,6 +1154,7 @@ void main() {
     browsers.onChanged!('edge-one');
     await tester.pumpAndSettle();
     expect(mode().value, 'browser');
+    expect(find.textContaining('下载权限：未确认；当前权限和连接未检测。'), findsOneWidget);
     expect(app.browserIntegration.clients.last.preferences.showAll, false);
     expect(app.savedConfigs, isEmpty);
     expect(tester.takeException(), isNull);
