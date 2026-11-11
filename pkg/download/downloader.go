@@ -2232,9 +2232,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	}
 	go func() {
 		if err := handler(); err != nil {
-			runCancel()
-			invalidateTaskRecovery(task)
-			d.doOnError(task, err, generation)
+			d.failTaskPreparation(task, generation, runCancel, err)
 		}
 	}()
 
@@ -2798,4 +2796,18 @@ func Boot() *boot {
 		panic(err)
 	}
 	return &boot{}
+}
+
+// A preparation can return after releasing task.lock and be preempted before
+// cleanup. Only the captured generation may invalidate its owner. The status
+// guard is the same admission point that assigns the next run's generation;
+// it is released before the normal error/persistence/callback path.
+func (d *Downloader) failTaskPreparation(task *Task, generation uint64, cancel context.CancelFunc, err error) {
+	cancel()
+	task.statusLock.Lock()
+	if task.runGeneration == generation {
+		invalidateTaskRecovery(task)
+	}
+	task.statusLock.Unlock()
+	d.doOnError(task, err, generation)
 }
