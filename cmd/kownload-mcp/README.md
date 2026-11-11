@@ -31,7 +31,7 @@ GOTOOLCHAIN=local "$GO_BIN" build -trimpath -o /tmp/kownload-mcp .
 | `kownload_get_stats` | `id` | `/api/v1/mcp/read/v1/tasks/{id}/stats` | Stats |
 | `kownload_get_errors` | `id` | `/api/v1/mcp/read/v1/tasks/{id}/errors` | LastError |
 
-`id` 为 1…64 个 `[A-Za-z0-9_-]`。cursor 为至多 128 个同字符集字符，空字符串表示末页；只能编码分页位置，不能携带私密 URL、路径、令牌。App 应提供稳定分页语义，单页任务不可重复；桥拒绝超过请求 limit 的结果。S7a stats 为单任务，不伪装全局统计。
+`id` 为 1…64 个 `[A-Za-z0-9_-]`。cursor 为至多 128 个同字符集字符，空字符串表示末页；只能编码分页位置，不能携带私密 URL、路径、令牌。App 应提供稳定分页语义，单页任务不可重复；桥拒绝超过请求 limit 的结果。S7a stats 为单任务，不伪装全局统计。 `available:true` 必须至少包含一个真实已知的统计字段；已知 0 保留为数字 0，未知字段省略。`available:false` 不携带统计或错误字段，不能据此判断为零连接或无错误。桥对该契约的受控 UDS 测试不代表 App 已有发布缓存。
 
 Task：`{id,protocol,status,createdAt,updatedAt,progress}`。
 
