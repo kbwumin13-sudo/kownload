@@ -12,6 +12,7 @@ import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/app/modules/create/controllers/create_controller.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
 import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
+import 'package:gopeed/app/modules/task/views/task_batch_groups.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/database/task_batch_journal.dart';
 import 'package:gopeed/database/task_batch_journal_store.dart';
@@ -137,7 +138,8 @@ void main() {
         .setMockMethodCallHandler(SystemChannels.platform, null);
   });
   Future<void> mount(WidgetTester t,
-      {Duration timeout = const Duration(seconds: 2)}) async {
+      {Duration timeout = const Duration(seconds: 2),
+      bool showGroups = false}) async {
     await t.binding.setSurfaceSize(const Size(900, 850));
     addTearDown(() async {
       await t.pumpWidget(const SizedBox.shrink());
@@ -149,16 +151,28 @@ void main() {
         GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
       GetPage(
           name: '/',
-          page: () => CreateView(
-              batchJournal:
-                  TaskBatchJournalStore(box: journalBox, capacity: 10),
-              batchAcknowledgementTimeout: timeout,
-              taskCreator: (CreateTask task) async {
-                singles++;
-                return singleGate == null
-                    ? 'single-$singles'
-                    : await singleGate!.future;
-              }))
+          page: () {
+            final create = CreateView(
+                batchJournal:
+                    TaskBatchJournalStore(box: journalBox, capacity: 10),
+                batchAcknowledgementTimeout: timeout,
+                taskCreator: (CreateTask task) async {
+                  singles++;
+                  return singleGate == null
+                      ? 'single-$singles'
+                      : await singleGate!.future;
+                });
+            return showGroups
+                ? Material(
+                    child: Column(children: [
+                    Expanded(child: create),
+                    TaskBatchGroups(
+                        tasks: const [],
+                        journal: TaskBatchJournalStore(
+                            box: journalBox, capacity: 10))
+                  ]))
+                : create;
+          })
     ]));
     await t.pumpAndSettle();
     urlInput = t
@@ -175,8 +189,8 @@ void main() {
   }
 
   String input(WidgetTester t) => urlInput!.text;
-  Future<void> checksum(WidgetTester t) async {
-    await mount(t);
+  Future<void> checksum(WidgetTester t, {bool showGroups = false}) async {
+    await mount(t, showGroups: showGroups);
     await t.enterText(find.byKey(const ValueKey('panel-download-input')),
         'https://fixture.invalid/single');
     await t.tap(find.text('更多选项'));
@@ -190,6 +204,184 @@ void main() {
     await t.tap(find.text('confirm'.tr));
     await t.pump();
   }
+
+  void verifiedConflict(int status) {
+    f.verified = true;
+    f.override = (request) async {
+      if (request.method == 'POST') {
+        final op = f.requests.last['body']['operationId'] as String;
+        // The old R belongs to another expected digest. Its history is valid,
+        // but does not acknowledge the new 'a'*64 intent sent by this draft.
+        f.receipts[op] = f.receipt(op, count: 1);
+        final history = f.wrapper(f.receipts[op]!)
+          ..['completionViews'] = [
+            {
+              'version': 1,
+              'scopeVersion': 1,
+              'datasetId': f.dataset,
+              'taskId': '$op-task-0',
+              'completionId': 'old-completion',
+              'available': true,
+              'phase': 'committed',
+              'recordedMatch': true
+            }
+          ];
+        await f.respond(request, history,
+            status: status, code: 1000, msg: 'operation_conflict');
+      } else if (request.method == 'GET' &&
+          request.uri.path.contains('/task-batches/v1/operations/')) {
+        final op = request.uri.pathSegments.last;
+        await f.respond(request, f.wrapper(f.receipts[op]!));
+      } else {
+        await f.handle(request);
+      }
+    };
+  }
+
+  Future<void> queryOriginal(WidgetTester t) async {
+    final query = find.byKey(const ValueKey('manual-batch-query'));
+    final gets = f.scopedGets;
+    await t.ensureVisible(query);
+    await t.tap(query);
+    await t.pump();
+    await spin(
+        t,
+        () =>
+            f.scopedGets > gets &&
+            (query.evaluate().isEmpty ||
+                t.widget<TextButton>(query).onPressed != null));
+  }
+
+  for (final status in [409, 200]) {
+    testWidgets('verified conflict $status keeps draft after old settled GET',
+        (t) async {
+      verifiedConflict(status);
+      await checksum(t);
+      await confirmChecksum(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      expect(input(t), 'https://fixture.invalid/single');
+      await queryOriginal(t);
+      expect(input(t), 'https://fixture.invalid/single');
+      final digest = find.byKey(const ValueKey('http-expected-sha256'));
+      expect(t.widget<TextFormField>(digest).controller!.text, 'A' * 64);
+      expect(find.textContaining('与原批次冲突'), findsOneWidget);
+      expect(MacPanel.taskResult.value, isNull);
+      expect(f.posts, 1);
+      expect(singles, 0);
+      expect(journalBox.puts, 1);
+      final original = f.requests.singleWhere((r) => r['method'] == 'POST');
+      expect(original['body']['integrity']['expectedSHA256'], 'a' * 64);
+      // Neither another history query nor the confirm button can consume a
+      // new permit for this already-conflicted attempt.
+      await t.ensureVisible(digest);
+      await t.enterText(digest, 'C' * 64);
+      await confirmChecksum(t);
+      await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+      expect(input(t), 'https://fixture.invalid/single');
+      expect(f.posts, 1);
+      expect(journalBox.puts, 1);
+      expect(MacPanel.taskResult.value, isNull);
+      expect(t.widget<TextFormField>(digest).controller!.text, 'C' * 64);
+    });
+  }
+
+  testWidgets('verified conflict late history cannot affect a new URL draft',
+      (t) async {
+    verifiedConflict(409);
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t,
+        () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final gate = Completer<void>();
+    var waiting = false;
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    final previous = f.override!;
+    f.override = (request) async {
+      if (request.method == 'GET' &&
+          request.uri.path.contains('/verified-http/v1/operations/')) {
+        waiting = true;
+        await gate.future;
+      }
+      await previous(request);
+    };
+    final query = find.byKey(const ValueKey('manual-batch-query'));
+    await t.ensureVisible(query);
+    await t.tap(query);
+    await t.pump();
+    await spin(t, () => waiting);
+    final url = find.byType(TextFormField).first;
+    await t.ensureVisible(url);
+    await t.enterText(url, 'https://fixture.invalid/new-draft');
+    await t.pump();
+    gate.complete();
+    await spin(t, () => f.inFlight == 0);
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await t.pump(const Duration(milliseconds: 20));
+    expect(input(t), 'https://fixture.invalid/new-draft');
+    expect(find.textContaining('与原批次冲突'), findsNothing);
+    expect(find.byKey(const ValueKey('manual-batch-query')), findsNothing);
+    expect(MacPanel.taskResult.value, isNull);
+    expect(f.posts, 1);
+    expect(singles, 0);
+    expect(journalBox.puts, 1);
+  });
+
+  testWidgets(
+      'verified conflict cold journal restores history without completing a new draft',
+      (t) async {
+    verifiedConflict(409);
+    await checksum(t);
+    await confirmChecksum(t);
+    await spin(t,
+        () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final op = f.requests.singleWhere((r) => r['method'] == 'POST')['body']
+        ['operationId'] as String;
+    final stored = box.get(TaskBatchJournalStore.storageKey);
+    expect(TaskBatchJournal.decode(stored).refs.single.state, 'query_required');
+    await t.pumpWidget(const SizedBox());
+    await t.pump();
+    Get.reset();
+    Get.routerDelegate = null;
+    Get.routeInformationParser = null;
+    final name = box.name;
+    await t.runAsync(() async {
+      await box.close();
+      box = await Hive.openBox(name, path: dir.path);
+      journalBox = JournalBox(box);
+    });
+    final app = Get.put<AppController>(App());
+    app.downloaderConfig.value.downloadDir = dir.path;
+    Get.put(CreateController());
+    Get.put<MacTaskListController>(Tasks());
+    MacPanel.incoming.value = null;
+    MacPanel.taskResult.value = null;
+    await checksum(t, showGroups: true);
+    await spin(
+        t,
+        () =>
+            find.byKey(ValueKey('batch-$op')).evaluate().isNotEmpty &&
+            find.text('已创建 1 · 失败 0 · 待创建 0').evaluate().isNotEmpty);
+    expect(input(t), 'https://fixture.invalid/single');
+    expect(
+        t
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('http-expected-sha256')))
+            .controller!
+            .text,
+        'A' * 64);
+    expect(find.byKey(const ValueKey('manual-batch-query')), findsNothing);
+    expect(MacPanel.taskResult.value, isNull);
+    expect(journalBox.puts, 0);
+    expect(box.get(TaskBatchJournalStore.storageKey), stored);
+    expect(f.posts, 1);
+    expect(singles, 0);
+  });
 
   for (final option in ['autoExtract', 'autoTorrentEnable']) {
     testWidgets(

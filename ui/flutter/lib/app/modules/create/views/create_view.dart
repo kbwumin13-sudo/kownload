@@ -96,6 +96,9 @@ class _ManualBatchAttempt {
   final String input, signature;
   final String? expectedSha256;
   bool sent = false;
+  // A later GET proves only this operation's old history, never acceptance of
+  // the draft that already received a conflicting-intent response.
+  bool conflicted = false;
   _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
       this.input, this.signature,
       {this.expectedSha256});
@@ -243,7 +246,13 @@ class _CreateViewState extends State<CreateView> {
       TaskBatchGroups.referencesChanged();
       return;
     }
-    if (reply.envelope.statusCode == 409) {
+    if (reply.envelope.statusCode == 409 ||
+        (reply.envelope.message == 'operation_conflict' &&
+            reply.envelope.code != null &&
+            reply.envelope.code != 0)) {
+      attempt.conflicted = true;
+    }
+    if (attempt.conflicted) {
       _manualNotice.value = '这次内容与原批次冲突；请查询原批次，不会再次创建。';
       TaskBatchGroups.referencesChanged();
       return;
