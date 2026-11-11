@@ -22,7 +22,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
-| MCP 稳定 bin 的同 inode 安装 xattr（planned，键名/JSON 格式由 11 部署实现定稿） | 尚无 install-helper 实现；不属于 Task/数据库格式，不新增 receipt 库 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知/缺失/摘要不符拒绝升级，不自动认领 | 配对备份恢复 App/桥及稳定二进制 inode 的 xattr；快照丢 xattr 后 fail-closed。xattr 不支持/写失败须在原子发布前失败并保留旧入口；不清除 quarantine 或改变系统信任 |
+| MCP 稳定 bin xattr `io.github.kbwumin13-sudo.kownload.mcp-install`（planned），JSON白名单 `recordVersion:1/product/sourceCommit/version/readApiVersion/architecture/sha256`，最大2048B | 11部署子增量；product=kownload-mcp、40小写hex源码、release+同SHA、readApiVersion=1、arm64、64小写hex摘要；非Task/DB状态，无receipt库 | 旧桥忽略标记；旧CLI无install-helper，不据此自动认领/覆盖 | App/桥按manifest配对；同UID可伪造，标记只记归属/冲突，不是认证 | 未知字段/版本、缺失或摘要不符拒绝升级，不涉及下载自动续跑 | 同私有staging inode发布前写入并读回；不支持/失败保旧入口。备份须另证保留二进制及xattr，当前配对快照不冒称已证明携带新标记；丢失后fail-closed，不清quarantine/系统信任 |
 
 ## 回退单位
 
