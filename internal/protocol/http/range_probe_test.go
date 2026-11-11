@@ -324,7 +324,7 @@ func TestRangeProbeRedirectCookiesAndCredentials(t *testing.T) {
 	for _, crossDomain := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cross_domain=%t", crossDomain), func(t *testing.T) {
 			var finalRequests atomic.Int32
-			final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			serveFinal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				finalRequests.Add(1)
 				if crossDomain {
 					if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
@@ -339,15 +339,26 @@ func TestRangeProbeRedirectCookiesAndCredentials(t *testing.T) {
 				w.Header().Set("Content-Type", "application/octet-stream")
 				http.ServeContent(&hiddenRangeWriter{ResponseWriter: w, delay: time.Millisecond}, r,
 					"payload.bin", time.Time{}, bytes.NewReader(data))
-			}))
+			})
+			final := httptest.NewServer(serveFinal)
 			defer final.Close()
 			redirectURL := final.URL
 			if crossDomain {
 				redirectURL = strings.Replace(redirectURL, "127.0.0.1", "localhost", 1)
 			}
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !crossDomain && r.URL.Path == "/payload" {
+					serveFinal(w, r)
+					return
+				}
 				http.SetCookie(w, &http.Cookie{Name: "session", Value: "issued"})
-				http.Redirect(w, r, redirectURL, http.StatusFound)
+				target := redirectURL
+				if !crossDomain {
+					// Sharing a host but changing ports is cross-origin too. The
+					// credential-retention case stays on this server's origin.
+					target = "/payload"
+				}
+				http.Redirect(w, r, target, http.StatusFound)
 			}))
 			defer origin.Close()
 			f := buildFetcher()

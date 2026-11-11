@@ -283,7 +283,7 @@ func TestBatchOperationQueryDoesNotAttachAndCanceledPOSTRepairsQ(t *testing.T) {
 	if e = d.reserveOperation(store, r, items, hash); e != nil {
 		t.Fatal(e)
 	}
-	if e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
+	if _, e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
 		t.Fatal(e)
 	}
 	q, e := d.QueryBatchOperation(r.OperationID)
@@ -397,10 +397,10 @@ func TestBatchOperationMemberCrashWorker(t *testing.T) {
 	}
 	if stage == "Minside" {
 		crash := &operationCrashStorage{AtomicStorage: store}
-		_ = d.createOperationMember(crash, r.OperationID, hash, 0, items[0])
+		_, _ = d.createOperationMember(crash, r.OperationID, hash, 0, items[0])
 		t.Fatal("crash hook not reached")
 	}
-	if e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
+	if _, e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
 		t.Fatal(e)
 	}
 	os.Exit(91)
@@ -594,7 +594,7 @@ func TestBatchOperationLargeNumberSurvivesTaskStorageAndClone(t *testing.T) {
 	if e = d.reserveOperation(store, r, items, hash); e != nil {
 		t.Fatal(e)
 	}
-	if e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
+	if _, e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
 		t.Fatal(e)
 	}
 	q, e := d.QueryBatchOperation(r.OperationID)
@@ -677,7 +677,7 @@ func TestBatchOperationUnknownPersistedVersionsAreQuarantined(t *testing.T) {
 			if e = d.reserveOperation(store, r, items, hash); e != nil {
 				t.Fatal(e)
 			}
-			if e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
+			if _, e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
 				t.Fatal(e)
 			}
 			record, e := d.loadOperation(r.OperationID)
@@ -762,7 +762,7 @@ func TestBatchOperationTaskReadFailureKeepsCompleteManifestReceipt(t *testing.T)
 	if e = d.reserveOperation(store, r, items, hash); e != nil {
 		t.Fatal(e)
 	}
-	if e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
+	if _, e = d.createOperationMember(store, r.OperationID, hash, 0, items[0]); e != nil {
 		t.Fatal(e)
 	}
 	store.enabled.Store(true)

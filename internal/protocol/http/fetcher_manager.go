@@ -78,6 +78,12 @@ func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	_f := f.(*Fetcher)
 	_f.redirectLock.Lock()
 	redirectURL := _f.redirectURL
+	// The old checkpoint stores only a URL. A method/body conversion cannot
+	// be represented safely. Restored non-GET/HEAD/body requests require a
+	// fresh source context; do not silently replay the original source request.
+	if _f.redirectMethod != "" || _f.redirectDropBody {
+		redirectURL = ""
+	}
 	_f.redirectLock.Unlock()
 	// Copy exported resume data while holding the same lock as download progress.
 	// Storage serializes this value after Store returns.
@@ -127,7 +133,8 @@ func (fm *FetcherManager) Restore() (v any, f func(meta *fetcher.FetcherMeta, v 
 			fetcher.connections = fd.Connections
 		}
 		// Restore redirect URL for resume
-		if fd.RedirectURL != "" {
+		method, body := originalRequestSemantics(fetcher.meta.Req)
+		if fd.RedirectURL != "" && !body && (method == "GET" || method == "HEAD") {
 			fetcher.redirectURL = fd.RedirectURL
 		}
 		fetcher.rangeResumeValidator = fd.RangeResumeValidator

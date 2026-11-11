@@ -13,6 +13,7 @@ type policyTransport struct {
 	transport      http.RoundTripper
 	policy         func(*http.Request)
 	responsePolicy func(*http.Request, *http.Response) error
+	guard          func(*http.Request) error
 }
 
 func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -20,6 +21,11 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.Header = req.Header.Clone()
 	if t.policy != nil {
 		t.policy(r)
+	}
+	if t.guard != nil {
+		if err := t.guard(r); err != nil {
+			return nil, err
+		}
 	}
 	resp, err := t.transport.RoundTrip(r)
 	if err == nil && t.responsePolicy != nil {

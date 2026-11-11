@@ -1655,10 +1655,12 @@ func (d *Downloader) restoreTask(task *Task) error {
 
 func (d *Downloader) restoreFetcher(task *Task) error {
 	v, f := task.fetcherManager.Restore()
+	var checkpointPresent bool
 	if v != nil {
 		// Keep the durable checkpoint until the next successful save replaces
 		// it. A crash in OnStart/Start must not erase the last resumable state.
-		_, err := d.storage.Get(bucketSave, task.ID, v)
+		var err error
+		checkpointPresent, err = d.storage.Get(bucketSave, task.ID, v)
 		if err != nil {
 			return err
 		}
@@ -1667,9 +1669,17 @@ func (d *Downloader) restoreFetcher(task *Task) error {
 	if err != nil {
 		return err
 	}
+	initial := task.initialHTTPExecution.Swap(false)
 	task.fetcher = f(meta, v)
 	if task.fetcher == nil {
 		task.fetcher = task.fetcherManager.Build()
+	}
+	if initial && !checkpointPresent && task.Protocol == "http" && meta.Res == nil {
+		// Keep the manager's Restore/precision semantics; only HTTP's narrow
+		// runtime handshake distinguishes a fresh M->Q from historical state.
+		if first, ok := task.fetcher.(interface{ AuthorizeInitialRequest() }); ok {
+			first.AuthorizeInitialRequest()
+		}
 	}
 	d.setupFetcher(task.fetcherManager, task.fetcher)
 	if task.fetcher.Meta().Req == nil {
