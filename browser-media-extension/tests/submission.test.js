@@ -124,6 +124,15 @@ test('profile binding succeeds but media journal write failure sends zero create
  const result=await b.request(create);assert.equal(result.ok,false);
  assert.deepEqual(b.messages,[]);assert.equal(ids(b).length,0);
 });
+test('same worker retries successfully after its unsent first journal write failed',async()=>{
+ const b=browser(seed),save=b.chrome.storage.session.set;let unavailable=true;
+ b.chrome.storage.session.set=async value=>{if(unavailable)throw Error('fixture disk full');return save(value);};
+ assert.equal((await b.request(create)).ok,false);assert.deepEqual(b.messages,[]);
+ unavailable=false;
+ const next=await b.request(create);assert.equal(next.ok,true);assert.equal(next.data.taskId,'task-one');
+ assert.equal(ids(b).length,1);assert.equal(b.messages.some(m=>m.params?.action==='submission'),false);
+ assert.equal((await b.request(create)).data.duplicate,true);assert.equal(ids(b).length,1);
+});
 for(const kind of ['legacy','version','route'])test('media '+kind+' pending cannot be rebound or replayed',async()=>{
  const first=browser(seed,async m=>m.method==='create'?failure('request_failed',null):contractReply(m,{code:0,data:{code:0,data:{state:'unknown',taskIds:[]}}}));
  await first.request(create);

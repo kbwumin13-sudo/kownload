@@ -264,9 +264,19 @@ async function create(item,options = {}) {
     const remember = id => serial(async () => {
       const latest = await read();
       latest.operations ||= {};
-      if (id) latest.operations[mark] = {version:1,operationId:id,bridgeBinding};
+      const previous=latest.operations[mark];
+      const pending=id ? {version:1,operationId:id,bridgeBinding} : undefined;
+      if (id) latest.operations[mark] = pending;
       else if ((typeof latest.operations[mark]==='string' ? latest.operations[mark] : latest.operations[mark]?.operationId) === operationId) delete latest.operations[mark];
-      await write(latest,item.tabId,true);
+      try {await write(latest,item.tabId,true);} catch(error) {
+        // The shared store returns its live object. Undo only this new,
+        // definitely unsent entry; do not strand a phantom pending in RAM or
+        // let a later flush persist it. Sent/unknown operations stay intact.
+        if(id && !sent && latest.operations[mark]===pending) {
+          if(previous===undefined)delete latest.operations[mark];else latest.operations[mark]=previous;
+        }
+        throw error;
+      }
     });
     let sent = false;
     trace('assistant_received');
