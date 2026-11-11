@@ -28,7 +28,8 @@ type ResolveResult struct {
 // digest result or execution permission; those require the atomic three-way
 // state guard before this optional reference can be acted on.
 type TaskCompletionRef struct {
-	Version int `json:"version"`
+	Version      int    `json:"version"`
+	CompletionID string `json:"completionId"`
 }
 
 type Task struct {
