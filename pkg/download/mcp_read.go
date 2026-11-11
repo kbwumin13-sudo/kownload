@@ -18,9 +18,9 @@ var (
 	ErrMCPReadUnavailable = errors.New("read snapshot unavailable")
 )
 
-// MCPReadProgress contains only cached scalar progress. TotalBytes remains nil:
-// this version has no dedicated detached total-size scalar; reading Meta.Res
-// could traverse a protocol-owned object. It never calls fetcher.Progress.
+// MCPReadProgress contains only cached scalar progress. For a valid done
+// snapshot, TotalBytes is the recorded final Downloaded value, not a resource
+// size or integrity check. Otherwise it stays nil. No protocol getters are used.
 type MCPReadProgress struct {
 	DownloadedBytes           int64  `json:"downloadedBytes"`
 	SpeedBytesPerSecond       int64  `json:"speedBytesPerSecond"`
@@ -223,6 +223,9 @@ func mcpReadSnapshot(ctx context.Context, task *Task) (MCPReadTask, error) {
 	}
 	if value.Status == "done" {
 		value.Progress.Phase = "done"
+		// Use the validated scalar copied with Status, never task or Meta.Res.
+		total := value.Progress.DownloadedBytes
+		value.Progress.TotalBytes = &total
 	}
 	return value, nil
 }
