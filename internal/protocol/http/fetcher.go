@@ -252,22 +252,24 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
-	resourceKey       string
-	publicMu          sync.Mutex
-	publicSource      atomic.Pointer[mailru.Source]
-	publicRefreshes   int
-	identityMu        sync.RWMutex
-	identity          representation
-	resumeHash        string
-	restored          bool
-	linkPatched       bool
-	requestPolicy     func(*http.Request)
-	targetCredentials *transfer.TargetCredentials
-	responsePolicy    func(*http.Request, *http.Response) error
-	ctl               *controller.Controller
-	config            *config
-	cookieJar         http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
-	doneCh            chan error
+	resourceKey          string
+	publicMu             sync.Mutex
+	publicSource         atomic.Pointer[mailru.Source]
+	publicRefreshes      int
+	identityMu           sync.RWMutex
+	identity             representation
+	resumeHash           string
+	restored             bool
+	sourceRequestIssued  atomic.Bool
+	initialRequestPermit atomic.Bool
+	linkPatched          bool
+	requestPolicy        func(*http.Request)
+	targetCredentials    *transfer.TargetCredentials
+	responsePolicy       func(*http.Request, *http.Response) error
+	ctl                  *controller.Controller
+	config               *config
+	cookieJar            http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
+	doneCh               chan error
 
 	meta *fetcher.FetcherMeta
 
@@ -404,11 +406,31 @@ func (f *Fetcher) updateMaxConnTime(d time.Duration) {
 	}
 }
 
+// AuthorizeInitialRequest is a Go-only, one-shot handshake from a newly
+// committed Core operation. It is never restored or accepted from request JSON.
+func (f *Fetcher) AuthorizeInitialRequest() {
+	f.initialRequestPermit.Store(true)
+}
+
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 	return f.ResolveContext(context.Background(), req, opts)
 }
 
 func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) error {
+	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
+		return err
+	}
+	// Restore is historical unless Core supplied a fresh first-execution
+	// instance. Reject before a source POST/body can leave this process.
+	permit := f.initialRequestPermit.Swap(false)
+	safe := originalRequestReplaySafe(req)
+	if !safe && f.restored && !permit {
+		return transfer.ErrScopedContext
+	}
+	first := f.sourceRequestIssued.CompareAndSwap(false, true)
+	if !safe && !first {
+		return transfer.ErrScopedContext
+	}
 	parent := ctx
 	ctx, cancel := context.WithCancel(context.Background())
 	headersReady := make(chan struct{})
@@ -435,9 +457,6 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 			cancel()
 		}
 	}()
-	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
-		return err
-	}
 	f.meta.Req = req
 	f.meta.Opts = opts
 	if f.meta.Opts == nil {
@@ -934,7 +953,7 @@ func (f *Fetcher) doStart() error {
 	}
 	// The legacy checkpoint records only a redirect URL, not the final method
 	// or proof permitting another source POST/body. Stop before resume probes.
-	if f.restored && !originalRequestReplaySafe(f.meta.Req) {
+	if f.restored && !originalRequestReplaySafe(f.meta.Req) && !f.sourceRequestIssued.Load() {
 		return transfer.ErrScopedContext
 	}
 	// The resume checks below are this run's first requests: a public link

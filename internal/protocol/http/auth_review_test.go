@@ -254,3 +254,26 @@ func TestAuthExpiredPostRedirectDoesNotReplayOriginal(t *testing.T) {
 		t.Fatalf("fallback replayed unproved POST: sends=%d err=%v", sends.Load(), err)
 	}
 }
+
+func TestAuthRestoredInitialResolvePermitIsOneShot(t *testing.T) {
+	var sends atomic.Int32
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { sends.Add(1); _, _ = w.Write([]byte("initial")) }))
+	defer source.Close()
+	manager := &FetcherManager{}
+	data, restore := manager.Restore()
+	req := &base.Request{URL: source.URL, Extra: &model.ReqExtra{Method: "POST", Body: "first"}}
+	opts := &base.Options{Path: t.TempDir(), Name: "first.bin"}
+	f := restore(&fetchModel.FetcherMeta{Req: req, Opts: opts}, data).(*Fetcher)
+	f.Setup(buildFetcher().ctl)
+	defer f.Close()
+	f.AuthorizeInitialRequest()
+	if err := f.Resolve(req, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Resolve(req, opts); !errors.Is(err, transfer.ErrScopedContext) {
+		t.Fatalf("first-I/O permit was replayable: %v", err)
+	}
+	if sends.Load() != 1 {
+		t.Fatalf("source sent %d times", sends.Load())
+	}
+}
