@@ -290,7 +290,9 @@ class NotificationService extends GetxService {
     }
     if (task.status != Status.done ||
         view.phase != 'committed' ||
-        view.recordedMatch != true) return;
+        view.recordedMatch != true) {
+      return;
+    }
     // Synchronous, RAM-only consumption immediately before the existing effect.
     // Neither a failed plugin call nor a historical poll can regrant it.
     _pending.remove(key);
