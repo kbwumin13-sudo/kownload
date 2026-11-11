@@ -203,8 +203,11 @@ func operationRef(r *batchOperationRecord, i int) CreationOperation {
 }
 
 func (d *Downloader) loadOperation(id string) (*batchOperationRecord, error) {
+	return loadOperationFrom(d.storage, id)
+}
+func loadOperationFrom(reader datasetReader, id string) (*batchOperationRecord, error) {
 	var r batchOperationRecord
-	ok, err := d.storage.Get(bucketTaskOperations, operationKey(id), &r)
+	ok, err := reader.Get(bucketTaskOperations, operationKey(id), &r)
 	if err != nil {
 		return nil, ErrOperationUnavailable
 	}
@@ -217,8 +220,11 @@ func (d *Downloader) loadOperation(id string) (*batchOperationRecord, error) {
 	return &r, nil
 }
 func (d *Downloader) checkCreationAssociation(t *Task) error {
+	return checkCreationAssociationFrom(d.storage, t)
+}
+func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 	var link operationTaskLink
-	exists, err := d.storage.Get(bucketOperationTasks, t.ID, &link)
+	exists, err := reader.Get(bucketOperationTasks, t.ID, &link)
 	if err != nil {
 		return ErrOperationUnavailable
 	}
@@ -232,7 +238,7 @@ func (d *Downloader) checkCreationAssociation(t *Task) error {
 	if ref.Version != 1 || ref.Namespace != batchOperationNamespace {
 		return ErrOperationConflict
 	}
-	r, err := d.loadOperation(ref.OperationID)
+	r, err := loadOperationFrom(reader, ref.OperationID)
 	if err != nil {
 		return err
 	}
@@ -260,6 +266,9 @@ func creationEligible(tasks []*Task) []*Task {
 	return out
 }
 func (d *Downloader) operationResult(id string, r *batchOperationRecord) (BatchOperationResult, error) {
+	return operationResultFrom(d.storage, id, r, nil)
+}
+func operationResultFrom(reader datasetReader, id string, r *batchOperationRecord, tasks map[string]*Task) (BatchOperationResult, error) {
 	result := BatchOperationResult{Version: 1, OperationID: id, State: "unknown", Members: []BatchOperationMemberResult{}, TaskIDs: []string{}}
 	if r == nil {
 		return result, nil
@@ -287,17 +296,25 @@ func (d *Downloader) operationResult(id string, r *batchOperationRecord) (BatchO
 			continue
 		}
 		var task Task
-		present, err := d.storage.Get(bucketTask, item.TaskID, &task)
+		present, err := reader.Get(bucketTask, item.TaskID, &task)
 		if err != nil {
 			return result, ErrOperationUnavailable
 		}
 		item.TaskPresent = &present
 		if present {
-			if err := d.checkCreationAssociation(&task); err != nil {
+			// A scoped Q snapshot must also bind the row key and this member,
+			// rather than accepting another valid Task copied into this row.
+			if tasks != nil && (task.ID != item.TaskID || task.CreationOperation == nil || *task.CreationOperation != operationRef(r, i)) {
+				item.Error = "association_conflict"
+				continue
+			}
+			if err := checkCreationAssociationFrom(reader, &task); err != nil {
 				if errors.Is(err, ErrOperationUnavailable) {
 					return result, err
 				}
 				item.Error = "association_conflict"
+			} else if tasks != nil {
+				tasks[task.ID] = &task
 			}
 		}
 	}
@@ -316,7 +333,10 @@ func (d *Downloader) QueryBatchOperation(id string) (BatchOperationResult, error
 	return d.operationResult(id, r)
 }
 func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperationRequest, items []*base.CreateTaskBatchItem, hash string) error {
-	current, err := d.loadOperation(r.OperationID)
+	return d.reserveOperationInDataset(atomicStore, r, items, hash, "")
+}
+func (d *Downloader) reserveOperationInDataset(atomicStore AtomicStorage, r BatchOperationRequest, items []*base.CreateTaskBatchItem, hash, dataset string) error {
+	current, err := d.loadOperationInDataset(dataset, r.OperationID)
 	if err != nil {
 		return err
 	}
@@ -350,6 +370,9 @@ func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperatio
 		record.Members[i] = m
 	}
 	err = atomicStore.UpdateAtomic(func(tx StorageTransaction) error {
+		if err := guardOperationDataset(tx, dataset); err != nil {
+			return err
+		}
 		var stored batchOperationRecord
 		ok, e := tx.Get(bucketTaskOperations, operationKey(r.OperationID), &stored)
 		if e != nil {
@@ -363,7 +386,7 @@ func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperatio
 		}
 		return tx.Put(bucketTaskOperations, operationKey(r.OperationID), record)
 	})
-	if errors.Is(err, ErrOperationConflict) {
+	if errors.Is(err, ErrOperationConflict) || isOperationDatasetError(err) {
 		return err
 	}
 	if err != nil {
@@ -372,8 +395,14 @@ func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperatio
 	return nil
 }
 func (d *Downloader) createOperationMember(store AtomicStorage, op, hash string, i int, input *base.CreateTaskBatchItem) (bool, error) {
+	return d.createOperationMemberInDataset(store, op, hash, i, input, "")
+}
+func (d *Downloader) createOperationMemberInDataset(store AtomicStorage, op, hash string, i int, input *base.CreateTaskBatchItem, dataset string) (bool, error) {
 	created := false
 	err := store.UpdateAtomic(func(tx StorageTransaction) error {
+		if err := guardOperationDataset(tx, dataset); err != nil {
+			return err
+		}
 		var r batchOperationRecord
 		ok, e := tx.Get(bucketTaskOperations, operationKey(op), &r)
 		if e != nil {
@@ -430,7 +459,7 @@ func (d *Downloader) createOperationMember(store AtomicStorage, op, hash string,
 		created = true
 		return tx.Put(bucketTaskOperations, operationKey(op), &r)
 	})
-	if errors.Is(err, ErrOperationConflict) {
+	if errors.Is(err, ErrOperationConflict) || isOperationDatasetError(err) {
 		return false, err
 	}
 	if err != nil {
@@ -456,19 +485,24 @@ func (d *Downloader) attachOperationTask(id string, createdNow bool) error {
 	if err = d.checkCreationAssociation(&task); err != nil {
 		return err
 	}
-	if d.getTaskLocked(id) != nil {
+	return d.attachOperationSnapshotLocked(&task, createdNow)
+}
+
+// Caller holds d.lock; task is an owned, association-checked storage snapshot.
+func (d *Downloader) attachOperationSnapshotLocked(task *Task, createdNow bool) error {
+	if d.getTaskLocked(task.ID) != nil {
 		return nil
 	}
-	if err = d.assignFetcherManager(&task); err != nil {
+	if err := d.assignFetcherManager(task); err != nil {
 		return ErrOperationConflict
 	}
-	initTask(&task)
+	initTask(task)
 	// Only this process's successful M authorizes the first unresolved HTTP
 	// request. Q readback/replay and startup do not recover that authority.
 	task.initialHTTPExecution.Store(createdNow && task.Protocol == "http" && task.Meta.Res == nil)
 	task.updateStatus(base.DownloadStatusWait)
-	d.tasks = append(d.tasks, &task)
-	d.enqueueLocked(&task)
+	d.tasks = append(d.tasks, task)
+	d.enqueueLocked(task)
 	d.notifyRunning()
 	return nil
 }
@@ -488,6 +522,9 @@ func (d *Downloader) reconcileOperationTasks(r *batchOperationRecord) error {
 
 // CreateBatchOperation resumes pending creation only for the exact same intent.
 func (d *Downloader) CreateBatchOperation(ctx context.Context, r BatchOperationRequest) (BatchOperationResult, error) {
+	return d.createBatchOperationInDataset(ctx, r, "")
+}
+func (d *Downloader) createBatchOperationInDataset(ctx context.Context, r BatchOperationRequest, dataset string) (BatchOperationResult, error) {
 	items, hash, err := canonicalBatch(r)
 	if err != nil {
 		return BatchOperationResult{}, err
@@ -501,10 +538,10 @@ func (d *Downloader) CreateBatchOperation(ctx context.Context, r BatchOperationR
 		d.operationMu.Unlock()
 		return BatchOperationResult{Version: 1, OperationID: r.OperationID}, ErrOperationUnavailable
 	}
-	err = d.reserveOperation(store, r, items, hash)
+	err = d.reserveOperationInDataset(store, r, items, hash, dataset)
 	d.operationMu.Unlock()
 	if err != nil {
-		return d.readAfterOperationError(r.OperationID, err)
+		return d.readAfterOperationErrorInDataset(dataset, r.OperationID, err)
 	}
 	for i, item := range items {
 		if ctx.Err() != nil {
@@ -513,33 +550,30 @@ func (d *Downloader) CreateBatchOperation(ctx context.Context, r BatchOperationR
 		d.operationMu.Lock()
 		if d.closed.Load() {
 			d.operationMu.Unlock()
-			return d.readAfterOperationError(r.OperationID, ErrOperationUnavailable)
+			return d.readAfterOperationErrorInDataset(dataset, r.OperationID, ErrOperationUnavailable)
 		}
 		var createdNow bool
-		createdNow, err = d.createOperationMember(store, r.OperationID, hash, i, item)
+		createdNow, err = d.createOperationMemberInDataset(store, r.OperationID, hash, i, item, dataset)
 		// A failed commit can have an uncertain acknowledgement. Read authority before
 		// deciding whether to publish; never manufacture a new ID or empty success.
-		stored, readErr := d.loadOperation(r.OperationID)
-		if readErr == nil && stored != nil && stored.RequestHash == hash && i < len(stored.Members) && stored.Members[i].State == "created" {
-			readErr = d.attachOperationTask(stored.Members[i].TaskID, createdNow)
-		}
+		readErr := d.publishOperationMemberInDataset(dataset, r.OperationID, hash, i, createdNow)
 		d.operationMu.Unlock()
 		if err != nil {
-			return d.readAfterOperationError(r.OperationID, err)
+			return d.readAfterOperationErrorInDataset(dataset, r.OperationID, err)
 		}
 		if readErr != nil {
-			return d.readAfterOperationError(r.OperationID, readErr)
+			return d.readAfterOperationErrorInDataset(dataset, r.OperationID, readErr)
 		}
 	}
 	// Also reconcile M->Q gaps on an explicit replay, including a cancelled request.
 	d.operationMu.Lock()
-	stored, err := d.loadOperation(r.OperationID)
-	if err == nil && !d.closed.Load() {
-		err = d.reconcileOperationTasks(stored)
-	}
+	stored, err := d.reconcileOperationInDataset(dataset, r.OperationID)
 	d.operationMu.Unlock()
 	if err != nil {
-		return d.readAfterOperationError(r.OperationID, err)
+		return d.readAfterOperationErrorInDataset(dataset, r.OperationID, err)
+	}
+	if dataset != "" {
+		return d.QueryBatchOperationForDataset(dataset, r.OperationID)
 	}
 	return d.operationResult(r.OperationID, stored)
 }
@@ -551,6 +585,9 @@ func (d *Downloader) readAfterOperationError(id string, cause error) (BatchOpera
 	return result, cause
 }
 func (d *Downloader) CancelBatchOperation(id string) (BatchOperationResult, error) {
+	return d.cancelBatchOperationInDataset(id, "")
+}
+func (d *Downloader) cancelBatchOperationInDataset(id, dataset string) (BatchOperationResult, error) {
 	if !operationIDPattern.MatchString(id) {
 		return BatchOperationResult{}, ErrOperationInvalid
 	}
@@ -564,6 +601,9 @@ func (d *Downloader) CancelBatchOperation(id string) (BatchOperationResult, erro
 		return BatchOperationResult{Version: 1, OperationID: id}, ErrOperationUnavailable
 	}
 	err := store.UpdateAtomic(func(tx StorageTransaction) error {
+		if err := guardOperationDataset(tx, dataset); err != nil {
+			return err
+		}
 		var r batchOperationRecord
 		exists, e := tx.Get(bucketTaskOperations, operationKey(id), &r)
 		if e != nil {
@@ -585,11 +625,14 @@ func (d *Downloader) CancelBatchOperation(id string) (BatchOperationResult, erro
 		return tx.Put(bucketTaskOperations, operationKey(id), &r)
 	})
 	d.operationMu.Unlock()
-	if errors.Is(err, ErrOperationConflict) {
-		return d.readAfterOperationError(id, err)
+	if errors.Is(err, ErrOperationConflict) || isOperationDatasetError(err) {
+		return d.readAfterOperationErrorInDataset(dataset, id, err)
 	}
 	if err != nil {
-		return d.readAfterOperationError(id, ErrOperationUnavailable)
+		return d.readAfterOperationErrorInDataset(dataset, id, ErrOperationUnavailable)
+	}
+	if dataset != "" {
+		return d.QueryBatchOperationForDataset(dataset, id)
 	}
 	return d.QueryBatchOperation(id)
 }
