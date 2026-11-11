@@ -18,19 +18,38 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | `Task.creationOperation` v1，namespace=`task-batch.create/v1`，operationId/index | S2 本地 `3c69231`；原 Task 六状态不变 | 39 可能忽略或保存丢字段，不等可执行 | 新端须与 manifest/member/逆索引一致；无 ref 且无逆索引的旧 Task 兼容 | 受启动 policy 和原任务守卫；未识别/不一致拒绝 | 活动库裸回退不支持；配对快照。以下三个 S2 行的实证来自其独立 plain/race/子进程断点交付，本分支只登记合同，不冒称已合入 |
 | bucket `task_operations_v1`，record.version=1 | S2 同提交；固定 namespace、稳定 members，pending 无 Task | 旧 core 不理解持久 operation | pending 只保留意图清单，不启动、不自动重造；created 保留删除历史 | 不 TTL 淘汰；重放不得自动继续暂停任务；调用者须显式提供相同完整意图 | 旧版不维护操作幂等，不能裸回灌；凭据/意图变化不得冒充同 op 或重建 created 前缀 |
 | bucket `operation_tasks_v1`，TaskID→ref | S2 同提交；与 Task/member 同一 M 事务持久写入 | 旧 core 不维护逆索引 | 启动核对；丢 ref/错配/未来版本隔离，不能把有逆索引的任务当 legacy | 索引/任务/manifest 不一致拒绝，不靠自动修复重造 | 新 reader 丢字段/未知 manifest 和索引已有隔离测试；不证明旧 core 执行安全，默认配对快照 |
-| `Task.recovery` ref，候选 `version=1`（planned，未激活） | S3 §8 独立内核已有局部 fixture，尚未发布或接入 HTTP enroll/IO | 39/旧 core 可能忽略或保存丢 ref，不能当普通任务执行 | 新端必须核对 ref、ledger、required 哨兵三方；缺失/未知/错配时连显式 Continue 也拒绝 | 只允许已支持的同 episode/generation；迟到结果不能跨代生效 | 与以下两行同事务激活；配对 App/数据/偏好快照，禁止裸活动库回灌旧 core |
-| bucket `task_recovery_v1`，TaskID→恢复 ledger（planned，未激活） | S3 首步仅拟接 `http-transport-recovery/v1` 中可冻结的 direct/manual/static/env 上下文；局部内核不等于纵向完成 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、executionDefaultsHash、共享计数、有界 action 与 notBefore；默认摘要缺失/损坏固定 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保原 episode、initial issued、余额/actions/notBefore；只读不 enroll，删除不重造 | Task ref、ledger、required 哨兵必须同一事务；损坏/未知不得删状态或重造任务来恢复 |
-| bucket `task_recovery_required_v1`，候选 `{version:1, capability:http-transport-recovery/v1}`（planned） | S3 独立 required 哨兵；即使旧 writer 丢 Task ref 仍可被新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方状态；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失而降级为 legacy；不自动修复/enroll/启动 | 备份必须保留三个状态；只有配对快照回退，不把旧端 JSON 可读当执行兼容 |
+| `Task.recovery` ref，`version=1`（本地候选已实现，未发布/安装） | S3 独立候选 `e045641`；直接 HTTP enroll/IO 已接同事务许可 | 39/旧 core 可能忽略或保存丢 ref，不能当普通任务执行 | 新端必须核对 ref、ledger、required 哨兵三方；缺失/未知/错配时连显式 Continue 也拒绝 | 只执行受支持的 episode/generation/sourceRevision；迟到结果不能跨代生效，仍受 S0 启动政策 | 与以下两行同事务 enroll；配对 App/数据/偏好快照，禁止裸活动库回灌旧 core |
+| bucket `task_recovery_v1`，record.version=1（本地候选已实现，未发布/安装） | S3 同候选，首能力仅 `http-transport-recovery/v1` 可冻结的 direct/manual/static/env 上下文 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、必需 executionDefaultsHash、initialAttempt、计数与有界 actions；缺坏默认摘要 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保 episode、issued 证据、余额/actions/notBefore；只读不 enroll、删除不重造 | 三方必须同事务；当前仅 transport action，总16且 transport6；refreshUsed/deferralUsed 仅0、notBefore 仅空值受支持，其他值拒绝而不清空 |
+| bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
 | MCP 稳定 bin 的同 inode 安装 xattr（planned，键名/JSON 格式由 11 部署实现定稿） | 尚无 install-helper 实现；不属于 Task/数据库格式，不新增 receipt 库 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知/缺失/摘要不符拒绝升级，不自动认领 | 配对备份恢复 App/桥及稳定二进制 inode 的 xattr；快照丢 xattr 后 fail-closed。xattr 不支持/写失败须在原子发布前失败并保留旧入口；不清除 quarantine 或改变系统信任 |
 
-S3 上述三行仅登记已核准的 planned 合同。独立内核的局部 plain/race fixture 不代表
-HTTP enroll/IO 已激活或真实旧任务已迁移；首能力最终 v1 字段随实现与纵向证据核证。
-首步限 HTTP transport；provider refresh、deferral 及其他恢复来源尚未接入该共享预算，
-不得把它们写成已共享。激活写入前须用实现中的准确版本/字段和同事务、重启、迟到结果、
-缺失/未知三方状态及删除后不复活的行为证据更新本表。纯读取不创建这些记录。
+S3 上述三行登记独立本地候选
+`e04564142fb372fca98402d23a1707a36403f393`（tree
+`dd0fccfd3ed79b6a0e4fbdae757e401c44fa29dc`）中已实现的直接 HTTP transport 纵向。
+它尚未发布或安装，不属于当前生产 build39，也没有并入 a323 批次候选；
+原 69b 局部内核不是可单摘的本增量。其余 S3/S4 能力仍未完成，不能从这三行推断已激活。
+
+ledger 的 `initialAttempt.state` 零代次仅接受 `ungranted` 或 `uncertain`；
+只有本进程普通新建或已成功 ACK 的 S2 M→Q 私有一次证据可给前者，无首次证明的历史/
+legacy 纳入为 uncertain，begin 先持久扣一次 transport 才 issued。issued/clean-paused
+须为与 record 相同的非零 generation；clean-paused 还须匹配合法 checkpointHash。
+暂停、换源、默认变化或重启不补免费 initial/余额；未知扣费 ACK 不发 permit，
+只能观察原结果。每 run 初始 worker slot 最多1024，各有一次初始资格；替换对象/slot
+或 chunk 偏移不产生新免费资格，收费 wave 与其一次性成员许可保持原 episode 约束。
+
+候选本地证据为 Core 55顶层+51子例 plain/race、HTTP整包168+225 plain及相关28+48 race、
+proxy snapshot 与执行投影各2项 plain/race，全部 PASS/0skip；登记交付范围而非重新跑测。
+包含真实 Core 扣费提交后进程退出再重开、未知 ACK 零下一 Range、缺坏三方/删除、
+旧 waiter/迟到结果、默认摘要及 PAC 边界。直接 HTTP 新 watch 绑定独立 run ctx/channel
+并核完整 token；非 HTTP 仍沿原全局 Wait，不能称其旧竞态也已修复。
+
+首步只支持 transport action；refreshUsed/deferralUsed 固定0、notBefore仅空值，
+429/503 仍沿旧 Budget/queue，跨重启冷却与共享 debit 尚未接；provider refresh、deferral
+和其他恢复来源未闭合。纯读取不创建恢复记录。生产旧任务迁移、真实 App/浏览器、
+非 HTTP 恢复、统一恢复 UI 及 S4 校验/发布成功门禁仍未验或未接，不宣称整 S3 完成。
 
 S3 §8.7 的 `executionDefaultsHash`（D）固定为 64 位小写 hex，采用
 `SHA256(JSON({version:1,inheritedUserAgent?:TrimSpace(实际默认UA),inheritedProxyPolicyId?:实际有效proxyPolicyId}))`。
