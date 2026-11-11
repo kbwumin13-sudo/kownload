@@ -10,11 +10,16 @@ import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_panel.dart';
+import 'package:gopeed/macos/onboarding_checks.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
 import 'package:gopeed/macos/mac_theme.dart';
+
+import 'support/onboarding_check_fixture.dart';
 
 class _Box extends Fake implements Box {
   final stored = <dynamic, dynamic>{};
   bool failCompletion = false;
+  int writes = 0;
 
   @override
   dynamic get(dynamic key, {dynamic defaultValue}) =>
@@ -22,6 +27,7 @@ class _Box extends Fake implements Box {
 
   @override
   Future<void> put(dynamic key, dynamic value) async {
+    writes++;
     if (key == MacOnboarding.completedKey && failCompletion) {
       throw StateError('fixture storage failure');
     }
@@ -54,6 +60,7 @@ void main() {
 
   setUp(() async {
     Get.testMode = true;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
     box = _Box();
     Database.instance.box = box;
     app = _App();
@@ -71,6 +78,7 @@ void main() {
 
   tearDown(() {
     MacOnboarding.helperDirectoryOverride = null;
+    MacOnboarding.checksOverride = null;
     MacPanel.cancelAutoHide();
     Get.reset();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -110,6 +118,7 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('onboarding-content'))).width,
         lessThanOrEqualTo(480));
     await tester.enterText(directoryField, '  /chosen/downloads  ');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(await completed, isTrue);
@@ -165,18 +174,21 @@ void main() {
     final completed = launch();
     await tester.pumpAndSettle();
     await tester.enterText(directoryField, ' ');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(find.text('请选择下载保存位置。'), findsOneWidget);
     expect(app.savedDirectories, isEmpty);
     await tester.enterText(directoryField, '/retry');
     app.failSave = true;
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(find.text('保存失败，请重试。'), findsOneWidget);
     expect(app.downloaderConfig.value.downloadDir, '/original');
     expect(box.stored[MacOnboarding.completedKey], isNull);
     app.failSave = false;
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(await completed, isTrue);
@@ -190,6 +202,7 @@ void main() {
     await tester.pumpAndSettle();
     box.failCompletion = true;
     await tester.enterText(directoryField, '/not-committed');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(find.text('保存失败，请重试。'), findsOneWidget);
@@ -210,6 +223,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(Dialog), findsOneWidget);
     app.saving = Completer<void>();
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -253,6 +267,7 @@ void main() {
         {'title': '选择下载保存位置', 'initialDirectory': '/original'});
     expect(
         tester.widget<TextField>(directoryField).controller!.text, '/picked');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(await completed, isTrue);
@@ -263,7 +278,7 @@ void main() {
   testWidgets(
       'browser setup has real instructions and a missing-folder fallback',
       (tester) async {
-    final folder = Directory.systemTemp.createTempSync('kownload-guide-');
+    final folder = Directory('/tmp').createTempSync('kownload-guide-');
     addTearDown(() => folder.delete(recursive: true));
     MacOnboarding.helperDirectoryOverride = '${folder.path}/missing';
     final launches = <MethodCall>[];
@@ -277,6 +292,8 @@ void main() {
     final launch = await mount(tester);
     final cancelled = launch();
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('设置浏览器下载…'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('设置浏览器下载…'));
     await tester.pumpAndSettle();
     expect(find.text('设置浏览器下载'), findsOneWidget);
@@ -284,6 +301,7 @@ void main() {
     expect(find.textContaining('edge://extensions'), findsOneWidget);
     expect(find.textContaining('加载已解压的扩展程序'), findsOneWidget);
     expect(find.textContaining('回到视频或网盘网页并刷新'), findsOneWidget);
+    expect(find.textContaining('浏览器运行时连接尚未验证'), findsOneWidget);
     await tester.tap(find.text('打开助手文件夹'));
     await tester.pumpAndSettle();
     expect(find.textContaining('此应用中没有附带下载助手'), findsOneWidget);
@@ -305,7 +323,7 @@ void main() {
   testWidgets(
       'bundled browser helper opens externally without recording installation',
       (tester) async {
-    final folder = Directory.systemTemp.createTempSync('kownload-helper-');
+    final folder = Directory('/tmp').createTempSync('kownload-helper-');
     addTearDown(() => folder.delete(recursive: true));
     MacOnboarding.helperDirectoryOverride = folder.path;
     final launches = <MethodCall>[];
@@ -318,6 +336,8 @@ void main() {
     });
     final launch = await mount(tester);
     final completed = launch();
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('设置浏览器下载…'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('设置浏览器下载…'));
     await tester.pumpAndSettle();
@@ -332,6 +352,7 @@ void main() {
     // Closing the optional instructions is separate from completing the tutorial.
     await tester.tap(find.text('返回教程'));
     await tester.pumpAndSettle();
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(await completed, isTrue);
@@ -342,5 +363,206 @@ void main() {
             .where((call) => call.method == 'setTransient')
             .map((call) => call.arguments['active']),
         [true, true, true, true, true, false]);
+  });
+
+  testWidgets('current directory must be explicitly checked before completing',
+      (tester) async {
+    final launch = await mount(tester);
+    final result = launch();
+    await tester.pumpAndSettle();
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    expect(checks.directories, isEmpty);
+    expect(checks.tools, isEmpty);
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(find.text('请先检查此文件夹的写入权限，再完成教程。'), findsOneWidget);
+    expect(app.savedDirectories, isEmpty);
+    await checkOnboardingDirectory(tester);
+    expect(checks.directories, ['/original']);
+    await tester.enterText(directoryField, '/different');
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(app.savedDirectories, isEmpty);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(await result, isFalse);
+    expect(box.writes, 0);
+  });
+
+  for (final state in [
+    DirectoryCheckState.missing,
+    DirectoryCheckState.denied,
+    DirectoryCheckState.cleanupFailed
+  ]) {
+    testWidgets('directory $state feedback keeps original settings and marker',
+        (tester) async {
+      final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+      checks.directoryState = state;
+      final launch = await mount(tester);
+      final result = launch();
+      await tester.pumpAndSettle();
+      await checkOnboardingDirectory(tester);
+      expect(find.byKey(const ValueKey('onboarding-directory-result')),
+          findsOneWidget);
+      await tester.tap(find.text('完成并继续'));
+      await tester.pumpAndSettle();
+      expect(app.savedDirectories, isEmpty);
+      expect(box.writes, 0);
+      expect(app.downloaderConfig.value.downloadDir, '/original');
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(await result, isFalse);
+    });
+  }
+
+  testWidgets(
+      'late directory check cannot stamp a changed or reverted directory',
+      (tester) async {
+    final pending = Completer<DirectoryCheck>();
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    checks.directoryResult = (_) => pending.future;
+    final launch = await mount(tester);
+    final result = launch();
+    await tester.pumpAndSettle();
+    final button = find.byKey(const ValueKey('onboarding-check-directory'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pump();
+    final input = tester.widget<TextField>(directoryField).controller!;
+    input.text = '/different';
+    input.text = '/original';
+    pending.complete(
+        const DirectoryCheck('/original', DirectoryCheckState.writable));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('onboarding-directory-result')),
+        findsNothing);
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(app.savedDirectories, isEmpty);
+    expect(find.text('请先检查此文件夹的写入权限，再完成教程。'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(await result, isFalse);
+  });
+
+  testWidgets('late check after dialog closes cannot mark completion or save',
+      (tester) async {
+    final pending = Completer<DirectoryCheck>();
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    checks.directoryResult = (_) => pending.future;
+    final launch = await mount(tester);
+    final result = launch();
+    await tester.pumpAndSettle();
+    final button = find.byKey(const ValueKey('onboarding-check-directory'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pump();
+    Navigator.of(
+            tester.element(find.byKey(const ValueKey('onboarding-content'))))
+        .pop(false);
+    await tester.pumpAndSettle();
+    expect(await result, isFalse);
+    pending.complete(
+        const DirectoryCheck('/original', DirectoryCheckState.writable));
+    await tester.pumpAndSettle();
+    expect(app.savedDirectories, isEmpty);
+    expect(box.writes, 0);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'completed v1 upgrade never auto-opens and unchanged manual review writes nothing',
+      (tester) async {
+    box.stored[MacOnboarding.completedKey] = true;
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    final launch = await mount(tester);
+    expect(await launch(), isTrue);
+    await tester.pumpAndSettle();
+    expect(find.byType(Dialog), findsNothing);
+    expect(checks.directories, isEmpty);
+    final review = launch(force: true);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('本次为手动复查'), findsOneWidget);
+    await checkOnboardingDirectory(tester);
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(await review, isTrue);
+    expect(box.stored[MacOnboarding.completedKey], isTrue);
+    expect(box.writes, 0);
+    expect(app.savedDirectories, isEmpty);
+    expect(app.downloaderConfig.value.downloadDir, '/original');
+    expect(checks.tools, isEmpty);
+  });
+
+  testWidgets(
+      'optional tools run only a clicked absolute path; Gatekeeper help keeps GUI instructions',
+      (tester) async {
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    app.downloaderConfig.value.protocolConfig.media.ffmpegPath =
+        '/fixture/ffmpeg';
+    app.downloaderConfig.value.protocolConfig.media.jsRuntimePath = 'node';
+    final launch = await mount(tester);
+    final result = launch();
+    await tester.pumpAndSettle();
+    final tools = find.byKey(const ValueKey('onboarding-tools'));
+    await tester.ensureVisible(tools);
+    await tester.tap(find.text('媒体工具（可选）'));
+    await tester.pumpAndSettle();
+    expect(checks.tools, isEmpty);
+    final node = find.byKey(const ValueKey('onboarding-tool-node'));
+    expect(tester.widget<MacButton>(node).onPressed, isNull);
+    final ffmpeg = find.byKey(const ValueKey('onboarding-tool-ffmpeg'));
+    await tester.ensureVisible(ffmpeg);
+    await tester.pumpAndSettle();
+    await tester.tap(ffmpeg);
+    await tester.pumpAndSettle();
+    expect(checks.tools, [(MediaTool.ffmpeg, '/fixture/ffmpeg')]);
+    expect(find.text('fixture version only'), findsOneWidget);
+    final help = find.text('macOS 首次打开帮助');
+    await tester.ensureVisible(help);
+    await tester.pumpAndSettle();
+    await tester.tap(help);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('尚未经过 Apple 公证'), findsOneWidget);
+    expect(find.textContaining('仍要打开'), findsOneWidget);
+    expect(find.textContaining('https://support.apple.com/zh-cn/102445'),
+        findsOneWidget);
+    expect(app.savedDirectories, isEmpty);
+    expect(box.writes, 0);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(await result, isFalse);
+    expect(nativeCalls.where((call) => call.method == 'chooseFiles'), isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('optional tool failure does not block ordinary download setup',
+      (tester) async {
+    final checks = MacOnboarding.checksOverride! as FixtureOnboardingChecks;
+    checks.toolResult =
+        const ToolCheck(ToolCheckState.failed, 'fixture tool unavailable');
+    app.downloaderConfig.value.protocolConfig.media.ffmpegPath =
+        '/fixture/ffmpeg';
+    final launch = await mount(tester);
+    final result = launch();
+    await tester.pumpAndSettle();
+    expect(checks.tools, isEmpty);
+    await tester.ensureVisible(find.text('媒体工具（可选）'));
+    await tester.tap(find.text('媒体工具（可选）'));
+    await tester.pumpAndSettle();
+    final button = find.byKey(const ValueKey('onboarding-tool-ffmpeg'));
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.text('fixture tool unavailable'), findsOneWidget);
+    await checkOnboardingDirectory(tester);
+    await tester.tap(find.text('完成并继续'));
+    await tester.pumpAndSettle();
+    expect(await result, isTrue);
+    expect(app.savedDirectories, ['/original']);
+    expect(box.stored[MacOnboarding.completedKey], isTrue);
+    expect(checks.tools, hasLength(1));
+    expect(tester.takeException(), isNull);
   });
 }

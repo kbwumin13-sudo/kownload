@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {installDownloadCapture} from '../download-capture.js';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const hash=value=>createHash('sha256').update(value).digest('hex');
+const bridgeBinding={version:1,hostName:'io.github.kbwumin13_sudo.kownload',routeScope:'a'.repeat(64)};
 const binding={id:7,startTime:'2026-11-11T00:00:00.000Z',urlHash:hash('https://files.test/a.bin')};
 const unknown=op=>({version:1,operationId:op,state:'unknown',taskIds:[]});
 function fixture({enabled=true,confirm=false,saved={},localFail=false}={}) {
@@ -12,7 +13,7 @@ function fixture({enabled=true,confirm=false,saved={},localFail=false}={}) {
  const f={events,calls,rpc,journal,leases:0,wakes:0,settingsReads:0,localFail,settings:{downloadCapture:{enabled,confirm}},item:{id:7,url:'https://files.test/a.bin',finalUrl:'https://files.test/a.bin',filename:'/downloads/a.bin',startTime:binding.startTime,state:'in_progress',paused:true,bytesReceived:0,totalBytes:20},core:null};
  f.browser={permissions:{contains:async()=>true,onAdded:event('permission'),onRemoved:event('removedPermission')},storage:{local:{get:async key=>key==='downloadCapture'?{downloadCapture:{enabled,confirm}}:structuredClone(journal),set:async value=>{if(f.localFail)throw Error('disk');Object.assign(journal,structuredClone(value));}},onChanged:event('storage')},downloads:{onCreated:event('created'),onChanged:event('changed'),onDeterminingFilename:event('download'),pause:async id=>calls.push(['pause',id]),resume:async id=>{calls.push(['resume',id]);if(f.item)f.item.paused=false;},cancel:async id=>{calls.push(['cancel',id]);if(f.cancelError)throw Error('cancel');if(f.onCancel)await f.onCancel();else Object.assign(f.item,{state:'interrupted',error:'USER_CANCELED'});},search:async()=>{if(f.searchError)throw Error('search');return f.item?[structuredClone(f.item)]:[];}},webRequest:{onBeforeSendHeaders:event('headers')},action:{setBadgeText:async()=>{},setTitle:async()=>{}}};
  const record=(state,op,reason)=>({version:1,operationId:op,state,taskId:'task-one',taskIds:['task-one'],download:binding,...(reason?{reason}:{})});
- f.bridge={wake:async()=>{f.wakes++;if(f.wakeError)throw Error('wake');},settings:async()=>{f.settingsReads++;if(f.settingsError)throw Error('settings');return structuredClone(f.settings);},identity:async()=>({clientId:'client-one',browser:'chrome'}),acquire:()=>{f.leases++;let done=false;return()=>{if(!done){done=true;f.leases--;}};},send:async()=>{throw Error('one-phase forbidden');},request:async(action,params={})=>{
+ f.bridge={binding:async expected=>{if(expected && JSON.stringify(expected)!==JSON.stringify(bridgeBinding))throw Error('route_mismatch');return structuredClone(bridgeBinding);},wake:async()=>{f.wakes++;if(f.wakeError)throw Error('wake');},settings:async()=>{f.settingsReads++;if(f.settingsError)throw Error('settings');return structuredClone(f.settings);},identity:async()=>({clientId:'client-one',browser:'chrome'}),acquire:()=>{f.leases++;let done=false;return()=>{if(!done){done=true;f.leases--;}};},send:async()=>{throw Error('one-phase forbidden');},request:async(action,params={})=>{
   rpc.push({action,...structuredClone(params)});
   if(f.handler){const v=await f.handler(action,params,record);if(v!==undefined)return v;}
   if(action==='handoffCapabilities')return {version:1};
@@ -82,6 +83,18 @@ test('crash between browser cancel and confirmation journal remains unknown, nev
 });
 test('local journal failure prevents cancellation and commit',async()=>{
  const f=fixture();f.handler=async action=>{if(action==='handoffPrepare')f.localFail=true;};await f.capture();assert.equal(f.commits().length,0);assert.deepEqual(f.calls,[['pause',7]]);
+});
+test('profile binding saved but job journal failure sends zero wake/prepare and resumes unsent browser',async()=>{
+ const f=fixture();let profileSaved=false;
+ f.bridge.binding=async()=>{profileSaved=true;f.localFail=true;return structuredClone(bridgeBinding);};
+ await f.capture();assert.equal(profileSaved,true);assert.equal(f.wakes,0);assert.equal(f.prepares().length,0);assert.equal(f.commits().length,0);
+ assert.deepEqual(f.calls,[['pause',7],['resume',7]]);assert.equal(f.job().posted,false);
+});
+for(const bridge of [undefined,{...bridgeBinding,version:2},{...bridgeBinding,routeScope:'b'.repeat(64)}])test('old or conflicting posted binding stays unknown without querying another root '+JSON.stringify(bridge),async()=>{
+ const record={version:1,id:7,name:'a.bin',operationId:'old-operation',state:'accepted',stage:'prepare',posted:true,download:binding,clientId:'client-one',browser:'chrome',...(bridge?{bridgeBinding:bridge}:{})};
+ const f=fixture({saved:{downloadHandoffPendingV1:{7:record}}});await tick();await tick();
+ assert.equal(f.job().state,'uncertain');assert.equal(f.rpc.length,0);assert.equal(f.wakes,0);assert.deepEqual(f.calls,[]);
+ assert.deepEqual(f.journal.downloadHandoffPendingV1[7].bridgeBinding,bridge);
 });
 test('explicit App cancellation is distinct from browser completion and cancels only matching active item',async()=>{
  const f=fixture({confirm:true});await f.capture();f.core={version:1,operationId:f.job().operationId,state:'aborted',taskId:'task-one',taskIds:['task-one'],download:binding,reason:'user_cancelled'};await f.controller.poll(f.job());assert.equal(f.job().state,'aborted');assert.deepEqual(f.calls,[['pause',7],['cancel',7]]);assert.equal(f.commits().length,0);

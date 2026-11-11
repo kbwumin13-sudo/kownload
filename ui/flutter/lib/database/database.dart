@@ -48,9 +48,8 @@ class Database {
     box.delete(key);
   }
 
-  void saveStartConfig(StartConfigEntity entity) {
-    save<StartConfigEntity>(_startConfig, entity);
-  }
+  Future<void> saveStartConfig(StartConfigEntity entity) =>
+      box.put(_startConfig, jsonEncode(entity));
 
   StartConfigEntity? getStartConfig() {
     return get<StartConfigEntity>(

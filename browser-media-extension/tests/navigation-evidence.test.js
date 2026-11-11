@@ -1,4 +1,4 @@
-import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
+import {identityReply,contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,15 +12,17 @@ function browser() {
   const events = {}, messages = [], memory = {}, frames = new Map([[0,{url:page,documentId:'doc-1'}]]);
   let handler;
   const event = name => ({addListener(fn) { events[name] = fn; }});
+  const local={netdiskInstanceId:'navigation-profile'};
   const chrome = {
-    storage:{session:{get:async () => structuredClone(memory),set:async data => Object.assign(memory,structuredClone(data))},local:{get:async () => ({})}},
+    storage:{session:{get:async () => structuredClone(memory),set:async data => Object.assign(memory,structuredClone(data))},local:{get:async()=>structuredClone(local),set:async v=>Object.assign(local,structuredClone(v))}},
     action:{setBadgeText:async () => {},setBadgeBackgroundColor:async () => {}},
     tabs:{get:async () => ({id:1,url:frames.get(0).url}),onRemoved:event('removed'),sendMessage:async () => ({started:true})},
     cookies:{getAllCookieStores:async () => [{id:'fixture-store',tabIds:[1]}],getAll:async () => []},
     scripting:{executeScript:async () => []},
     webNavigation:{onCommitted:event('commit'),onHistoryStateUpdated:event('spa'),onReferenceFragmentUpdated:event('hash'),getFrame:async ({frameId}) => frames.get(frameId)},
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(name => [name,event(name)])),
-    runtime:{onMessage:{addListener(fn) { handler = fn; }},sendMessage:async () => {},sendNativeMessage:(_,message,callback) => {
+    runtime:{id:'test',onMessage:{addListener(fn) { handler = fn; }},sendMessage:async () => {},sendNativeMessage:(_,message,callback) => {
+      const identity=identityReply(message);if(identity){callback(identity);return;}
       messages.push(message);
       const data = message.params?.path === '/api/v1/media/inspect' ? {supported:true,formats:[{id:'best'}]} : 'fixture-task';
       callback(contractReply(message,message.method === 'wakeup' ? {code:0,data:true} : {code:0,data:{code:0,data}}));

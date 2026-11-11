@@ -1,6 +1,7 @@
 import {nativeData,bridgeFailure} from './lib.js';
 import {browserClientId} from './app-identity.js';
 import {createNativeSession} from './native-session.js';
+import {nativeBinding} from './native-identity.js';
 
 const sites = value => Object.fromEntries(Object.entries(value && typeof value === 'object' && !Array.isArray(value) ? value : {}).filter(([host,disabled]) => host.length <= 253 && typeof disabled === 'boolean'));
 function canonical(data) {
@@ -22,8 +23,9 @@ export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThi
     return channel ? channel.send(message) : send(message);
   };
   const identity=async()=>({clientId:await browserClientId(browser),browser:browserName});
-  async function request(action,params={}) {
-    const reply=await transmit({method:'browser',params:{...params,action,...await identity()}});
+  const binding=expected=>channel ? channel.binding(expected) : nativeBinding(browser,expected);
+  async function request(action,params={},expectedBinding) {
+    const reply=await transmit({method:'browser',params:{...params,action,...await identity()},...(expectedBinding?{bridgeBinding:expectedBinding}:{})});
     if (reply?.code !== 0) throw bridgeFailure(reply?.error);
     return nativeData(reply);
   }
@@ -40,17 +42,17 @@ export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThi
     await writing;
     return latest.settings;
   }
-  async function settings() {
+  async function settings(expectedBinding) {
     const old=await browser.storage.local.get(['downloadCapture','showAll','disabledSites']);
     const legacySettings={downloadCapture:{enabled:old.downloadCapture?.enabled === true,confirm:old.downloadCapture?.confirm !== false},showAll:old.showAll === true,disabledSites:sites(old.disabledSites)};
     const downloadsPermission=await browser.permissions?.contains({permissions:['downloads']}).catch(()=>false) || false;
-    return apply(await request('sync',{legacySettings,downloadsPermission,version:browser.runtime.getManifest?.().version || '0.5.0'}));
+    return apply(await request('sync',{legacySettings,downloadsPermission,version:browser.runtime.getManifest?.().version || '0.5.0'},expectedBinding));
   }
-  async function wake() {
-    const reply=await transmit({method:'wakeup',meta:{silent:true}});
+  async function wake(expectedBinding) {
+    const reply=await transmit({method:'wakeup',meta:{silent:true},...(expectedBinding?{bridgeBinding:expectedBinding}:{})});
     if (reply?.code !== 0) throw bridgeFailure(reply?.error);
   }
   async function openSettings() { await wake();await settings();return request('openSettings'); }
   async function updateSettings(patch) { await wake();await settings();return apply(await request('updateSettings',{patch})); }
-  return {identity,request,settings,openSettings,updateSettings,wake,acquire,send:transmit};
+  return {identity,binding,request,settings,openSettings,updateSettings,wake,acquire,send:transmit};
 }

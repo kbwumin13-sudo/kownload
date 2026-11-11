@@ -1,9 +1,10 @@
 import {bridgeFailure} from './lib.js';
+import {NATIVE_HOST,createBoundTransport} from './native-identity.js';
 
 // A connection exists only while an explicit capture/selection flow holds it.
 // Requests are serialized because Native Messaging replies carry no frame ID.
 export function createNativeSession(browser,{timeoutMs=25000}={}) {
-  const port=browser.runtime.connectNative('com.gopeed.gopeed'),queue=[];
+  const port=browser.runtime.connectNative(NATIVE_HOST),queue=[];
   let current,closed=false;
   function close() {
     if (closed) return;
@@ -23,8 +24,10 @@ export function createNativeSession(browser,{timeoutMs=25000}={}) {
     pending.resolve(reply);pump();
   });
   port.onDisconnect.addListener(()=>{void browser.runtime.lastError;close();});
-  return {get closed(){return closed;},close,send(message){
+  const rawSend=message=>{
     if (closed) return Promise.reject(bridgeFailure('ipc_unavailable'));
     return new Promise((resolve,reject)=>{queue.push({message,resolve,reject});pump();});
-  }};
+  };
+  const transport=createBoundTransport(browser,rawSend);
+  return {get closed(){return closed;},close,send:transport.send,binding:transport.binding};
 }

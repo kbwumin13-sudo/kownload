@@ -6,7 +6,7 @@ import 'package:win32_registry/win32_registry.dart';
 
 import '../../util.dart';
 import '../../../identity/app_identity.dart';
-import '../../../identity/native_manifests.dart';
+import '../../../identity/browser_connection.dart' as connection;
 import '../../win32.dart';
 import '../browser_extension_host.dart';
 
@@ -71,14 +71,9 @@ Future<bool> doCheckBrowserInstalled(Browser browser) async {
 /// Check if browser extension manifest is properly installed
 Future<bool> doCheckManifestInstalled(Browser browser) async {
   if (Platform.isMacOS) {
-    final home = Platform.environment['HOME'] ?? '';
-    final directory = macNativeHostsDirectory(browser.name, home: home);
-    if (directory == null || home.isEmpty || Util.isIsolatedPreview) {
-      return false;
-    }
-    return await manifestRoute(
-            directory, await Util.homePathJoin(_hostExecName)) ==
-        ManifestRoute.thisApp;
+    if (browser != Browser.chrome && browser != Browser.edge) return false;
+    if (Util.isIsolatedPreview) return false;
+    return (await connection.inspectBrowser(browser.name)).configured;
   }
   if (await checkBrowserInstalled(browser) == false) return false;
 
@@ -104,18 +99,11 @@ Future<bool> doCheckManifestInstalled(Browser browser) async {
 /// Install browser extension manifest
 Future<void> doInstallManifest(Browser browser) async {
   if (Platform.isMacOS) {
-    // Called only by the explicit connect action; startup never switches a
-    // browser. Previews accept only a temporary directory.
-    final directory = macManifestDirectory(browser.name,
-        preview: Util.isIsolatedPreview,
-        home: Platform.environment['HOME'] ?? '',
-        override: Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR']);
-    await writeNativeManifests(
-        directory: directory,
-        executable: await Util.homePathJoin(_hostExecName),
-        backupDirectory: path.join(
-            Util.getStorageDir(), 'native-manifest-backups', browser.name),
-        firefox: browser == Browser.firefox);
+    if (browser != Browser.chrome && browser != Browser.edge) {
+      throw StateError('请选择 Chrome 或 Edge 后连接；未修改浏览器清单');
+    }
+    final report = await connection.connectBrowser(browser.name);
+    if (!report.configured) throw StateError('没有连接：${report.issues.join(',')}');
     return;
   }
   if (await checkBrowserInstalled(browser) == false) return;
