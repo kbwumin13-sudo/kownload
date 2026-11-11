@@ -18,11 +18,40 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | `Task.creationOperation` v1，namespace=`task-batch.create/v1`，operationId/index | S2 本地 `3c69231`；原 Task 六状态不变 | 39 可能忽略或保存丢字段，不等可执行 | 新端须与 manifest/member/逆索引一致；无 ref 且无逆索引的旧 Task 兼容 | 受启动 policy 和原任务守卫；未识别/不一致拒绝 | 活动库裸回退不支持；配对快照。以下三个 S2 行的实证来自其独立 plain/race/子进程断点交付，本分支只登记合同，不冒称已合入 |
 | bucket `task_operations_v1`，record.version=1 | S2 同提交；固定 namespace、稳定 members，pending 无 Task | 旧 core 不理解持久 operation | pending 只保留意图清单，不启动、不自动重造；created 保留删除历史 | 不 TTL 淘汰；重放不得自动继续暂停任务；调用者须显式提供相同完整意图 | 旧版不维护操作幂等，不能裸回灌；凭据/意图变化不得冒充同 op 或重建 created 前缀 |
 | bucket `operation_tasks_v1`，TaskID→ref | S2 同提交；与 Task/member 同一 M 事务持久写入 | 旧 core 不维护逆索引 | 启动核对；丢 ref/错配/未来版本隔离，不能把有逆索引的任务当 legacy | 索引/任务/manifest 不一致拒绝，不靠自动修复重造 | 新 reader 丢字段/未知 manifest 和索引已有隔离测试；不证明旧 core 执行安全，默认配对快照 |
-| 共享恢复 budget / execution generation | S3 计划，尚未写入 | 未知 | 未知，拒绝；迟到执行不得跨代生效 | 未知，拒绝；换连接/URL/队列不能清零预算 | 先冻结暂停/重试/重启政策及故障用例，补版本与旧端兼容证据 |
+| `Task.recovery` ref，候选 `version=1`（planned，未激活） | S3 §8 独立内核已有局部 fixture，尚未发布或接入 HTTP enroll/IO | 39/旧 core 可能忽略或保存丢 ref，不能当普通任务执行 | 新端必须核对 ref、ledger、required 哨兵三方；缺失/未知/错配时连显式 Continue 也拒绝 | 只允许已支持的同 episode/generation；迟到结果不能跨代生效 | 与以下两行同事务激活；配对 App/数据/偏好快照，禁止裸活动库回灌旧 core |
+| bucket `task_recovery_v1`，TaskID→恢复 ledger（planned，未激活） | S3 首步仅拟接 `http-transport-recovery/v1` 中可冻结的 direct/manual/static/env 上下文；局部内核不等于纵向完成 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、executionDefaultsHash、共享计数、有界 action 与 notBefore；默认摘要缺失/损坏固定 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保原 episode、initial issued、余额/actions/notBefore；只读不 enroll，删除不重造 | Task ref、ledger、required 哨兵必须同一事务；损坏/未知不得删状态或重造任务来恢复 |
+| bucket `task_recovery_required_v1`，候选 `{version:1, capability:http-transport-recovery/v1}`（planned） | S3 独立 required 哨兵；即使旧 writer 丢 Task ref 仍可被新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方状态；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失而降级为 legacy；不自动修复/enroll/启动 | 备份必须保留三个状态；只有配对快照回退，不把旧端 JSON 可读当执行兼容 |
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
 | MCP 稳定 bin 的同 inode 安装 xattr（planned，键名/JSON 格式由 11 部署实现定稿） | 尚无 install-helper 实现；不属于 Task/数据库格式，不新增 receipt 库 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知/缺失/摘要不符拒绝升级，不自动认领 | 配对备份恢复 App/桥及稳定二进制 inode 的 xattr；快照丢 xattr 后 fail-closed。xattr 不支持/写失败须在原子发布前失败并保留旧入口；不清除 quarantine 或改变系统信任 |
+
+S3 上述三行仅登记已核准的 planned 合同。独立内核的局部 plain/race fixture 不代表
+HTTP enroll/IO 已激活或真实旧任务已迁移；首能力最终 v1 字段随实现与纵向证据核证。
+首步限 HTTP transport；provider refresh、deferral 及其他恢复来源尚未接入该共享预算，
+不得把它们写成已共享。激活写入前须用实现中的准确版本/字段和同事务、重启、迟到结果、
+缺失/未知三方状态及删除后不复活的行为证据更新本表。纯读取不创建这些记录。
+
+S3 §8.7 的 `executionDefaultsHash`（D）固定为 64 位小写 hex，采用
+`SHA256(JSON({version:1,inheritedUserAgent?:TrimSpace(实际默认UA),inheritedProxyPolicyId?:实际有效proxyPolicyId}))`。
+只计入实际继承的项：显式 UA 或显式 none/custom 代理不受对应无关全局值变化影响；
+无继承项也保存固定 v1 空集合摘要，不用缺字段代替。不保存默认值原文、代理凭据或
+第二份认证，不向 raw Request 写回继承的 UA/Proxy。
+
+`sourceHash = SHA256(JSON({version:1,request:HTTP已解释投影,executionDefaultsHash:D}))`。
+投影复用 HTTP canonicalizer，覆盖初始 URL、默认 GET 方法、Body、规范 Header、实际
+显式代理策略与 SkipVerify，排除 HTTP 不解释的 opaque Extra；不重排 URL query/escape，
+不改 Body/认证值。此为源上下文绑定，不是资源身份或完整用户意图指纹；S2 的完整意图
+指纹及大整数语义不变。先以旧 D 验证原 raw 绑定，才能 CAS 合法继承项变化；无法核证
+旧绑定或默认摘要缺/坏即 context_mismatch held、零 IO。hash、wire 与 SourceKey 必须
+消费同一不可变 UA/代理 handler 快照；proxyPolicyId 对相同有效策略可跨重启重算，不能
+是进程随机 ID。规范化、换链、普通重定向或重启不重开 episode、不补免费 initial/retry。
+
+首能力仅覆盖能实际冻结的 direct、manual/custom、static/env 代理上下文。PAC 动态
+脚本可能执行即不 eligible：未纳入恢复状态的 legacy 任务保留原能力，不 enroll；已含
+ref/ledger/required 任一状态的任务遇 PAC、缺能力或无法证明 snapshot 时 held、零 IO，
+保留原 episode/预算/issued/notBefore，不降级 legacy 或清状态。PAC 纳入共享恢复仍为
+后续计划，不能据当前能力宣称所有 HTTP 恢复已共享预算；不另建 PAC 抓取机制。
 
 ## 回退单位
 

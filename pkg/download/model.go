@@ -25,6 +25,7 @@ type ResolveResult struct {
 }
 
 type Task struct {
+	Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 	Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 	CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
 	ID                string               `json:"id"`
@@ -58,9 +59,17 @@ type Task struct {
 	// Set on startup from the durable reverse index, even if an old reader
 	// discarded CreationOperation while saving the task.
 	creationBlocked bool
+	recoveryBlocked bool
+	recoveryOwner   atomic.Pointer[taskRecoveryOwner]
 	// Q receives this one-shot authority only from an acknowledged M in this
 	// process. It is intentionally absent from persisted/public Task JSON.
 	initialHTTPExecution atomic.Bool
+	// One-shot enrollment evidence, absent from JSON. Historical/legacy IO
+	// cannot manufacture a free initial attempt when first joining recovery.
+	recoveryInitialEligible atomic.Bool
+	// Read only atomically by Delete: never wait on statusLock before removing
+	// membership while a completion Put may be blocked under that lock.
+	recoveryRunCancel atomic.Pointer[context.CancelFunc]
 }
 
 func NewTask() *Task {
@@ -135,8 +144,9 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		Name              string               `json:"name"`
 		Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 		CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
+		Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery})
 }
 
 func (t *Task) getStatus() base.Status {

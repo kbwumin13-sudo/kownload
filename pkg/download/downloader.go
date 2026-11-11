@@ -19,6 +19,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/logger"
+	httpProtocol "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/internal/protocol/media"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -96,6 +97,7 @@ type Progress struct {
 }
 
 type Downloader struct {
+	configSnapshotMu  sync.RWMutex
 	operationMu       sync.Mutex
 	handoffMu         sync.Mutex
 	startupTaskPolicy StartupTaskPolicy
@@ -177,7 +179,7 @@ func (d *Downloader) Setup() error {
 		return ErrStartupTaskPolicy
 	}
 	// setup storage
-	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage, bucketTaskOperations, bucketOperationTasks}); err != nil {
+	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage, bucketTaskOperations, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired}); err != nil {
 		return err
 	}
 	// load config from storage
@@ -227,6 +229,7 @@ func (d *Downloader) Setup() error {
 			d.assignFetcherManager(task)
 			initTask(task)
 			task.creationBlocked = d.checkCreationAssociation(task) != nil
+			task.recoveryBlocked = d.checkTaskRecovery(task) != nil
 			if task.getStatus() != base.DownloadStatusDone && task.getStatus() != base.DownloadStatusError {
 				task.updateStatus(base.DownloadStatusPause)
 			}
@@ -264,7 +267,7 @@ func (d *Downloader) Setup() error {
 			if d.startupTaskPolicy == StartupTaskPolicyImportedReview {
 				continue
 			}
-			if task.creationHeld() || task.handoffHeld() {
+			if task.creationHeld() || task.handoffHeld() || task.recoveryHeld() {
 				continue
 			}
 			task.lock.Lock()
@@ -304,7 +307,22 @@ func (d *Downloader) Setup() error {
 							return
 						}
 
+						var progressLease *transfer.RecoveryLease
+						if task.Recovery != nil {
+							owner := task.recoveryOwner.Load()
+							if owner == nil {
+								return
+							}
+							var err error
+							progressLease, err = owner.currentLease(context.Background())
+							if err != nil || progressLease.Token.Generation != task.runGeneration {
+								return
+							}
+						}
 						current := task.fetcher.Progress().TotalDownloaded()
+						if progressLease != nil && progressLease.Check() != nil {
+							return
+						}
 						task.dataLock.Lock()
 						tick := float64(d.cfg.RefreshInterval) / 1000
 						downloadDataChanged := false
@@ -363,7 +381,7 @@ func (d *Downloader) cleanupNonExistingTasks() {
 	var tasksToDelete []string
 
 	for _, task := range d.taskList() {
-		if task.creationHeld() {
+		if task.creationHeld() || task.recoveryHeld() {
 			continue
 		}
 		if task.Meta == nil || task.Meta.Res == nil {
@@ -473,6 +491,16 @@ func (d *Downloader) protocolController(protocol string) *controller.Controller 
 		}
 		return handler, d.cfg.Proxy.PolicyID()
 	}
+	ctl.GetRecoveryProxySnapshot = func(req *base.RequestProxy) (func(*gohttp.Request) (*url.URL, error), string, bool) {
+		d.configSnapshotMu.RLock()
+		var snapshot *base.DownloaderProxyConfig
+		if d.cfg.Proxy != nil {
+			copy := *d.cfg.Proxy
+			snapshot = &copy
+		}
+		d.configSnapshotMu.RUnlock()
+		return base.CaptureProxySnapshot(req, snapshot)
+	}
 	ctl.Transports = d.transports
 	ctl.Budget = d.budget
 	ctl.QueueWaiting = d.queueWaiting
@@ -552,10 +580,20 @@ func (d *Downloader) saveActiveTask(task *Task) error {
 }
 
 func (d *Downloader) saveTask(task *Task) error {
+	if err := d.checkTaskRecovery(task); err != nil {
+		return err
+	}
 	data, err := task.fetcherManager.Store(task.fetcher)
 	if err != nil {
 		d.Logger.Error().Stack().Err(err).Msgf("serialize fetcher failed: %s", task.ID)
 		return err
+	}
+	if task.Recovery != nil {
+		owner := task.recoveryOwner.Load()
+		if owner == nil {
+			return transfer.ErrRecoveryHeld
+		}
+		return owner.persistSnapshot(task.clone(), data, true)
 	}
 	if data != nil {
 		if err := d.storage.Put(bucketSave, task.ID, data); err != nil {
@@ -743,6 +781,9 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 		defer task.lock.Unlock()
 		task.statusLock.Lock()
 		defer task.statusLock.Unlock()
+		if err := d.checkTaskRecovery(task); err != nil {
+			return err
+		}
 		if task.creationHeld() {
 			return ErrOperationConflict
 		}
@@ -764,6 +805,7 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 			if err := task.fetcher.Patch(req, opts); err != nil {
 				return err
 			}
+			invalidateTaskRecovery(task)
 			task.Meta = task.fetcher.Meta()
 			if task.Protocol == "media" || task.Protocol == "netdisk" {
 				task.Meta = util.DeepClone(task.Meta)
@@ -833,6 +875,9 @@ func (d *Downloader) pauseAll() (err error) {
 // Continue specific tasks, if continue tasks will exceed maxRunning, it needs pause some running tasks before that
 func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 	if err := d.checkStartupContinue(filter); err != nil {
+		return err
+	}
+	if err := d.checkRecoverySelection(filter); err != nil {
 		return err
 	}
 	if filter == nil || filter.IsEmpty() {
@@ -952,6 +997,9 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 	if err := d.checkStartupContinue(filter); err != nil {
 		return err
 	}
+	if err := d.checkRecoverySelection(filter); err != nil {
+		return err
+	}
 	if filter == nil || filter.IsEmpty() {
 		return d.continueAll()
 	}
@@ -981,6 +1029,9 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 	if filter == nil || filter.IsEmpty() {
 		d.lock.Lock()
 		selected = append(selected, d.tasks...)
+		for _, task := range selected {
+			invalidateDeletedRun(task)
+		}
 		d.tasks = make([]*Task, 0)
 		d.clearQueueLocked()
 		d.lock.Unlock()
@@ -988,6 +1039,7 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 		selected = d.getTasksByFilter(filter)
 		d.lock.Lock()
 		for _, task := range selected {
+			invalidateDeletedRun(task)
 			for i, t := range d.tasks {
 				if t.ID == task.ID {
 					d.tasks = append(d.tasks[:i], d.tasks[i+1:]...)
@@ -1004,6 +1056,7 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 		d.lock.Unlock()
 	}
 	for _, task := range selected {
+		invalidateTaskRecovery(task)
 		if err = d.doDelete(task, force); err != nil {
 			return
 		}
@@ -1017,6 +1070,9 @@ func (d *Downloader) Stats(id string) (sr any, err error) {
 	task := d.getTask(id)
 	if task == nil {
 		return sr, ErrTaskNotFound
+	}
+	if err := d.checkTaskRecovery(task); err != nil {
+		return nil, err
 	}
 	if task.creationHeld() {
 		return nil, ErrOperationConflict
@@ -1292,11 +1348,15 @@ func (d *Downloader) getTasksByFilter(filter *TaskFilter) []*Task {
 }
 
 func (d *Downloader) GetConfig() (*base.DownloaderStoreConfig, error) {
+	d.configSnapshotMu.RLock()
+	defer d.configSnapshotMu.RUnlock()
 	return d.cfg.DownloaderStoreConfig, nil
 }
 
 func (d *Downloader) PutConfig(v *base.DownloaderStoreConfig) error {
+	d.configSnapshotMu.Lock()
 	d.cfg.DownloaderStoreConfig = v
+	d.configSnapshotMu.Unlock()
 	return d.storage.Put(bucketConfig, "config", v)
 }
 
@@ -1317,19 +1377,67 @@ func (d *Downloader) getProtocolConfig(name string, v any) bool {
 
 // wait task done
 func (d *Downloader) watch(task *Task) {
+	task.statusLock.Lock()
+	generation, f := task.runGeneration, task.fetcher
+	task.statusLock.Unlock()
+	var wait func() error
+	if task.Protocol == "http" {
+		if binder, ok := f.(interface {
+			BindRunWait(context.Context) func() error
+		}); ok {
+			wait = binder.BindRunWait(context.Background())
+		}
+	}
+	d.watchRun(task, f, generation, wait)
+}
+
+type taskRunWatch struct {
+	generation uint64
+	task       *Task
+	bound      bool
+	token      transfer.RecoveryToken
+}
+
+func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, wait func() error, leases ...*transfer.RecoveryLease) {
+	var runLease *transfer.RecoveryLease
+	if len(leases) > 0 {
+		runLease = leases[0]
+	}
+
 	if d.closed.Load() || d.getTask(task.ID) != task {
 		return
 	}
-	if _, loaded := d.watchedTasks.LoadOrStore(task.ID, true); loaded {
-		return
+	bound := task.Protocol == "http" && wait != nil
+	registrationGeneration := generation
+	if !bound {
+		registrationGeneration = 0
+	}
+	registration := &taskRunWatch{generation: registrationGeneration, task: task, bound: bound}
+	if bound && runLease != nil {
+		registration.token = runLease.Token
+	}
+	for {
+		old, loaded := d.watchedTasks.LoadOrStore(task.ID, registration)
+		if !loaded {
+			break
+		}
+		if current, ok := old.(*taskRunWatch); ok && current.generation == registrationGeneration && current.task == task && current.bound == bound && current.token == registration.token {
+			return
+		}
+		if d.watchedTasks.CompareAndSwap(task.ID, old, registration) {
+			break
+		}
+	}
+	defer d.watchedTasks.CompareAndDelete(task.ID, registration)
+	if bound && runLease != nil {
+		defer func() {
+			if owner := task.recoveryOwner.Load(); owner != nil {
+				owner.invalidateToken(runLease.Token)
+			}
+		}()
 	}
 
-	defer func() {
-		d.watchedTasks.Delete(task.ID)
-	}()
-
 	task.statusLock.Lock()
-	f := task.fetcher
 	task.dataLock.RLock()
 	uploading := task.Uploading
 	task.dataLock.RUnlock()
@@ -1361,18 +1469,36 @@ func (d *Downloader) watch(task *Task) {
 		return
 	}
 
-	err := f.Wait()
+	if wait == nil {
+		wait = f.Wait
+	}
+	err := wait()
 	if d.closed.Load() || d.getTask(task.ID) != task {
 		return
 	}
+	var expected []uint64
+	if bound {
+		if runLease != nil {
+			owner := task.recoveryOwner.Load()
+			if owner == nil || !owner.acceptsFailure(runLease.Token) || (err == nil && runLease.Check() != nil) {
+				return
+			}
+		}
+		task.statusLock.Lock()
+		current := task.runGeneration == generation && task.getStatus() == base.DownloadStatusRunning
+		task.statusLock.Unlock()
+		if !current {
+			return
+		}
+		expected = []uint64{generation}
+	}
 	if err != nil {
-		d.doOnError(task, err)
+		d.doOnError(task, err, expected...)
 		return
 	}
-
-	committed, completionErr := d.commitTaskCompletion(task, f)
+	committed, completionErr := d.commitTaskCompletion(task, f, expected...)
 	if completionErr != nil {
-		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr))
+		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr), expected...)
 		return
 	}
 	if !committed {
@@ -1446,13 +1572,13 @@ func (d *Downloader) watch(task *Task) {
 // commitTaskCompletion shares deletion's persistence guard. The task operation
 // lock precedes the guard, like pause/start saves; no protocol or user callbacks
 // run under this guard. Public done is published only after acknowledged storage.
-func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher) (bool, error) {
+func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher, expectedGeneration ...uint64) (bool, error) {
 	task.lock.Lock()
 	defer task.lock.Unlock()
 	// An old Wait may finish after Pause requeued the task. Discard that
 	// completion before attempting a membership lookup or final snapshot.
 	task.statusLock.Lock()
-	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
+	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil || (len(expectedGeneration) > 0 && task.runGeneration != expectedGeneration[0]) {
 		task.statusLock.Unlock()
 		return false, nil
 	}
@@ -1547,6 +1673,15 @@ func (d *Downloader) doOnError(task *Task, err error, generation ...uint64) {
 	if deferred, ok := transfer.AsDeferred(err); ok {
 		d.deferTask(task, deferred, generation...)
 		return
+	}
+	// Managed resolution uses the same closed categories as managed streams.
+	// Existing HTTP sanitization remains in place; Core does not forward
+	// request-specific error objects to events, webhooks or scripts.
+	if task.Protocol == "http" && task.recoveryOwner.Load() != nil {
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = httpProtocol.ClassifyRecoveryError(err)
+		}
 	}
 	persistenceLock := d.errorPersistenceLock(task)
 	persistenceLock.Lock()
@@ -1644,15 +1779,22 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 }
 
 func (d *Downloader) restoreTask(task *Task) error {
+	if err := d.checkTaskRecovery(task); err != nil {
+		return err
+	}
 	if task.fetcher == nil {
 		if err := d.restoreFetcher(task); err != nil {
 			return err
 		}
 	}
-	go d.watch(task)
+	if task.Protocol != "http" || (task.getStatus() == base.DownloadStatusDone && task.Uploading) {
+		go d.watch(task)
+	}
 	return nil
 }
 
+// Callers validate required state before taking task.dataLock: Patch can call
+// this helper while holding that write lock.
 func (d *Downloader) restoreFetcher(task *Task) error {
 	v, f := task.fetcherManager.Restore()
 	var checkpointPresent bool
@@ -1675,6 +1817,7 @@ func (d *Downloader) restoreFetcher(task *Task) error {
 		task.fetcher = task.fetcherManager.Build()
 	}
 	if initial && !checkpointPresent && task.Protocol == "http" && meta.Res == nil {
+		task.recoveryInitialEligible.Store(true)
 		// Keep the manager's Restore/precision semantics; only HTTP's narrow
 		// runtime handshake distinguishes a fresh M->Q from historical state.
 		if first, ok := task.fetcher.(interface{ AuthorizeInitialRequest() }); ok {
@@ -1708,6 +1851,7 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 	task.fetcherManager = fm
 	task.fetcher = f
 	task.Protocol = fm.Name()
+	task.recoveryInitialEligible.Store(task.Protocol == "http")
 	task.Meta = util.DeepClone(f.Meta())
 	task.Progress = &Progress{}
 	_, task.Uploading = f.(fetcher.Uploader)
@@ -1733,7 +1877,9 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 		err = d.doStart(task)
 	}()
 
-	go d.watch(task)
+	if task.Protocol != "http" {
+		go d.watch(task)
+	}
 	return
 }
 
@@ -1790,6 +1936,9 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var runCtx context.Context
 	var runCancel context.CancelFunc
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
+		if err := d.checkTaskRecovery(task); err != nil {
+			return true, err
+		}
 		if task.creationHeld() {
 			return true, ErrOperationConflict
 		}
@@ -1816,13 +1965,18 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.dataLock.RLock()
 		needCreate = !task.IsCreated
 		task.dataLock.RUnlock()
-		task.runGeneration++
+		invalidateTaskRecovery(task)
+		task.runGeneration = d.recoveryGenerationBase(task) + 1
 		generation = task.runGeneration
 		if task.runCancel != nil {
 			task.runCancel()
 		}
 		runCtx, runCancel = context.WithCancel(context.Background())
 		task.runCancel = runCancel
+		if task.Protocol == "http" {
+			cancelSnapshot := runCancel
+			task.recoveryRunCancel.Store(&cancelSnapshot)
+		}
 		task.updateStatus(base.DownloadStatusRunning)
 
 		return
@@ -1836,7 +1990,16 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	}
 
 	handler := func() error {
-		defer runCancel()
+		task.statusLock.Lock()
+		previousPause := task.pauseDone
+		task.statusLock.Unlock()
+		if previousPause != nil {
+			select {
+			case <-previousPause:
+			case <-runCtx.Done():
+				return nil
+			}
+		}
 		task.lock.Lock()
 		defer task.lock.Unlock()
 		task.statusLock.Lock()
@@ -1847,11 +2010,94 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}
 
+		var recovery *taskRecoveryOwner
+		capture, canCapture := task.fetcher.(interface {
+			CaptureRecoveryContext(*base.Request) (*transfer.HTTPExecutionContext, bool, error)
+			SetRecoveryContext(*transfer.HTTPExecutionContext)
+		})
+		if task.Protocol == "http" {
+			if !canCapture && task.Recovery != nil {
+				return transfer.ErrRecoveryHeld
+			}
+			if canCapture {
+				snapshot, supported, captureErr := capture.CaptureRecoveryContext(task.Meta.Req)
+				if captureErr != nil {
+					return captureErr
+				}
+				if !supported {
+					if task.Recovery != nil {
+						return transfer.ErrRecoveryHeld
+					}
+				} else {
+					var recoveryErr error
+					recovery, recoveryErr = d.ensureTaskRecovery(task, snapshot.DefaultsHash())
+					if recoveryErr != nil {
+						return recoveryErr
+					}
+				}
+			}
+		}
+		if runCtx.Err() != nil {
+			invalidateTaskRecovery(task)
+			return nil
+		}
 		startTask := task.clone()
 		d.triggerOnStart(startTask)
-		task.dataLock.Lock()
-		task.Meta.Req = startTask.Meta.Req
-		task.dataLock.Unlock()
+		task.statusLock.Lock()
+		obsoleteAfterStart := runCtx.Err() != nil || task.runGeneration != generation || task.getStatus() != base.DownloadStatusRunning
+		if obsoleteAfterStart && task.Protocol == "http" {
+			task.statusLock.Unlock()
+			invalidateTaskRecovery(task)
+			return nil
+		}
+		if !obsoleteAfterStart {
+			task.dataLock.Lock()
+			task.Meta.Req = startTask.Meta.Req
+			task.dataLock.Unlock()
+		}
+		// Legacy protocols retain their preparation cancellation handshake:
+		// PrepareContext sees this run's canceled context, and never Start.
+		task.statusLock.Unlock()
+		if recovery != nil {
+			snapshot, supported, captureErr := capture.CaptureRecoveryContext(task.Meta.Req)
+			if captureErr != nil {
+				return captureErr
+			}
+			if !supported {
+				return transfer.ErrRecoveryHeld
+			}
+			if err := recovery.persistSnapshot(task.clone(), nil, false, snapshot.DefaultsHash()); err != nil {
+				return err
+			}
+			if _, err := recovery.begin(generation, ""); err != nil {
+				return err
+			}
+			lease, err := recovery.currentLease(runCtx)
+			if err != nil {
+				return err
+			}
+			setter, ok := task.fetcher.(interface{ SetRecoveryLease(*transfer.RecoveryLease) })
+			if !ok {
+				return transfer.ErrRecoveryHeld
+			}
+			capture.SetRecoveryContext(snapshot)
+			setter.SetRecoveryLease(lease)
+			runCtx = transfer.WithRecoveryLease(runCtx, lease)
+		}
+		if recovery == nil {
+			task.recoveryInitialEligible.Store(false)
+		}
+		var boundWait func() error
+		if task.Protocol == "http" {
+			if binder, ok := task.fetcher.(interface {
+				BindRunWait(context.Context) func() error
+			}); ok {
+				boundWait = binder.BindRunWait(runCtx)
+			}
+			if recovery != nil && boundWait == nil {
+				return transfer.ErrRecoveryHeld
+			}
+		}
 		// Resolve owns its request/options. Keep the published task view detached
 		// so Pause can cancel resolution without waiting for a snapshot lock.
 		task.dataLock.RLock()
@@ -1959,11 +2205,18 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		if d.getTask(task.ID) != task {
 			return nil
 		}
+		f := task.fetcher
+		go func() {
+			defer runCancel()
+			d.watchRun(task, f, generation, boundWait, transfer.RecoveryLeaseFromContext(runCtx))
+		}()
 		d.emit(EventKeyStart, task)
 		return nil
 	}
 	go func() {
 		if err := handler(); err != nil {
+			runCancel()
+			invalidateTaskRecovery(task)
 			d.doOnError(task, err, generation)
 		}
 	}()
@@ -1982,6 +2235,7 @@ func (d *Downloader) doPause(task *Task) (err error) {
 			return
 		}
 
+		invalidateTaskRecovery(task)
 		previousPauseDone = task.pauseDone
 		pauseDone = make(chan struct{})
 		task.pauseDone = pauseDone
@@ -2022,7 +2276,15 @@ func (d *Downloader) doPause(task *Task) (err error) {
 					return err
 				}
 			}
-			return d.saveActiveTask(task)
+			if err := d.saveActiveTask(task); err != nil {
+				return err
+			}
+			if owner := task.recoveryOwner.Load(); owner != nil {
+				if proof, ok := task.fetcher.(interface{ RecoveryCleanPause() bool }); ok && proof.RecoveryCleanPause() {
+					return owner.markCleanPaused()
+				}
+			}
+			return nil
 		}()
 		// Callbacks may invoke Close themselves. Publish persistence completion
 		// and release operation locks before delivering the event.

@@ -26,7 +26,9 @@ func (f *Fetcher) sourceKey() transfer.SourceKey {
 	}
 	f.redirectLock.Unlock()
 	proxyID := "direct"
-	if f.ctl.GetProxyPolicy != nil {
+	if snapshot := f.executionContext.Load(); snapshot != nil {
+		proxyID = snapshot.ProxyID()
+	} else if f.ctl.GetProxyPolicy != nil {
 		_, proxyID = f.ctl.GetProxyPolicy(f.meta.Req.Proxy)
 	}
 	u, err := url.Parse(raw)

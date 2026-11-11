@@ -17,6 +17,9 @@ type policyTransport struct {
 }
 
 func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := recoveryContextError(req.Context()); err != nil {
+		return nil, err
+	}
 	r := req.Clone(req.Context())
 	r.Header = req.Header.Clone()
 	if t.policy != nil {
@@ -28,6 +31,12 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	resp, err := t.transport.RoundTrip(r)
+	if err == nil {
+		if obsolete := recoveryContextError(r.Context()); obsolete != nil {
+			resp.Body.Close()
+			return nil, obsolete
+		}
+	}
 	if err == nil && t.responsePolicy != nil {
 		err = t.responsePolicy(r, resp)
 		if err != nil {
