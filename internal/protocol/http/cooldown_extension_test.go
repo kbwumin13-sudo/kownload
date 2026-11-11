@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,20 @@ import (
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 )
 
+// Keep successful responses unfinished: a refused speculative range can be
+// redundant, so a fast original response may otherwise finish before the test
+// extends the cooldown. ServeContent still supplies the real range headers.
+type cooldownWaitingBody struct {
+	http.ResponseWriter
+	ctx context.Context
+}
+
+func (w cooldownWaitingBody) Write(_ []byte) (int, error) {
+	w.ResponseWriter.(http.Flusher).Flush()
+	<-w.ctx.Done()
+	return 0, w.ctx.Err()
+}
+
 // Existing queued work must be reconsidered when another same-source response
 // extends a short cooldown past the deferral threshold.
 func TestCoolingTransferRechecksExtendedDeadline(t *testing.T) {
@@ -26,7 +41,8 @@ func TestCoolingTransferRechecksExtendedDeadline(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		http.ServeContent(w, r, "payload.bin", time.Unix(1700000000, 0), bytes.NewReader(data))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(cooldownWaitingBody{w, r.Context()}, r, "payload.bin", time.Unix(1700000000, 0), bytes.NewReader(data))
 	}))
 	defer srv.Close()
 	pool := transfer.NewTransportPool()
@@ -53,14 +69,26 @@ func TestCoolingTransferRechecksExtendedDeadline(t *testing.T) {
 	if err := f.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for refused.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("no ranged request was refused")
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	// A request reaching the server is not proof that its 429 has reached the
+	// scheduler. Wait for the short source cooldown to be published instead.
+	for {
+		m := f.member.Load()
+		if m != nil && !m.Snapshot().CooldownUntil.IsZero() {
+			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case err := <-f.doneCh:
+			t.Fatalf("transfer ended before short cooldown was recorded: %v", err)
+		case <-deadline.C:
+			t.Fatal("no short cooldown was recorded")
+		case <-time.After(time.Millisecond):
+		}
 	}
-	time.Sleep(300 * time.Millisecond)
+	if refused.Load() == 0 {
+		t.Fatal("short cooldown was not caused by a refused ranged request")
+	}
 
 	// Another in-flight same-source request extends the short cooldown,
 	// while another origin was already queued before the first refusal.

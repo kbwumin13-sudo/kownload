@@ -11,6 +11,10 @@ class StartConfig {
   late int refreshInterval;
   late String apiToken;
 
+  // A launch-only admission option. It is not part of saved DownloaderConfig.
+  @JsonKey(defaultValue: 'normal')
+  String startupTaskPolicy = 'normal';
+
   StartConfig();
 
   factory StartConfig.fromJson(Map<String, dynamic> json) =>

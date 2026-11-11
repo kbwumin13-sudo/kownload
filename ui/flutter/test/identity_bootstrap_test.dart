@@ -58,6 +58,9 @@ void main() {
             expect(args,
                 ['--source', '${dir.path}/old', '--target', '${dir.path}/new']);
             expect(await File('${dir.path}/new/database.hive').exists(), false);
+            await Directory('${dir.path}/new').create();
+            await File('${dir.path}/new/.kownload-identity.json')
+                .writeAsString('{"version":1,"imported":false}');
             return ProcessResult(1, 0, jsonEncode({'ok': true}), '');
           });
       expect(calls, 1);

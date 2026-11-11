@@ -523,7 +523,8 @@ func TestCoolingTransferSeesQueueChangeDuringOtherWork(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		http.ServeContent(w, r, "payload.bin", time.Unix(1700000000, 0), bytes.NewReader(data))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(cooldownWaitingBody{w, r.Context()}, r, "payload.bin", time.Unix(1700000000, 0), bytes.NewReader(data))
 	}))
 	defer srv.Close()
 	pool := transfer.NewTransportPool()
@@ -549,14 +550,24 @@ func TestCoolingTransferSeesQueueChangeDuringOtherWork(t *testing.T) {
 	if err := f.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for refused.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("no ranged request was refused")
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		m := f.member.Load()
+		if m != nil && !m.Snapshot().CooldownUntil.IsZero() {
+			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case err := <-f.doneCh:
+			t.Fatalf("transfer ended before short cooldown was recorded: %v", err)
+		case <-deadline.C:
+			t.Fatal("no source cooldown was recorded")
+		case <-time.After(time.Millisecond):
+		}
 	}
-	time.Sleep(300 * time.Millisecond)
+	if refused.Load() == 0 {
+		t.Fatal("cooldown was not caused by a refused ranged request")
+	}
 
 	// The cooldown is extended, which wakes the supervisor; it then waits for
 	// the connection lock while a task joins the queue.
