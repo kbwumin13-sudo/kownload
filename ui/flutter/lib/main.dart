@@ -27,6 +27,7 @@ import 'macos/mac_panel.dart';
 import 'identity/bootstrap.dart';
 import 'identity/bootstrap_error_page.dart';
 import 'identity/app_identity.dart';
+import 'identity/active_task_batch_route.dart';
 import 'identity/startup_policy.dart';
 import 'identity/startup_review_notice.dart';
 import 'app/modules/task/controllers/task_controller.dart';
@@ -149,7 +150,15 @@ Future<IdentityStartupPolicy> init(StartupArgs args) async {
     final startCfg = controller.startConfig.value;
     startCfg.startupTaskPolicy = policy.mode;
     controller.runningPort.value = await LibgopeedBoot.instance.start(startCfg);
-    api.init(startCfg.network, controller.runningAddress(), startCfg.apiToken);
+    final activeNetwork = startCfg.network;
+    final activeAddress = controller.runningAddress();
+    final activeToken = startCfg.apiToken;
+    final taskBatchRoute = Util.isMacos()
+        ? await localBootTaskBatchRoute(
+            await Util.homePathJoin(AppIdentity.hostSocket))
+        : null;
+    api.init(activeNetwork, activeAddress, activeToken,
+        taskBatchRoute: taskBatchRoute);
   } catch (e) {
     logger.e("libgopeed init fail", e);
   }

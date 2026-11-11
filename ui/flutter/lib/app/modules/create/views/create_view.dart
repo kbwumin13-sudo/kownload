@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' show FontFeature;
 
 import 'package:contentsize_tabbarview/contentsize_tabbarview.dart';
@@ -22,6 +24,11 @@ import '../../../../api/model/resolve_result.dart';
 import '../../../../api/model/resolve_task.dart';
 import '../../../../api/model/task.dart';
 import '../../../../api/netdisk.dart';
+import '../../../../api/task_batch_api.dart';
+import '../../../../api/model/task_batch_operation.dart';
+import '../../../../api/model/task_batch_scope.dart';
+import '../../../../database/task_batch_journal.dart';
+import '../../../../database/task_batch_journal_store.dart';
 import '../../../../database/database.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/message.dart';
@@ -34,6 +41,7 @@ import '../../../../macos/mac_appearance.dart';
 import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_onboarding.dart';
 import '../../task/controllers/task_controller.dart';
+import '../../task/views/task_batch_groups.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
@@ -46,12 +54,16 @@ import 'netdisk_view.dart';
 import 'browser_media_view.dart';
 
 class CreateView extends StatefulWidget {
+  final TaskBatchJournalStore? batchJournal;
+  final Duration batchAcknowledgementTimeout;
   final NetdiskApi? netdiskApi;
   final NetdiskBrowserTool? netdiskBrowserTool;
   final Future<String> Function(CreateTask)? taskCreator;
   final Future<ResolveResult> Function(ResolveTask)? taskResolver;
   const CreateView(
       {super.key,
+      this.batchJournal,
+      this.batchAcknowledgementTimeout = const Duration(seconds: 5),
       this.netdiskApi,
       this.netdiskBrowserTool,
       this.taskCreator,
@@ -72,7 +84,276 @@ Protocol? _parseProtocol(String url) {
   return null;
 }
 
+class _ManualBatchAttempt {
+  final ScopedTaskBatchApi api;
+  final TaskBatchJournalScope scope;
+  final TaskBatchOperationRef operation;
+  final CreateTaskBatch batch;
+  final String input, signature;
+  bool sent = false;
+  _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
+      this.input, this.signature);
+}
+
 class _CreateViewState extends State<CreateView> {
+  _ManualBatchAttempt? _manualBatch;
+  int _manualEpoch = 0;
+  int _confirmationEpoch = 0;
+  int? _manualConfirmationEpoch;
+  Completer<void>? _manualConfirmationStop;
+  String _manualObservedText = '';
+  bool _manualBusy = false;
+  final _manualNotice = RxnString();
+
+  void _manualInputChanged() {
+    final text = _urlController.text;
+    if (text == _manualObservedText) return;
+    _manualObservedText = text;
+    ++_manualEpoch;
+    _manualBusy = false;
+    if (_manualBatch != null && _manualBatch!.input == text.trim()) {
+      _manualNotice.value = '输入已变化，原批次只可查询。';
+    } else {
+      _manualBatch = null;
+      _manualNotice.value = null;
+    }
+  }
+
+  CreateTaskBatch _manualPayload(List<String> urls, Options opts) =>
+      CreateTaskBatch(
+          reqs: urls
+              .map((url) =>
+                  CreateTaskBatchItem(req: _requestForUrl(url), opts: opts))
+              .toList());
+  bool _manualReferenceCurrent(_ManualBatchAttempt attempt, int epoch) =>
+      mounted &&
+      epoch == _manualEpoch &&
+      identical(_manualBatch, attempt) &&
+      attempt.api.snapshot.isCurrent;
+  bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
+      _manualReferenceCurrent(attempt, epoch) &&
+      attempt.input == _urlController.text.trim() &&
+      attempt.signature ==
+          jsonEncode(_manualPayload(
+                  Util.textToLines(attempt.input),
+                  Options(
+                      name: '',
+                      path: _pathController.text,
+                      selectFiles: [],
+                      extra: parseReqOptsExtra()))
+              .toJson());
+  void _releaseConfirmation() {
+    _confirmController.reset();
+    _confirmingCapture = null;
+    _captureCompletedDuringConfirm = false;
+    controller.isConfirming.value = false;
+    _drainQueuedInputs();
+  }
+
+  void _stopManualWait() {
+    ++_manualEpoch;
+    final stop = _manualConfirmationStop;
+    if (stop != null && _manualConfirmationEpoch == _confirmationEpoch) {
+      ++_confirmationEpoch;
+      _manualConfirmationStop = null;
+      _manualConfirmationEpoch = null;
+      // Release only this UI wait. The real journal write keeps its Box fence,
+      // and the attempt keeps its consumed first-send permission.
+      _releaseConfirmation();
+      stop.complete();
+    }
+    _manualBusy = false;
+    _manualNotice.value =
+        _manualBatch == null ? '已停止本次提交，未发送创建请求。' : '已停止等待。本批次引用已保留，请在原连接查询结果。';
+    if (mounted) setState(() {});
+  }
+
+  Widget _manualBatchStatus() {
+    final notice = _manualBatch?.api.snapshot.isCurrent == false
+        ? '连接已变化，原批次引用已保留。'
+        : _manualNotice.value;
+    if (_manualBatch == null && notice == null) return const SizedBox.shrink();
+    return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Row(children: [
+          Expanded(
+              child: Text(notice ?? '正在确认批次…',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12))),
+          if (_manualBatch != null)
+            TextButton(
+                key: const ValueKey('manual-batch-query'),
+                onPressed: _manualBusy || controller.isConfirming.value
+                    ? null
+                    : _queryManualBatch,
+                child: const Text('查询原批次')),
+          if (_manualBusy)
+            TextButton(
+                key: const ValueKey('manual-batch-stop'),
+                onPressed: _stopManualWait,
+                child: const Text('停止等待'))
+        ]));
+  }
+
+  Future<void> _acceptManualReply(_ManualBatchAttempt attempt, int epoch,
+      ScopedTaskBatchReply reply) async {
+    if (!_manualReferenceCurrent(attempt, epoch)) {
+      return;
+    }
+    final receipt = reply.receipt;
+    if (reply.envelope.message == 'dataset_mismatch') {
+      _manualNotice.value = '数据域已变化，原批次引用已隔离保留。';
+      TaskBatchGroups.referencesChanged();
+      return;
+    }
+    if (reply.envelope.statusCode == 409) {
+      _manualNotice.value = '这次内容与原批次冲突；请查询原批次，不会再次创建。';
+      TaskBatchGroups.referencesChanged();
+      return;
+    }
+    _manualNotice.value = receipt == null || receipt.state == 'unknown'
+        ? '批次结果尚未确认，请查询原批次。'
+        : '已创建 ${receipt.createdCount} 项，失败 ${receipt.failedCount} 项，待创建 ${receipt.pendingCount} 项。';
+    TaskBatchGroups.referencesChanged();
+    final count = attempt.batch.reqs!.length;
+    if (!reply.requiresQuery &&
+        receipt?.createdCount == count &&
+        receipt?.failedCount == 0) {
+      if (!_manualDraftCurrent(attempt, epoch)) {
+        _manualNotice.value = '原批次已确认，当前修改后的草稿已保留。';
+        return;
+      }
+      _createdIds.addAll(reply.createdTaskIds);
+      _manualBatch = null;
+      _manualBusy = false;
+      _manualNotice.value = null;
+      await _completeCreate();
+    } else if (reply.createdTaskIds.isNotEmpty) {
+      await MacPanel.showTaskResult(reply.createdTaskIds, '批次尚未全部确认，请查询原批次。');
+      if (Get.isRegistered<MacTaskListController>()) {
+        unawaited(Get.find<MacTaskListController>().getTasksState());
+      }
+    }
+  }
+
+  Future<void> _queryManualBatch() async {
+    final attempt = _manualBatch;
+    if (attempt == null || _manualBusy) {
+      return;
+    }
+    final epoch = ++_manualEpoch;
+    setState(() => _manualBusy = true);
+    try {
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      final sameDataset = await attempt.api.stillSameDataset();
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      if (!sameDataset) {
+        _manualNotice.value = '数据域已变化，原批次引用继续保留。';
+        return;
+      }
+      final reply = await attempt.api.query(attempt.operation);
+      await _acceptManualReply(attempt, epoch, reply);
+    } catch (_) {
+      if (_manualReferenceCurrent(attempt, epoch)) {
+        _manualNotice.value = '暂时无法查询原批次，请保留引用并稍后查询。';
+      }
+    } finally {
+      if (mounted && epoch == _manualEpoch) setState(() => _manualBusy = false);
+    }
+  }
+
+  Future<void> _submitManualBatch(List<String> urls, Options opts) async {
+    if (_manualBatch != null) {
+      await _queryManualBatch();
+      return;
+    }
+    final snapshot = activeApiSnapshot;
+    if (snapshot?.taskBatchRoute?.supported != true) {
+      _manualNotice.value = '当前连接尚不能确认批次归属，未提交任务。';
+      return;
+    }
+    final input = _urlController.text.trim();
+    final epoch = ++_manualEpoch;
+    final raw = jsonEncode(_manualPayload(urls, opts).toJson());
+    final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
+    setState(() => _manualBusy = true);
+    _manualNotice.value = '正在检查批次能力…';
+    try {
+      final identity = await ScopedTaskBatchApi.readIdentity(snapshot!);
+      if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) {
+        return;
+      }
+      final bound = ScopedTaskBatchApi(snapshot: snapshot, identity: identity);
+      final id =
+          'manual-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
+      final operation = TaskBatchOperationRef(
+          namespace: TaskBatchOperationRef.namespaceV1, operationId: id);
+      final attempt = _ManualBatchAttempt(
+          bound,
+          TaskBatchJournalScope(
+              route: snapshot.taskBatchRoute!, dataset: identity),
+          operation,
+          frozen,
+          input,
+          raw);
+      // Preflight is a pure capability/domain query, never a recovered submit permit.
+      final preflight = await bound.query(operation);
+      if (!mounted ||
+          epoch != _manualEpoch ||
+          !snapshot.isCurrent ||
+          input != _urlController.text.trim()) {
+        return;
+      }
+      if (!preflight.hasMatchingSnapshot ||
+          preflight.envelope.statusCode != 200 ||
+          preflight.envelope.code != 0) {
+        _manualNotice.value = '当前下载服务不支持受保护的批次提交，未创建任务。';
+        return;
+      }
+      _manualBatch = attempt;
+      if (!_manualDraftCurrent(attempt, epoch)) {
+        return;
+      }
+      _manualNotice.value = '正在记录批次引用…';
+      final journal = widget.batchJournal ??
+          TaskBatchJournalStore(box: Database.instance.box, capacity: 10000);
+      final recorded = await journal.recordForQuery(attempt.scope, operation,
+          acknowledgementTimeout: widget.batchAcknowledgementTimeout);
+      TaskBatchGroups.referencesChanged();
+      if (!_manualDraftCurrent(attempt, epoch)) {
+        return;
+      }
+      if (!recorded.confirmed || preflight.receipt?.state != 'unknown') {
+        _manualNotice.value = '批次引用需要查询确认，未再次发送创建请求。';
+        return;
+      }
+      final sameDataset = await bound.stillSameDataset();
+      if (!_manualReferenceCurrent(attempt, epoch)) return;
+      if (!sameDataset || !_manualDraftCurrent(attempt, epoch)) {
+        _manualNotice.value = '连接或数据域已变化，未发送创建请求，原引用已保留。';
+        return;
+      }
+      // Synchronous, one-shot consumption before the only POST. Never restored
+      // by finally, query, cancellation, duplicate record or a reopened journal.
+      if (attempt.sent) {
+        return;
+      }
+      attempt.sent = true;
+      _manualNotice.value = '正在提交批次…';
+      final reply = await bound.create(operation, frozen);
+      await _acceptManualReply(attempt, epoch, reply);
+    } catch (_) {
+      if (mounted && epoch == _manualEpoch) {
+        _manualNotice.value = _manualBatch == null
+            ? '无法确认批次能力或数据域，未发送创建请求。'
+            : '批次结果尚未确认，请只查询原批次。';
+      }
+    } finally {
+      if (mounted && epoch == _manualEpoch) setState(() => _manualBusy = false);
+    }
+  }
+
   final _createdIds = <String>[];
   Future<String> _createTask(CreateTask task) async {
     _checkCaptureCompletion();
@@ -136,6 +417,7 @@ class _CreateViewState extends State<CreateView> {
   @override
   void initState() {
     super.initState();
+    _urlController.addListener(_manualInputChanged);
     if (Util.isMacos()) {
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
@@ -219,6 +501,8 @@ class _CreateViewState extends State<CreateView> {
 
   @override
   void dispose() {
+    ++_manualEpoch;
+    _urlController.removeListener(_manualInputChanged);
     if (Util.isMacos()) MacPanel.cancelAutoHide();
     _pendingWorker?.dispose();
     _captureWorker?.dispose();
@@ -317,6 +601,10 @@ class _CreateViewState extends State<CreateView> {
   }
 
   Future<void> _cancelCreate() async {
+    if (_manualBusy) {
+      _stopManualWait();
+      return;
+    }
     if (Util.isMacos()) {
       if (controller.isConfirming.value) return;
       if (controller.showAdvanced.value) {
@@ -756,6 +1044,8 @@ class _CreateViewState extends State<CreateView> {
                 autovalidateMode: AutovalidateMode.onUserInteraction,
                 child: Column(
                   children: [
+                    if (MacPanel.presentation.value != 'panel')
+                      Obx(_manualBatchStatus),
                     _macLabeledField(
                         'downloadLink'.tr,
                         Row(children: [
@@ -1567,6 +1857,8 @@ class _CreateViewState extends State<CreateView> {
                         (t.status == Status.done) == showCompleted),
                   ].take(3).toList();
                   final error = _panelError.value;
+                  final manualVisible =
+                      _manualBatch != null || _manualNotice.value != null;
                   final hasInput = input.text.trim().isNotEmpty ||
                       controller.fileDataUri.isNotEmpty ||
                       _netdiskRequest.value != null ||
@@ -1595,7 +1887,8 @@ class _CreateViewState extends State<CreateView> {
                           : inputHeight +
                               76 +
                               (tasks.isEmpty ? 70 : tasks.length * 58) +
-                              (error == null ? 0 : 44));
+                              (error == null ? 0 : 44) +
+                              (manualVisible ? 72 : 0));
                     }
                   });
                   return CallbackShortcuts(
@@ -1822,6 +2115,7 @@ class _CreateViewState extends State<CreateView> {
                                               true),
                                     ]))),
                           ],
+                          _manualBatchStatus(),
                           if (error != null)
                             SizedBox(
                                 height: 44,
@@ -2212,6 +2506,7 @@ class _CreateViewState extends State<CreateView> {
     if (controller.isConfirming.value) {
       return;
     }
+    final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
         ? _panelRequest?.browserOperationId
@@ -2339,6 +2634,20 @@ class _CreateViewState extends State<CreateView> {
           selectFiles: [],
           extra: parseReqOptsExtra(),
         );
+        if (Util.isMacos() &&
+            netdiskInputs.isEmpty &&
+            isMultiLine &&
+            _panelRequest == null &&
+            _originalRequest == null &&
+            _netdiskRequest.value == null &&
+            Get.find<AppController>().pendingUpdateTask.value == null &&
+            urls.every((url) => parseProtocol(url) == Protocol.http)) {
+          final stop = Completer<void>();
+          _manualConfirmationEpoch = confirmation;
+          _manualConfirmationStop = stop;
+          await Future.any<void>([_submitManualBatch(urls, opt), stop.future]);
+          return;
+        }
         if (isDirect) {
           await Future.wait(urls.map((url) {
             return _createTask(CreateTask(
@@ -2369,11 +2678,11 @@ class _CreateViewState extends State<CreateView> {
       _panelError.value = error.toString();
       if (!Util.isMacos()) showErrorMessage(error);
     } finally {
-      _confirmController.reset();
-      _confirmingCapture = null;
-      _captureCompletedDuringConfirm = false;
-      controller.isConfirming.value = false;
-      _drainQueuedInputs();
+      if (_manualConfirmationEpoch == confirmation) {
+        _manualConfirmationEpoch = null;
+        _manualConfirmationStop = null;
+      }
+      if (confirmation == _confirmationEpoch) _releaseConfirmation();
     }
   }
 
