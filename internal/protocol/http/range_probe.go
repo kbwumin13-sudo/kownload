@@ -97,7 +97,7 @@ func probeRangeSupport(parent context.Context, client *http.Client, req *http.Re
 	// Reuse the same client for its proxy, policies, redirect filtering and
 	// cookies. Rebuilding from metadata at the final URL would reattach headers
 	// that the original redirect chain may have stripped across domains.
-	partial, err := client.Do(probe)
+	partial, err := doCredentialRequest(client, probe)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return false, rangeProbeFailed, "timeout"

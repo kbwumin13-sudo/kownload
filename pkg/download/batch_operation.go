@@ -371,7 +371,8 @@ func (d *Downloader) reserveOperation(atomicStore AtomicStorage, r BatchOperatio
 	}
 	return nil
 }
-func (d *Downloader) createOperationMember(store AtomicStorage, op, hash string, i int, input *base.CreateTaskBatchItem) error {
+func (d *Downloader) createOperationMember(store AtomicStorage, op, hash string, i int, input *base.CreateTaskBatchItem) (bool, error) {
+	created := false
 	err := store.UpdateAtomic(func(tx StorageTransaction) error {
 		var r batchOperationRecord
 		ok, e := tx.Get(bucketTaskOperations, operationKey(op), &r)
@@ -426,20 +427,22 @@ func (d *Downloader) createOperationMember(store AtomicStorage, op, hash string,
 		}
 		m.State = "created"
 		r.UpdatedAt = time.Now()
+		created = true
 		return tx.Put(bucketTaskOperations, operationKey(op), &r)
 	})
 	if errors.Is(err, ErrOperationConflict) {
-		return err
+		return false, err
 	}
 	if err != nil {
-		return ErrOperationUnavailable
+		// A committed-but-unacknowledged M is not first-execution authority.
+		return false, ErrOperationUnavailable
 	}
-	return nil
+	return created, nil
 }
 
 // attachOperationTask is Q: operationMu coordinates attach with deletion and
 // repeated POSTs. Only a newly attached task is queued, never an existing one.
-func (d *Downloader) attachOperationTask(id string) error {
+func (d *Downloader) attachOperationTask(id string, createdNow bool) error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 	var task Task
@@ -460,6 +463,9 @@ func (d *Downloader) attachOperationTask(id string) error {
 		return ErrOperationConflict
 	}
 	initTask(&task)
+	// Only this process's successful M authorizes the first unresolved HTTP
+	// request. Q readback/replay and startup do not recover that authority.
+	task.initialHTTPExecution.Store(createdNow && task.Protocol == "http" && task.Meta.Res == nil)
 	task.updateStatus(base.DownloadStatusWait)
 	d.tasks = append(d.tasks, &task)
 	d.enqueueLocked(&task)
@@ -472,7 +478,7 @@ func (d *Downloader) reconcileOperationTasks(r *batchOperationRecord) error {
 	}
 	for _, m := range r.Members {
 		if m.State == "created" {
-			if err := d.attachOperationTask(m.TaskID); err != nil {
+			if err := d.attachOperationTask(m.TaskID, false); err != nil {
 				return err
 			}
 		}
@@ -509,12 +515,13 @@ func (d *Downloader) CreateBatchOperation(ctx context.Context, r BatchOperationR
 			d.operationMu.Unlock()
 			return d.readAfterOperationError(r.OperationID, ErrOperationUnavailable)
 		}
-		err = d.createOperationMember(store, r.OperationID, hash, i, item)
+		var createdNow bool
+		createdNow, err = d.createOperationMember(store, r.OperationID, hash, i, item)
 		// A failed commit can have an uncertain acknowledgement. Read authority before
 		// deciding whether to publish; never manufacture a new ID or empty success.
 		stored, readErr := d.loadOperation(r.OperationID)
 		if readErr == nil && stored != nil && stored.RequestHash == hash && i < len(stored.Members) && stored.Members[i].State == "created" {
-			readErr = d.attachOperationTask(stored.Members[i].TaskID)
+			readErr = d.attachOperationTask(stored.Members[i].TaskID, createdNow)
 		}
 		d.operationMu.Unlock()
 		if err != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path"
@@ -22,6 +21,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
+	"github.com/GopeedLab/gopeed/pkg/util"
 	"github.com/xiaoqidun/setft"
 )
 
@@ -252,21 +252,24 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
-	resourceKey     string
-	publicMu        sync.Mutex
-	publicSource    atomic.Pointer[mailru.Source]
-	publicRefreshes int
-	identityMu      sync.RWMutex
-	identity        representation
-	resumeHash      string
-	restored        bool
-	linkPatched     bool
-	requestPolicy   func(*http.Request)
-	responsePolicy  func(*http.Request, *http.Response) error
-	ctl             *controller.Controller
-	config          *config
-	cookieJar       http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
-	doneCh          chan error
+	resourceKey          string
+	publicMu             sync.Mutex
+	publicSource         atomic.Pointer[mailru.Source]
+	publicRefreshes      int
+	identityMu           sync.RWMutex
+	identity             representation
+	resumeHash           string
+	restored             bool
+	sourceRequestIssued  atomic.Bool
+	initialRequestPermit atomic.Bool
+	linkPatched          bool
+	requestPolicy        func(*http.Request)
+	targetCredentials    *transfer.TargetCredentials
+	responsePolicy       func(*http.Request, *http.Response) error
+	ctl                  *controller.Controller
+	config               *config
+	cookieJar            http.CookieJar // Shared only within this fetcher; domain-scoped by net/http.
+	doneCh               chan error
 
 	meta *fetcher.FetcherMeta
 
@@ -311,10 +314,12 @@ type Fetcher struct {
 	// Target file. Streams write disjoint ranges with WriteAt (pwrite), which
 	// is safe concurrently, so they share fileMu; replacing or closing the
 	// file takes it exclusively.
-	file         *os.File
-	fileMu       sync.RWMutex
-	redirectURL  string
-	redirectLock sync.Mutex
+	file             *os.File
+	fileMu           sync.RWMutex
+	redirectURL      string
+	redirectMethod   string // In-memory final-method override; original request remains the fallback.
+	redirectDropBody bool
+	redirectLock     sync.Mutex
 
 	// Lifecycle control
 	ctx    context.Context
@@ -332,7 +337,8 @@ type Fetcher struct {
 	// Source budget membership for the current run, nil without a budget.
 	member atomic.Pointer[transfer.Member]
 	// Set when a long server rate limit ends the run; reported through doneCh.
-	deferred atomic.Pointer[transfer.DeferredError]
+	deferred      atomic.Pointer[transfer.DeferredError]
+	policyFailure atomic.Pointer[credentialFailure]
 	// Consecutive deferrals without a successful response.
 	deferrals atomic.Int32
 	// Stream limit of the current run, readable while Resolve rewrites options.
@@ -365,7 +371,7 @@ func (f *Fetcher) requestContext(ctx context.Context) context.Context {
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
 	f.ctl = ctl
-	f.cookieJar, _ = cookiejar.New(nil)
+	f.cookieJar = newOriginCookieJar()
 	f.doneCh = make(chan error, 1)
 	if f.meta == nil {
 		f.meta = &fetcher.FetcherMeta{}
@@ -400,11 +406,31 @@ func (f *Fetcher) updateMaxConnTime(d time.Duration) {
 	}
 }
 
+// AuthorizeInitialRequest is a Go-only, one-shot handshake from a newly
+// committed Core operation. It is never restored or accepted from request JSON.
+func (f *Fetcher) AuthorizeInitialRequest() {
+	f.initialRequestPermit.Store(true)
+}
+
 func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 	return f.ResolveContext(context.Background(), req, opts)
 }
 
 func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *base.Options) error {
+	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
+		return err
+	}
+	// Restore is historical unless Core supplied a fresh first-execution
+	// instance. Reject before a source POST/body can leave this process.
+	permit := f.initialRequestPermit.Swap(false)
+	safe := originalRequestReplaySafe(req)
+	if !safe && f.restored && !permit {
+		return transfer.ErrScopedContext
+	}
+	first := f.sourceRequestIssued.CompareAndSwap(false, true)
+	if !safe && !first {
+		return transfer.ErrScopedContext
+	}
 	parent := ctx
 	ctx, cancel := context.WithCancel(context.Background())
 	headersReady := make(chan struct{})
@@ -431,9 +457,6 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 			cancel()
 		}
 	}()
-	if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
-		return err
-	}
 	f.meta.Req = req
 	f.meta.Opts = opts
 	if f.meta.Opts == nil {
@@ -502,7 +525,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	// Send normal HTTP request (no Range header)
 	// Track connection time for adaptive timeout in download phase
 	connStartTime := time.Now()
-	resp, err := client.Do(httpReq)
+	resp, err := doCredentialRequest(client, httpReq)
 	if err == nil {
 		resp, err = f.refreshResponse(ctx, client, httpReq, resp)
 	}
@@ -606,7 +629,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	f.rememberRepresentation(resp, res.Size)
 
 	// Save redirect URL for later connections
-	f.redirectURL = resp.Request.URL.String()
+	f.updateRedirectResponse(resp.Request)
 
 	// IMPORTANT: Keep the response body open for downloading in Start phase
 	// This is crucial for one-time URLs that can only be accessed once
@@ -928,6 +951,11 @@ func (f *Fetcher) doStart() error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](f.meta.Req); err != nil {
 		return err
 	}
+	// The legacy checkpoint records only a redirect URL, not the final method
+	// or proof permitting another source POST/body. Stop before resume probes.
+	if f.restored && !originalRequestReplaySafe(f.meta.Req) && !f.sourceRequestIssued.Load() {
+		return transfer.ErrScopedContext
+	}
 	// The resume checks below are this run's first requests: a public link
 	// that expired while paused may use this run's refreshes.
 	f.publicMu.Lock()
@@ -1028,6 +1056,7 @@ func (f *Fetcher) doStart() error {
 	f.downloadLoopDone = make(chan struct{})
 	f.streamExit = make(chan struct{}, 1)
 	f.deferred.Store(nil)
+	f.policyFailure.Store(nil)
 	f.diag.startRun(time.Now())
 	f.joinBudget()
 
@@ -1043,7 +1072,8 @@ func (f *Fetcher) doStart() error {
 func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 	defer func() {
 		f.leaveBudget()
-		if deferred := f.deferred.Load(); deferred != nil {
+		deferred := f.deferred.Load()
+		if deferred != nil || f.policyFailure.Load() != nil {
 			// Report a deferral only after every stream stopped, so the saved
 			// ranges and progress are final when the scheduler requeues it.
 			f.wg.Wait()
@@ -1060,6 +1090,10 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 				}
 			}
 			f.connMu.Unlock()
+			if failure := f.policyFailure.Load(); failure != nil {
+				result = failure.err
+				f.deferred.Store(nil)
+			}
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1472,6 +1506,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 		f.diag.failure(err)
 
+		if policy := credentialPolicyError(err); policy != nil {
+			f.stopForCredentialFailure(conn, policy)
+			return
+		}
 		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return
@@ -1597,7 +1635,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	// Record connection start time for adaptive timeout tracking
 	connStartTime := time.Now()
 
-	resp, err := client.Do(httpReq)
+	resp, err := doCredentialRequest(client, httpReq)
 	if err == nil {
 		resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
 	}
@@ -1618,12 +1656,15 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 				resp = fallbackResp
 				// Update the redirect URL from the response
 				if resp.Request != nil && resp.Request.URL != nil {
-					f.updateRedirectURL(resp.Request.URL.String())
+					f.updateRedirectResponse(resp.Request)
 				}
 			} else {
 				// Fallback also failed, return the original error
 				if fallbackResp != nil {
 					fallbackResp.Body.Close()
+				}
+				if policyErr := credentialPolicyError(fallbackErr); policyErr != nil {
+					return policyErr
 				}
 				return originalErr
 			}
@@ -1892,7 +1933,7 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			// Record connection start time for adaptive timeout tracking
 			connStartTime := time.Now()
 
-			resp, err := client.Do(httpReq)
+			resp, err := doCredentialRequest(client, httpReq)
 			if err == nil {
 				resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
 			}
@@ -1980,6 +2021,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			conn.lastErr = err
 		}
 		f.diag.failure(err)
+		if policy := credentialPolicyError(err); policy != nil {
+			f.stopForCredentialFailure(conn, policy)
+			return
+		}
 		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return
@@ -2386,95 +2431,213 @@ func (f *Fetcher) checkCompletion() bool {
 // Patch modifies the HTTP request information.
 
 func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
-	if req != nil && (req.URL != "" || req.Extra != nil) {
-		state := f.getState()
-		if state == stateResolving || state == stateSlowStart || state == stateSteady {
-			return errors.New("pause HTTP task before changing the request")
-		}
-		if f.downloadLoopDone != nil {
-			<-f.downloadLoopDone
-		}
-		f.stopPrefetch()
-		// The stopped Start verifies saved bytes using the patched URL and
-		// credentials. Probing here would still use the expired request.
-		if req.URL != "" && f.usesRanges() && f.hasResumeData() && f.hasResumeValidator() {
-			candidate := *f.meta.Req
-			candidate.URL = req.URL
-			r := f.representationSnapshot()
-			key := r.ResourceKey
-			if key == "" {
-				key = requestResourceKey(f.meta.Req)
-			}
-			if requestResourceKey(&candidate) != key {
-				return fmt.Errorf("%w: new URL is outside the saved resource", ErrUnsafeResume)
-			}
-		}
-		if req.URL != "" {
-			// A checkpoint saved without a query key keeps the one of the link
-			// its bytes came from, so that a changed query is noticed.
-			f.identityMu.Lock()
-			if f.identity.QueryKey == "" {
-				f.identity.QueryKey = requestQueryKey(f.meta.Req)
-			}
-			f.identityMu.Unlock()
-		}
-		f.linkPatched = true
-		f.resolveRespLock.Lock()
-		if f.resolveResp != nil {
-			f.resolveResp.Body.Close()
-			f.resolveResp = nil
-		}
-		f.resolveRespLock.Unlock()
+	return f.PatchWithContext(req, opts, transfer.HeadersRetain, nil)
+}
+
+// PatchWithContext consumes a trusted local update command. Only the resulting
+// request is stored; neither an authority boolean nor a budget schema is added.
+func (f *Fetcher) PatchWithContext(req *base.Request, opts *base.Options, mode transfer.HeaderUpdateMode, fresh *transfer.TargetCredentials) error {
+	if req == nil {
+		return nil
 	}
-	// Patch request info
-	if req != nil {
-		if req.URL != "" {
-			f.meta.Req.URL = req.URL
-			// Clear redirect URL when URL is changed, so new requests use the new URL
-			f.updateRedirectURL("")
-		}
-		if req.Extra != nil {
-			if err := base.ParseReqExtra[fhttp.ReqExtra](req); err != nil {
-				return err
-			}
-			patchExtra := req.Extra.(*fhttp.ReqExtra)
-			// Merge Extra fields instead of replacing entirely
-			if f.meta.Req.Extra == nil {
-				f.meta.Req.Extra = &fhttp.ReqExtra{}
-			}
-			existingExtra := f.meta.Req.Extra.(*fhttp.ReqExtra)
-			// Update Method only if non-empty
-			if patchExtra.Method != "" {
-				existingExtra.Method = patchExtra.Method
-			}
-			// Update Body only if non-empty
-			if patchExtra.Body != "" {
-				existingExtra.Body = patchExtra.Body
-			}
-			// Merge Headers: existing keys are overwritten, new keys are added
-			if patchExtra.Header != nil {
-				if existingExtra.Header == nil {
-					existingExtra.Header = make(map[string]string)
-				}
-				for k, v := range patchExtra.Header {
-					existingExtra.Header[k] = v
-				}
-			}
-		}
-		// Merge Labels: existing keys are overwritten, new keys are added
-		if req.Labels != nil {
-			if f.meta.Req.Labels == nil {
-				f.meta.Req.Labels = make(map[string]string)
-			}
-			for k, v := range req.Labels {
-				f.meta.Req.Labels[k] = v
-			}
-		}
-		if req.Proxy != nil {
-			f.meta.Req.Proxy = req.Proxy
-		}
+	if f.meta == nil || f.meta.Req == nil {
+		return transfer.ErrCredentialContext
+	}
+	if mode == "" {
+		mode = transfer.HeadersRetain
+	}
+	if mode != transfer.HeadersRetain && mode != transfer.HeadersReplace && mode != transfer.HeadersClear {
+		return transfer.ErrCredentialContext
+	}
+	if mode == transfer.HeadersClear && fresh != nil {
+		return transfer.ErrCredentialContext
+	}
+	state := f.getState()
+	if state == stateResolving || state == stateSlowStart || state == stateSteady {
+		return errors.New("pause HTTP task before changing the request")
 	}
 
+	candidate := util.DeepClone(f.meta.Req)
+	original, err := normalizedExtra(candidate)
+	if err != nil {
+		return err
+	}
+	oldHeaders, err := transfer.CredentialHeaders(original.Header)
+	if err != nil {
+		return err
+	}
+	oldOrigin, err := transfer.CredentialOrigin(candidate.URL)
+	if err != nil {
+		return err
+	}
+	patch := util.DeepClone(req)
+	var patchExtra *fhttp.ReqExtra
+	patchHeaders := http.Header{}
+	if patch.Extra != nil {
+		patchExtra, err = normalizedExtra(patch)
+		if err != nil {
+			return err
+		}
+		patchHeaders, err = transfer.CredentialHeaders(patchExtra.Header)
+		if err != nil {
+			return err
+		}
+	}
+	if patch.URL != "" {
+		candidate.URL = patch.URL
+	}
+	newOrigin, err := transfer.CredentialOrigin(candidate.URL)
+	if err != nil {
+		return err
+	}
+	foreign := oldOrigin != newOrigin
+	_, cookieUpdated := patchHeaders["Cookie"]
+	parsed, err := url.Parse(candidate.URL)
+	if err != nil {
+		return transfer.ErrCredentialContext
+	}
+	// A same-origin URL refresh need not repeat Basic userinfo. The explicit
+	// replace/clear commands still remove it, and foreign URLs never inherit it.
+	if !foreign && parsed.User == nil && mode == transfer.HeadersRetain && fresh == nil {
+		previous, _ := url.Parse(f.meta.Req.URL)
+		parsed.User = previous.User
+	}
+	if fresh != nil && !fresh.Matches(candidate.URL) {
+		return transfer.ErrScopedContext
+	}
+	if foreign && fresh == nil && (parsed.User != nil || transfer.HasUnscopedCredentials(patchHeaders)) {
+		return transfer.ErrScopedContext
+	}
+	carriesBody := func(extra *fhttp.ReqExtra) bool {
+		return extra != nil && (extra.Body != "" || extra.Method != "" && !strings.EqualFold(extra.Method, "GET") && !strings.EqualFold(extra.Method, "HEAD"))
+	}
+	if foreign && (carriesBody(original) || carriesBody(patchExtra)) {
+		if fresh == nil || mode != transfer.HeadersReplace || patchExtra == nil {
+			return transfer.ErrScopedContext
+		}
+	}
+	if foreign || mode == transfer.HeadersClear || fresh != nil {
+		oldHeaders = transfer.InheritedHeaders(oldHeaders)
+	}
+	if mode == transfer.HeadersReplace {
+		oldHeaders = http.Header{}
+		parsed.User = nil
+		if req.URL != "" && !foreign {
+			explicit, _ := url.Parse(req.URL)
+			parsed.User = explicit.User
+		}
+	}
+	if mode == transfer.HeadersClear {
+		parsed.User = nil
+	}
+	if foreign {
+		parsed.User = nil
+	}
+	incoming := patchHeaders
+	if foreign {
+		incoming = transfer.InheritedHeaders(incoming)
+	}
+	if mode != transfer.HeadersClear {
+		for key, values := range incoming {
+			oldHeaders[key] = values
+		}
+	}
+	if patchExtra != nil {
+		if mode == transfer.HeadersReplace {
+			original.Method, original.Body = patchExtra.Method, patchExtra.Body
+		} else {
+			if patchExtra.Method != "" {
+				original.Method = patchExtra.Method
+			}
+			if patchExtra.Body != "" {
+				original.Body = patchExtra.Body
+			}
+		}
+	}
+	nextCredentials := fresh
+	if fresh != nil {
+		supplied, user, e := fresh.RequestHeaders(candidate.URL)
+		if e != nil {
+			return e
+		}
+		if req.URL != "" {
+			suppliedURL, _ := url.Parse(req.URL)
+			if suppliedURL.User != nil && user == nil {
+				return transfer.ErrScopedContext
+			}
+		}
+		for key, values := range supplied {
+			oldHeaders[key] = values
+		}
+		parsed.User = user
+	} else if !foreign && mode == transfer.HeadersRetain && f.targetCredentials != nil {
+		if cookieUpdated {
+			// Explicit Cookie replaces the older provider-cookie snapshot too.
+			nextCredentials, err = transfer.NewTargetCredentials(parsed.String(), transfer.HeaderMap(oldHeaders), nil)
+		} else {
+			nextCredentials, err = f.targetCredentials.WithHeaders(candidate.URL, transfer.HeaderMap(oldHeaders))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	candidate.URL = parsed.String()
+	transfer.DropProxyHeaders(oldHeaders)
+	original.Header = transfer.HeaderMap(oldHeaders)
+	if patch.Proxy != nil {
+		proxy := *patch.Proxy
+		candidate.Proxy = &proxy
+	}
+	if patch.Labels != nil {
+		if candidate.Labels == nil {
+			candidate.Labels = map[string]string{}
+		}
+		for k, v := range patch.Labels {
+			candidate.Labels[k] = v
+		}
+	}
+	// Prove identity before touching any live request/cache. Authentication alone
+	// does not authorize splicing bytes from a different resource.
+	if patch.URL != "" && f.usesRanges() && f.hasResumeData() && f.hasResumeValidator() {
+		r := f.representationSnapshot()
+		key := r.ResourceKey
+		if key == "" {
+			key = requestResourceKey(f.meta.Req)
+		}
+		if requestResourceKey(candidate) != key {
+			return fmt.Errorf("%w: new URL is outside the saved resource", ErrUnsafeResume)
+		}
+	}
+	if f.downloadLoopDone != nil {
+		<-f.downloadLoopDone
+	}
+	f.stopPrefetch()
+	if patch.URL != "" {
+		f.identityMu.Lock()
+		if f.identity.QueryKey == "" {
+			f.identity.QueryKey = requestQueryKey(f.meta.Req)
+		}
+		f.identityMu.Unlock()
+	}
+	f.resolveRespLock.Lock()
+	if f.resolveResp != nil {
+		f.resolveResp.Body.Close()
+		f.resolveResp = nil
+	}
+	f.resolveRespLock.Unlock()
+	f.meta.Req = candidate
+	f.linkPatched = true
+	f.updateRedirectURL("")
+	f.targetCredentials = nextCredentials
+	if foreign || mode != transfer.HeadersRetain || fresh != nil {
+		f.cookieJar = newOriginCookieJar()
+	} else if cookieUpdated {
+		if jar, ok := f.cookieJar.(*originCookieJar); ok {
+			jar.clearOrigin(candidate.URL)
+		} else {
+			f.cookieJar = newOriginCookieJar()
+		}
+	}
 	return nil
 }
 

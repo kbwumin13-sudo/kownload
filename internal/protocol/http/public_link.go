@@ -133,5 +133,5 @@ func (f *Fetcher) refreshResponse(ctx context.Context, client *http.Client, req 
 			replacement.Header.Set(name, value)
 		}
 	}
-	return client.Do(replacement)
+	return doCredentialRequest(client, replacement)
 }

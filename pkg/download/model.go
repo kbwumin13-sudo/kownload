@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/controller"
@@ -57,6 +58,9 @@ type Task struct {
 	// Set on startup from the durable reverse index, even if an old reader
 	// discarded CreationOperation while saving the task.
 	creationBlocked bool
+	// Q receives this one-shot authority only from an acknowledged M in this
+	// process. It is intentionally absent from persisted/public Task JSON.
+	initialHTTPExecution atomic.Bool
 }
 
 func NewTask() *Task {

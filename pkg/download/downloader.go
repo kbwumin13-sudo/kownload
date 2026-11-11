@@ -1370,33 +1370,14 @@ func (d *Downloader) watch(task *Task) {
 		return
 	}
 
-	task.lock.Lock()
-	task.statusLock.Lock()
-	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
-		task.statusLock.Unlock()
-		task.lock.Unlock()
+	committed, completionErr := d.commitTaskCompletion(task, f)
+	if completionErr != nil {
+		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr))
 		return
 	}
-	task.dataLock.Lock()
-	if task.Protocol == "media" || task.Protocol == "netdisk" {
-		task.Meta = util.DeepClone(f.Meta())
+	if !committed {
+		return
 	}
-	task.Progress.Used = task.timer.Used()
-	if task.Meta.Res.Size == 0 {
-		task.Meta.Res.Size = f.Progress().TotalDownloaded()
-	}
-	used := task.Progress.Used / int64(time.Second)
-	if used == 0 {
-		used = 1
-	}
-	totalSize := task.Meta.Res.Size
-	task.Progress.Speed = totalSize / used
-	task.Progress.Downloaded = totalSize
-	task.dataLock.Unlock()
-	task.updateStatus(base.DownloadStatusDone)
-	d.storage.Put(bucketTask, task.ID, task.clone())
-	task.statusLock.Unlock()
-	task.lock.Unlock()
 	d.emit(EventKeyDone, task)
 	d.emit(EventKeyFinally, task, err)
 	d.notifyRunning()
@@ -1460,6 +1441,98 @@ func (d *Downloader) watch(task *Task) {
 			d.enqueueExtraction(task, downloadFilePath, e)
 		}
 	}
+}
+
+// commitTaskCompletion shares deletion's persistence guard. The task operation
+// lock precedes the guard, like pause/start saves; no protocol or user callbacks
+// run under this guard. Public done is published only after acknowledged storage.
+func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher) (bool, error) {
+	task.lock.Lock()
+	defer task.lock.Unlock()
+	// An old Wait may finish after Pause requeued the task. Discard that
+	// completion before attempting a membership lookup or final snapshot.
+	task.statusLock.Lock()
+	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
+		task.statusLock.Unlock()
+		return false, nil
+	}
+	generation := task.runGeneration
+	task.statusLock.Unlock()
+
+	// Protocol snapshots do not hold the main/state/persistence locks.
+	var finalMeta *fetcher.FetcherMeta
+	if task.Protocol == "media" || task.Protocol == "netdisk" {
+		finalMeta = util.DeepClone(f.Meta())
+	}
+	task.dataLock.RLock()
+	needSize := task.Meta.Res != nil && task.Meta.Res.Size == 0
+	task.dataLock.RUnlock()
+	if finalMeta != nil && finalMeta.Res != nil {
+		needSize = finalMeta.Res.Size == 0
+	}
+	var downloaded int64
+	if needSize {
+		downloaded = f.Progress().TotalDownloaded()
+	}
+
+	persistenceLock := d.errorPersistenceLock(task)
+	persistenceLock.Lock()
+	defer persistenceLock.Unlock()
+	var candidate *Task
+	err := func() error {
+		// notifyRunning takes main->status; never take the opposite order.
+		d.lock.Lock()
+		task.statusLock.Lock()
+		present := !d.closed.Load() && d.getTaskLocked(task.ID) == task
+		d.lock.Unlock()
+		defer task.statusLock.Unlock()
+		if !present || task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation || task.Meta.Res == nil {
+			return nil
+		}
+		task.dataLock.Lock()
+		if finalMeta != nil {
+			task.Meta = finalMeta
+		}
+		task.Progress.Used = task.timer.Used()
+		if task.Meta.Res.Size == 0 {
+			task.Meta.Res.Size = downloaded
+		}
+		used := task.Progress.Used / int64(time.Second)
+		if used == 0 {
+			used = 1
+		}
+		totalSize := task.Meta.Res.Size
+		task.Progress.Speed = totalSize / used
+		task.Progress.Downloaded = totalSize
+		task.dataLock.Unlock()
+
+		candidate = task.clone()
+		candidate.updateStatus(base.DownloadStatusDone)
+		// An error can mean an unknown ACK. It never authorizes success effects.
+		return d.storage.Put(bucketTask, task.ID, candidate)
+	}()
+	if err != nil {
+		return false, err
+	}
+	if candidate == nil {
+		return false, nil
+	}
+
+	// Release status before reacquiring main. Delete may have removed membership
+	// while the Put was in flight; Pause/requeue may also have advanced the run.
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	task.statusLock.Lock()
+	defer task.statusLock.Unlock()
+	if d.closed.Load() || d.getTaskLocked(task.ID) != task || task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation {
+		return false, nil
+	}
+	task.dataLock.Lock()
+	task.Status = candidate.Status
+	task.UpdatedAt = candidate.UpdatedAt
+	task.notBefore = time.Time{}
+	task.dataLock.Unlock()
+	return true, nil
 }
 
 func (d *Downloader) errorPersistenceLock(task *Task) *sync.Mutex {
@@ -1582,10 +1655,12 @@ func (d *Downloader) restoreTask(task *Task) error {
 
 func (d *Downloader) restoreFetcher(task *Task) error {
 	v, f := task.fetcherManager.Restore()
+	var checkpointPresent bool
 	if v != nil {
 		// Keep the durable checkpoint until the next successful save replaces
 		// it. A crash in OnStart/Start must not erase the last resumable state.
-		_, err := d.storage.Get(bucketSave, task.ID, v)
+		var err error
+		checkpointPresent, err = d.storage.Get(bucketSave, task.ID, v)
 		if err != nil {
 			return err
 		}
@@ -1594,9 +1669,17 @@ func (d *Downloader) restoreFetcher(task *Task) error {
 	if err != nil {
 		return err
 	}
+	initial := task.initialHTTPExecution.Swap(false)
 	task.fetcher = f(meta, v)
 	if task.fetcher == nil {
 		task.fetcher = task.fetcherManager.Build()
+	}
+	if initial && !checkpointPresent && task.Protocol == "http" && meta.Res == nil {
+		// Keep the manager's Restore/precision semantics; only HTTP's narrow
+		// runtime handshake distinguishes a fresh M->Q from historical state.
+		if first, ok := task.fetcher.(interface{ AuthorizeInitialRequest() }); ok {
+			first.AuthorizeInitialRequest()
+		}
 	}
 	d.setupFetcher(task.fetcherManager, task.fetcher)
 	if task.fetcher.Meta().Req == nil {
