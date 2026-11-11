@@ -110,9 +110,12 @@ unavailable，不从原始error字符串猜测，不回显URL/headers/路径/设
 
 ## 三方持久状态与提交
 
-Task.completion={version:1}；task_completion_v1按TaskID保存record；
+Task.completion={version:1,completionId:string}；ID必须非空且等于原R冻结的completionId及
+该Task对应record.CompletionID，不能仅凭bucket key或version认领错放record。
+task_completion_v1按TaskID保存record；
 task_completion_required_v1={version:1,capability:"http-sha256-completion/v1"}。Task/record/
-required同一M事务确认后才有后续准备资格；见任一则三方缺坏/未知held，显式Continue亦然。
+required同一M事务确认后才有后续准备资格；见任一则三方缺坏/未知、completionId空或错配
+均held，显式Continue亦然。此为未激活v1的planned精确定义，不增加v2/迁移或新ledger。
 旧39/Core忽略新状态不安全，禁止裸活动库回退；配对快照也不证明输出/自动续跑安全。
 
 record v1 JSON为version/completionId/phase/directoryIdentity{device,inode}/
@@ -127,6 +130,8 @@ verified保存确认后才同卷anchored no-replace发布，保stage锚点；C�
 同inode已final可续阶段，外来同hash不能认领。hash/Wait/join锁外，短发布/保存由同Task票据
 Fence准入；HTTP结束应释放网络槽，但保同run token直到C/失败，不能新造generation。
 
-分工：15唯一Core/Task/typedR/HTTP/Fence与权威投影，12唯一transfer模块，14新REST薄文件/
-server注册及既有GetTask/GetTasks仅响应装饰，16纯transient DTO/原轮询UI。三方借接点各自
+分工：15拥有model字段slot/全部现有共享文件、Task/typedR/HTTP/Fence与API线性化；12拥有
+transfer模块及新completion_state.go三方存储内核/测试；11拥有新published_read.go纯值locked
+publish/clear/access及测试。12/11不写model/watch/HTTP/batch。14新REST薄文件/server注册及
+既有GetTask/GetTasks仅响应装饰，16纯transient DTO/原轮询UI。三方借接点各自
 明确后实施；本文件与S0行是planned契约，不是已部署能力。
