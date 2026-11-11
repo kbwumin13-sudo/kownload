@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/pkg/base"
+	"github.com/rs/zerolog"
 )
 
 func TestVerifiedHTTPSuccessPermissionAndReentrantDelete(t *testing.T) {
@@ -108,5 +109,52 @@ func TestVerifiedHTTPSuccessPermissionAndReentrantDelete(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestVerifiedHTTPExtensionRevocationStopsNextScript(t *testing.T) {
+	d, task, _, lease := verifiedWrittenFixture(t, bytes.Repeat([]byte("extension fresh C\n"), 100))
+	fresh, err := d.completeVerifiedHTTP(task, quiescedVerifiedWriter{}, lease.Token.Generation, lease)
+	if err != nil || !fresh {
+		t.Fatal(fresh, err)
+	}
+	permit := task.verifiedSuccess.Load()
+	root := t.TempDir()
+	first := `gopeed.events.onDone(function(){gopeed.logger.info("revoke-success");gopeed.storage.set("first", "true");});`
+	second := `gopeed.events.onDone(function(){gopeed.storage.set("second", "true");});`
+	if err = os.WriteFile(filepath.Join(root, "first.js"), []byte(first), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "second.js"), []byte(second), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ext := &Extension{Identity: "verified-gate", Name: "verified-gate", DevMode: true, DevPath: root, Scripts: []*Script{{Event: string(EventOnDone), Match: &Match{Urls: []string{task.Meta.Req.URL}}, Entry: "first.js"}, {Event: string(EventOnDone), Match: &Match{Urls: []string{task.Meta.Req.URL}}, Entry: "second.js"}}}
+	d.extensionLock.Lock()
+	d.extensions = append(d.extensions, ext)
+	d.extensionLock.Unlock()
+	removed := make(chan error, 1)
+	d.ExtensionLogger.Logger = d.ExtensionLogger.Hook(zerolog.HookFunc(func(_ *zerolog.Event, _ zerolog.Level, message string) {
+		if message == "[verified-gate] revoke-success" {
+			removed <- d.Delete(&TaskFilter{IDs: []string{task.ID}}, false)
+		}
+	}))
+	d.triggerOnDone(task, permit)
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("first actual JS callback did not revoke membership")
+	}
+	storage := &ContextStorage{storage: d.storage, identity: ext.buildIdentity()}
+	if storage.Get("first") != "true" {
+		t.Fatal("first admitted extension did not finish")
+	}
+	if storage.Get("second") != nil {
+		t.Fatal("second extension ran after prior callback deleted Task")
+	}
+	if d.getTask(task.ID) != nil || d.verifiedSuccessAllowed(permit) {
+		t.Fatal("extension deletion retained success permission")
 	}
 }

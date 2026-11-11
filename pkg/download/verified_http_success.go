@@ -96,7 +96,7 @@ func (d *Downloader) deliverVerifiedSuccess(task *Task) {
 	if !d.verifiedSuccessAllowed(p) {
 		return
 	}
-	d.triggerOnDone(task)
+	d.triggerOnDone(task, p)
 	if !d.verifiedSuccessAllowed(p) {
 		return
 	}

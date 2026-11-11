@@ -337,7 +337,12 @@ func (d *Downloader) triggerOnError(task *Task, err error) {
 	)
 }
 
-func (d *Downloader) triggerOnDone(task *Task) {
+func (d *Downloader) triggerOnDone(task *Task, permits ...*verifiedSuccessPermit) {
+	var allowed []func() bool
+	if len(permits) > 0 {
+		allowed = []func() bool{func() bool { return d.verifiedSuccessAllowed(permits[0]) }}
+	}
+
 	doTrigger(d,
 		EventOnDone,
 		task.Meta.Req,
@@ -345,10 +350,11 @@ func (d *Downloader) triggerOnDone(task *Task) {
 			Task: NewExtensionTask(d, task),
 		},
 		nil,
+		allowed...,
 	)
 }
 
-func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, ctx T, handler func(ext *Extension, gopeed *Instance, ctx T)) error {
+func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, ctx T, handler func(ext *Extension, gopeed *Instance, ctx T), allowed ...func() bool) error {
 	// init extension global object
 	gopeed := &Instance{
 		Events: make(InstanceEvents),
@@ -359,6 +365,9 @@ func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, c
 			continue
 		}
 		for _, script := range ext.Scripts {
+			if len(allowed) > 0 && !allowed[0]() {
+				return nil
+			}
 			if script.match(event, req) {
 				gopeed.Info = NewExtensionInfo(ext)
 				gopeed.Logger = newInstanceLogger(ext, d.ExtensionLogger)
@@ -399,12 +408,18 @@ func doTrigger[T any](d *Downloader, event ActivationEvent, req *base.Request, c
 						gopeed.Logger.logger.Error().Err(err).Msgf("[%s] engine inject failed", ext.buildIdentity())
 						return
 					}
+					if len(allowed) > 0 && !allowed[0]() {
+						return
+					}
 					_, err = engine.RunString(string(scriptBuf))
 					if err != nil {
 						gopeed.Logger.logger.Error().Err(err).Msgf("[%s] run script failed", ext.buildIdentity())
 						return
 					}
 					if fn, ok := gopeed.Events[event]; ok {
+						if len(allowed) > 0 && !allowed[0]() {
+							return
+						}
 						_, err = engine.CallFunction(fn, ctx)
 						if err != nil {
 							gopeed.Logger.logger.Error().Err(err).Msgf("[%s] call function failed: %s", ext.buildIdentity(), event)
