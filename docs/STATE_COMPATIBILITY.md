@@ -20,13 +20,61 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | bucket `operation_tasks_v1`，TaskID→ref | S2 同提交；与 Task/member 同一 M 事务持久写入 | 旧 core 不维护逆索引 | 启动核对；丢 ref/错配/未来版本隔离，不能把有逆索引的任务当 legacy | 索引/任务/manifest 不一致拒绝，不靠自动修复重造 | 新 reader 丢字段/未知 manifest 和索引已有隔离测试；不证明旧 core 执行安全，默认配对快照 |
 | `config` bucket 单 key `dataset_identity_v1`，`{version:1,datasetId:32位小写hex}`（S5b v1，隔离验证通过） | REST 启动在 Downloader.Setup 前单事务首次生成；GET 不生成 | 旧 core 忽略该附加 key，不能回答数据域协议；不改变原 Task 可执行范围 | 逻辑 ID 不授予任务执行或认证能力；坏/未知记录保留并拒绝新端启动 | ID 不证明数据未回退，原 Task/S0/S2 守卫仍必需 | 新库首次启用生成一次，重启保留；复制/配对快照保逻辑 ID，不证明内容新鲜。缺 ID 的旧快照再次启用会获新 ID，旧 journal 不得换域重造请求；真实 Bolt/Mem、重开/复制/换库、坏值/写失败、REST 初始化与只读零写定向/race 已验，生产尚未启用 |
 | Hive 单 key `task_batch_journal_v1`，JSON String `{journalVersion:1,refs:[{route:{product,identityProtocol,routeScope},datasetId,namespace,operationId,state:query_required}]}`（S5b 手动 HTTP(S) 成套候选，未生产启用） | 16 d4b2bba journal/store 经成套手动多行 HTTP(S) 与只读组入口接线；绑定实际 boot API 的不可变 snapshot，正式 App 隔离验收仍待；route 固定 kownload/1/既有64hex，dataset 必须来自 persistent:true 的 Core 身份 | 旧 App 可忽略此 Hive 键，不等于旧 core 可以安全执行 S2 状态；仍沿 S2 的不兼容执行边界 | 只有新用户意图、当前 UI 代次、仍匹配的活动 API/ref/scope 与新 ref 真实 put ACK 可消费一次首发；preflight unknown 只验能力；重开/重复永远 queryOnly，错误或超时不可发送；不保存 req/opts/auth/hash/回执副本 | 未决不淘汰，无自动删除/GC；坏/未知 journal 整体隔离且保原值，不换 route/dataset 认领；Mem 域拒恢复型预写 | 多 store 同 Box 串行 fence 保持至真实 put settle，超时后迟到成功不升级原返回或覆盖后续 refs；引用不是认证或数据未回退证明，配对快照不允许重造未知 op |
-| 共享恢复 budget / execution generation | S3 计划，尚未写入 | 未知 | 未知，拒绝；迟到执行不得跨代生效 | 未知，拒绝；换连接/URL/队列不能清零预算 | 先冻结暂停/重试/重启政策及故障用例，补版本与旧端兼容证据 |
+| `Task.recovery` ref，`version=1`（本地候选已实现，未发布/安装） | S3 独立候选 `e045641`；直接 HTTP enroll/IO 已接同事务许可 | 39/旧 core 可能忽略或保存丢 ref，不能当普通任务执行 | 新端必须核对 ref、ledger、required 哨兵三方；缺失/未知/错配时连显式 Continue 也拒绝 | 只执行受支持的 episode/generation/sourceRevision；迟到结果不能跨代生效，仍受 S0 启动政策 | 与以下两行同事务 enroll；配对 App/数据/偏好快照，禁止裸活动库回灌旧 core |
+| bucket `task_recovery_v1`，record.version=1（本地候选已实现，未发布/安装） | S3 同候选，首能力仅 `http-transport-recovery/v1` 可冻结的 direct/manual/static/env 上下文 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、必需 executionDefaultsHash、initialAttempt、计数与有界 actions；缺坏默认摘要 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保 episode、issued 证据、余额/actions/notBefore；只读不 enroll、删除不重造 | 三方必须同事务；当前仅 transport action，总16且 transport6；refreshUsed/deferralUsed 仅0、notBefore 仅空值受支持，其他值拒绝而不清空 |
+| bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | `Task.completion={version:1,completionId:string}`（S4 planned，未激活） | 普通single directHTTP(S)/显式SHA256新receiver拟写；ID等原R冻结值及record.CompletionID，无checksum原流程不变 | 旧39/Core可能忽略ref，不安全执行 | 新端见ref/record/required任一即核三方；缺坏/未知或CID空/错配held，bucket key不能代替CID绑定；Resolve/Start/staging前须确认受理 | 显式/批量/自动Continue不能绕过；prepared不授执行，删除不重造 | 与以下两行同M事务；仅精确未激活v1，不增v2/迁移；旧Core不能消费新guard，禁止裸活动库回退，配对快照不证明输出/续跑安全 |
 | `task_completion_v1`，record.version=1（planned） | 同TaskID，R冻结稳定completionId/typed integrity完整意图；12模块先独立验证，Core/REST/UI未闭合 | 旧Core不理解校验/安全发布阶段 | prepared可空basename/size=-1/无anchor；首byte前完整name/root与真实inode保存ACK，join后才waiting_verify | 未C重开重hash；外来同hash不认领，未知阶段拒绝；不自动整理stage | phase仅prepared/waiting_verify/verifying/verified/published_pending_commit/committed；expected/actual与归属锚点不构成跨FS+DB原子保证 |
 | `task_completion_required_v1={version:1,capability:http-sha256-completion/v1}`（planned） | 同M三方required；同C原子done+record+required，fresh ACK后API线性化与一次私有成功许可 | 旧39/Core忽略bucket仍unsafe；不能靠文档声称已拒 | 三方缺失/混坏/未知版，旧writer丢ref也不得降legacy；真实IO需同run/Fence | unknown ACK只读原ID，不补许可；恢复C仅重建状态不补脚本/Webhook | 备份保三方及实际输出另核；受理与公开DTO见VERIFIED_HTTP_COMPLETION.md，build40未含 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
 | MCP 稳定 bin 的安装 xattr v1：`io.github.kbwumin13-sudo.kownload.mcp-install`，JSON 白名单 `recordVersion/product/sourceCommit/version/readApiVersion/architecture/sha256` | CLI 独立候选已在私有 HOME 首装/升级；recordVersion=1、product=kownload-mcp、40小写hex源码、release+同SHA、readApiVersion=1、arm64、64小写hex摘要；不属于 Task/数据库格式，不新增 receipt 库。旧离线副本已实证丢标记，本增量补固定标记保全 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知字段/版本、缺失或摘要不符拒绝升级，不自动认领 | CLI 同私有 staging inode 发布前写入并读回；不支持/失败保旧入口。离线保全仅对 data/bin/kownload-mcp 普通单链接文件验证 mode700、冻结 v1/七字段/≤2048B/二进制 SHA256 绑定；固定 marker 原字节复制后复读源与副本，不保全则不发布 restore-plan/pairVerified。目录摘要仍 content-only，标记单独核验，不推广为其他 attrs 或 quarantine 的备份证明 |
+
+S3 上述三行登记独立本地候选
+`e04564142fb372fca98402d23a1707a36403f393`（tree
+`dd0fccfd3ed79b6a0e4fbdae757e401c44fa29dc`）中已实现的直接 HTTP transport 纵向。
+它尚未发布或安装，不属于当前生产 build39，也没有并入 a323 批次候选；
+原 69b 局部内核不是可单摘的本增量。其余 S3/S4 能力仍未完成，不能从这三行推断已激活。
+
+ledger 的 `initialAttempt.state` 零代次仅接受 `ungranted` 或 `uncertain`；
+只有本进程普通新建或已成功 ACK 的 S2 M→Q 私有一次证据可给前者，无首次证明的历史/
+legacy 纳入为 uncertain，begin 先持久扣一次 transport 才 issued。issued/clean-paused
+须为与 record 相同的非零 generation；clean-paused 还须匹配合法 checkpointHash。
+暂停、换源、默认变化或重启不补免费 initial/余额；未知扣费 ACK 不发 permit，
+只能观察原结果。每 run 初始 worker slot 最多1024，各有一次初始资格；替换对象/slot
+或 chunk 偏移不产生新免费资格，收费 wave 与其一次性成员许可保持原 episode 约束。
+
+候选本地证据为 Core 55顶层+51子例 plain/race、HTTP整包168+225 plain及相关28+48 race、
+proxy snapshot 与执行投影各2项 plain/race，全部 PASS/0skip；登记交付范围而非重新跑测。
+包含真实 Core 扣费提交后进程退出再重开、未知 ACK 零下一 Range、缺坏三方/删除、
+旧 waiter/迟到结果、默认摘要及 PAC 边界。直接 HTTP 新 watch 绑定独立 run ctx/channel
+并核完整 token；非 HTTP 仍沿原全局 Wait，不能称其旧竞态也已修复。
+
+首步只支持 transport action；refreshUsed/deferralUsed 固定0、notBefore仅空值，
+429/503 仍沿旧 Budget/queue，跨重启冷却与共享 debit 尚未接；provider refresh、deferral
+和其他恢复来源未闭合。纯读取不创建恢复记录。生产旧任务迁移、真实 App/浏览器、
+非 HTTP 恢复、统一恢复 UI 及 S4 校验/发布成功门禁仍未验或未接，不宣称整 S3 完成。
+
+S3 §8.7 的 `executionDefaultsHash`（D）固定为 64 位小写 hex，采用
+`SHA256(JSON({version:1,inheritedUserAgent?:TrimSpace(实际默认UA),inheritedProxyPolicyId?:实际有效proxyPolicyId}))`。
+只计入实际继承的项：显式 UA 或显式 none/custom 代理不受对应无关全局值变化影响；
+无继承项也保存固定 v1 空集合摘要，不用缺字段代替。不保存默认值原文、代理凭据或
+第二份认证，不向 raw Request 写回继承的 UA/Proxy。
+
+`sourceHash = SHA256(JSON({version:1,request:HTTP已解释投影,executionDefaultsHash:D}))`。
+投影复用 HTTP canonicalizer，覆盖初始 URL、默认 GET 方法、Body、规范 Header、实际
+显式代理策略与 SkipVerify，排除 HTTP 不解释的 opaque Extra；不重排 URL query/escape，
+不改 Body/认证值。此为源上下文绑定，不是资源身份或完整用户意图指纹；S2 的完整意图
+指纹及大整数语义不变。先以旧 D 验证原 raw 绑定，才能 CAS 合法继承项变化；无法核证
+旧绑定或默认摘要缺/坏即 context_mismatch held、零 IO。hash、wire 与 SourceKey 必须
+消费同一不可变 UA/代理 handler 快照；proxyPolicyId 对相同有效策略可跨重启重算，不能
+是进程随机 ID。规范化、换链、普通重定向或重启不重开 episode、不补免费 initial/retry。
+
+首能力仅覆盖能实际冻结的 direct、manual/custom、static/env 代理上下文。PAC 动态
+脚本可能执行即不 eligible：未纳入恢复状态的 legacy 任务保留原能力，不 enroll；已含
+ref/ledger/required 任一状态的任务遇 PAC、缺能力或无法证明 snapshot 时 held、零 IO，
+保留原 episode/预算/issued/notBefore，不降级 legacy 或清状态。PAC 纳入共享恢复仍为
+后续计划，不能据当前能力宣称所有 HTTP 恢复已共享预算；不另建 PAC 抓取机制。
 
 ## 回退单位
 

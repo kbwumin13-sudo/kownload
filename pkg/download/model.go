@@ -24,7 +24,17 @@ type ResolveResult struct {
 	Res *base.Resource `json:"res"`
 }
 
+// TaskCompletionRef declares required completion state. It carries no phase,
+// digest result or execution permission; those require the atomic three-way
+// state guard before this optional reference can be acted on.
+type TaskCompletionRef struct {
+	Version      int    `json:"version"`
+	CompletionID string `json:"completionId"`
+}
+
 type Task struct {
+	Completion        *TaskCompletionRef   `json:"completion,omitempty"`
+	Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 	Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 	CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
 	ID                string               `json:"id"`
@@ -41,9 +51,11 @@ type Task struct {
 	fetcher        fetcher.Fetcher
 	timer          *util.Timer
 	// dataLock protects the serialized task view; statusLock serializes lifecycle decisions.
-	dataLock   sync.RWMutex
-	statusLock *sync.Mutex
-	lock       *sync.Mutex
+	dataLock sync.RWMutex
+	// Ephemeral, copied/published only while holding dataLock. Never serialized.
+	mcpPublished MCPReadPublishedSnapshot
+	statusLock   *sync.Mutex
+	lock         *sync.Mutex
 	// Guarded by statusLock; invalidates queued start work after a pause.
 	runGeneration  uint64
 	runCancel      context.CancelFunc // Guarded by statusLock; cancels preparation for this generation.
@@ -58,9 +70,17 @@ type Task struct {
 	// Set on startup from the durable reverse index, even if an old reader
 	// discarded CreationOperation while saving the task.
 	creationBlocked bool
+	recoveryBlocked bool
+	recoveryOwner   atomic.Pointer[taskRecoveryOwner]
 	// Q receives this one-shot authority only from an acknowledged M in this
 	// process. It is intentionally absent from persisted/public Task JSON.
 	initialHTTPExecution atomic.Bool
+	// One-shot enrollment evidence, absent from JSON. Historical/legacy IO
+	// cannot manufacture a free initial attempt when first joining recovery.
+	recoveryInitialEligible atomic.Bool
+	// Read only atomically by Delete: never wait on statusLock before removing
+	// membership while a completion Put may be blocked under that lock.
+	recoveryRunCancel atomic.Pointer[context.CancelFunc]
 }
 
 func NewTask() *Task {
@@ -135,8 +155,10 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		Name              string               `json:"name"`
 		Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 		CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
+		Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
+		Completion        *TaskCompletionRef   `json:"completion,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery, t.Completion})
 }
 
 func (t *Task) getStatus() base.Status {
@@ -148,6 +170,12 @@ func (t *Task) getStatus() base.Status {
 func (t *Task) updateStatus(status base.Status) {
 	t.dataLock.Lock()
 	defer t.dataLock.Unlock()
+	t.updateStatusLocked(status)
+}
+
+// Caller holds dataLock, allowing status and its published observation to
+// change in one snapshot while preserving queue-time bookkeeping.
+func (t *Task) updateStatusLocked(status base.Status) {
 	now := time.Now()
 	if t.Status == base.DownloadStatusWait && status != base.DownloadStatusWait && !t.queuedAt.IsZero() {
 		t.queueWait += now.Sub(t.queuedAt)

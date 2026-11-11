@@ -242,6 +242,11 @@ func TestBrowserHandoffHeldDoesNotChangeOrdinaryContinueOrJSON(t *testing.T) {
 	d.lock.Lock()
 	d.tasks = append(d.tasks, ordinary)
 	d.lock.Unlock()
+	// Model the persisted startup task promised by this fixture. Recovery
+	// enrollment must never infer durable membership from a UI-only object.
+	if err := d.storage.Put(bucketTask, ordinary.ID, ordinary.clone()); err != nil {
+		t.Fatal(err)
+	}
 	data, err := ordinary.MarshalJSON()
 	if err != nil || strings.Contains(string(data), "handoff") {
 		t.Fatal("ordinary task JSON changed")

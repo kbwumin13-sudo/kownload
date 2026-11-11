@@ -95,7 +95,7 @@ func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) erro
 	f.publicRefreshedAt = time.Now()
 	client := f.buildClient()
 	if policy, ok := client.Transport.(*policyTransport); ok {
-		client.Transport = policy.transport
+		client.Transport = &recoveryGuardTransport{transport: policy.transport}
 	}
 	client.Timeout = 25 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
@@ -109,6 +109,9 @@ func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) erro
 	}
 	link, err := source.Refresh(ctx, client, download.UserAgent())
 	if err != nil {
+		return err
+	}
+	if err := recoveryContextError(ctx); err != nil {
 		return err
 	}
 	f.updateRedirectURL(link)

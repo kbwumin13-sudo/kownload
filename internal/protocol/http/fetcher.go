@@ -101,12 +101,15 @@ func newChunk(begin int64, end int64) *chunk {
 }
 
 type connection struct {
-	ID         int
-	Role       connectionRole
-	State      connectionState
-	Chunk      *chunk
-	Downloaded int64
-	Completed  bool
+	recoveryRound       uint64
+	recoveryInitialized bool
+	recoveryPermit      *transfer.RecoveryPermit
+	ID                  int
+	Role                connectionRole
+	State               connectionState
+	Chunk               *chunk
+	Downloaded          int64
+	Completed           bool
 
 	failed     bool
 	retryTimes int
@@ -252,6 +255,9 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
+	executionContext     atomic.Pointer[transfer.HTTPExecutionContext]
+	boundRun             atomic.Pointer[httpBoundRun]
+	recovery             atomic.Pointer[httpRecoveryRun]
 	resourceKey          string
 	publicMu             sync.Mutex
 	publicSource         atomic.Pointer[mailru.Source]
@@ -316,6 +322,7 @@ type Fetcher struct {
 	// file takes it exclusively.
 	file             *os.File
 	fileMu           sync.RWMutex
+	readPublished    atomic.Pointer[PublishedReadStats]
 	redirectURL      string
 	redirectMethod   string // In-memory final-method override; original request remains the fallback.
 	redirectDropBody bool
@@ -363,6 +370,7 @@ func (f *Fetcher) tuning() tuning {
 
 // requestContext attaches connection timing hooks when tracing is enabled.
 func (f *Fetcher) requestContext(ctx context.Context) context.Context {
+	ctx = f.recoveryContext(ctx)
 	if f.tuning().trace {
 		return f.diag.trace(ctx)
 	}
@@ -431,8 +439,12 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	if !safe && !first {
 		return transfer.ErrScopedContext
 	}
-	parent := ctx
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := f.recoveryContext(ctx)
+	ioParent := context.WithoutCancel(parent)
+	if f.boundRun.Load() != nil {
+		ioParent = parent
+	}
+	ctx, cancel := context.WithCancel(ioParent)
 	headersReady := make(chan struct{})
 	var headersOnce sync.Once
 	finishHeaders := func() { headersOnce.Do(func() { close(headersReady) }) }
@@ -1048,9 +1060,18 @@ func (f *Fetcher) doStart() error {
 	maxConns := f.meta.Opts.Extra.(*fhttp.OptsExtra).Connections
 	f.configuredStreams.Store(int32(maxConns))
 	f.slowStart = newSlowStartController(maxConns)
+	// Existing resume slots retain their IDs even if the configured target
+	// was reduced. Reserve this finite set before any worker is launched.
+	workLimit := maxConns
+	if len(f.connections) > workLimit {
+		workLimit = len(f.connections)
+	}
+	if err := f.configureInitialRecoveryWork(workLimit); err != nil {
+		return err
+	}
 
 	// Create main context
-	f.ctx, f.cancel = context.WithCancel(context.Background())
+	f.ctx, f.cancel = context.WithCancel(f.recoveryContext(f.boundRunContext()))
 
 	// Create downloadLoop lifecycle channel
 	f.downloadLoopDone = make(chan struct{})
@@ -1420,6 +1441,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 	conn.State = connConnecting
 	f.connMu.Unlock()
 
+	if err := f.authorizeInitialRecoveryWork(conn); err != nil {
+		f.stopForCredentialFailure(conn, err)
+		return
+	}
 	// Use fast-fail client for quick retry during download phase
 	client := f.buildFastFailClient()
 	buf := transfer.GetBuffer(f.tuning().readBuffer)
@@ -1450,6 +1475,11 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 
 		err := f.downloadChunkOnce(conn, client, buf)
+		f.observeManagedFailure(conn.ctx, err)
+		if finishErr := f.finishManagedConnection(conn); finishErr != nil {
+			f.stopForCredentialFailure(conn, finishErr)
+			return
+		}
 		if err == nil {
 			rateLimits = 0
 			f.connMu.Lock()
@@ -1546,6 +1576,13 @@ func (f *Fetcher) runConnection(conn *connection) {
 			continue
 		}
 
+		if transfer.RecoveryLeaseFromContext(conn.ctx) != nil {
+			if f.retryManagedConnection(conn, err) {
+				return
+			}
+			retries++
+			continue
+		}
 		if shouldCountHTTPFailure(err) || errors.Is(err, errInvalidRangeResponse) {
 			if re := extractRequestError(err); re != nil && re.Code == 403 {
 				f.connMu.Lock()
@@ -1797,12 +1834,12 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 				incomplete := f.usesRanges() && conn.Chunk.remain() > 0
 				f.connMu.Unlock()
 				if incomplete {
-					return fmt.Errorf("%w: short range body", errInvalidRangeResponse)
+					return fmt.Errorf("%w: %w: short range body", errInvalidRangeResponse, io.ErrUnexpectedEOF)
 				}
 				return nil
 			}
 			if f.usesRanges() && errors.Is(err, io.ErrUnexpectedEOF) {
-				return fmt.Errorf("%w: truncated range body", errInvalidRangeResponse)
+				return fmt.Errorf("%w: %w: truncated range body", errInvalidRangeResponse, io.ErrUnexpectedEOF)
 			}
 			return err
 		}
@@ -1900,6 +1937,10 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 
 // runConnectionFallback is used when resolve response is not available
 func (f *Fetcher) runConnectionFallback(conn *connection) {
+	if err := f.authorizeInitialRecoveryWork(conn); err != nil {
+		f.stopForCredentialFailure(conn, err)
+		return
+	}
 	// Use fast-fail client for quick retry during download phase
 	client := f.buildFastFailClient()
 	buf := transfer.GetBuffer(f.tuning().readBuffer)
@@ -2002,6 +2043,11 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				}
 			}
 		}()
+		f.observeManagedFailure(conn.ctx, err)
+		if finishErr := f.finishManagedConnection(conn); finishErr != nil {
+			f.stopForCredentialFailure(conn, finishErr)
+			return
+		}
 
 		if err == nil {
 			f.connMu.Lock()
@@ -2053,6 +2099,13 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			continue
 		}
 
+		if transfer.RecoveryLeaseFromContext(conn.ctx) != nil {
+			if f.retryManagedConnection(conn, err) {
+				return
+			}
+			retries++
+			continue
+		}
 		if shouldCountHTTPFailure(err) {
 			// Immediate fail for server connection limit (403)
 			if re := extractRequestError(err); re != nil && re.Code == 403 {
@@ -2766,7 +2819,6 @@ func (f *Fetcher) phase(transferring int, cooling bool) string {
 
 func (f *Fetcher) Progress() fetcher.Progress {
 	f.connMu.Lock()
-	defer f.connMu.Unlock()
 	p := make(fetcher.Progress, 0)
 
 	total := int64(0)
@@ -2774,9 +2826,15 @@ func (f *Fetcher) Progress() fetcher.Progress {
 		total += f.resolveConn.Downloaded
 	}
 
+	active := int64(0)
 	for _, conn := range f.connections {
 		total += conn.Downloaded
+		if conn.State == connConnecting || conn.State == connDownloading {
+			active++
+		}
 	}
+	f.connMu.Unlock()
+	f.publishReadObservation(active)
 
 	p = append(p, total)
 	return p

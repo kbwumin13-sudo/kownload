@@ -10,8 +10,9 @@ import (
 )
 
 type Controller struct {
-	GetConfig func(v any)
-	GetProxy  func(requestProxy *base.RequestProxy) func(*http.Request) (*url.URL, error)
+	GetRecoveryProxySnapshot func(*base.RequestProxy) (func(*http.Request) (*url.URL, error), string, bool)
+	GetConfig                func(v any)
+	GetProxy                 func(requestProxy *base.RequestProxy) func(*http.Request) (*url.URL, error)
 	// GetProxyPolicy returns the same proxy function as GetProxy together with
 	// an identity for connection pooling. Nil disables shared transports.
 	GetProxyPolicy func(requestProxy *base.RequestProxy) (func(*http.Request) (*url.URL, error), string)

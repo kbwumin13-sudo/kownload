@@ -92,6 +92,13 @@ func (f *Fetcher) buildRequestWithOriginalURL(ctx context.Context, req *base.Req
 // buildRequestWithURL creates an HTTP request.
 // If useRedirect is true and a redirect URL exists, it will be used; otherwise the original URL is used.
 func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, useRedirect bool) (httpReq *http.Request, err error) {
+	ctx = f.recoveryContext(ctx)
+	if err := recoveryContextError(ctx); err != nil {
+		return nil, err
+	}
+	if err := f.validateRecoveryRequest(ctx); err != nil {
+		return nil, err
+	}
 	var reqUrl string
 	f.redirectLock.Lock()
 	cached := useRedirect && f.redirectURL != ""
@@ -136,7 +143,11 @@ func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, us
 		}
 	}
 	if _, ok := headers[base.HttpHeaderUserAgent]; !ok {
-		headers.Set(base.HttpHeaderUserAgent, strings.TrimSpace(f.config.UserAgent))
+		userAgent := strings.TrimSpace(f.config.UserAgent)
+		if snapshot := f.executionContext.Load(); snapshot != nil {
+			userAgent = snapshot.UserAgent()
+		}
+		headers.Set(base.HttpHeaderUserAgent, userAgent)
 	}
 
 	if ctx != nil {
@@ -292,7 +303,7 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 			DialContext: (&net.Dialer{
 				Timeout: timeout,
 			}).DialContext,
-			Proxy: f.ctl.GetProxy(f.meta.Req.Proxy),
+			Proxy: f.clientProxySnapshot(),
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: f.meta.Req.SkipVerifyCert,
 			},
@@ -313,10 +324,17 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 // failing range requests share connections: each request carries its own TCP
 // connect timeout, while TLS handshakes keep the standard 15 second bound.
 func (f *Fetcher) pooledTransport(timeout time.Duration) http.RoundTripper {
-	if !f.tuning().sharedTransport || f.ctl.Transports == nil || f.ctl.GetProxyPolicy == nil {
+	snapshot := f.executionContext.Load()
+	if !f.tuning().sharedTransport || f.ctl.Transports == nil || (f.ctl.GetProxyPolicy == nil && snapshot == nil) {
 		return nil
 	}
-	proxy, proxyID := f.ctl.GetProxyPolicy(f.meta.Req.Proxy)
+	var proxy func(*http.Request) (*url.URL, error)
+	var proxyID string
+	if snapshot != nil {
+		proxy, proxyID = snapshot.Proxy(), snapshot.ProxyID()
+	} else {
+		proxy, proxyID = f.ctl.GetProxyPolicy(f.meta.Req.Proxy)
+	}
 	streams := f.ctl.Transports.Streams(transfer.TransportOptions{
 		ProxyID:             proxyID,
 		Proxy:               proxy,

@@ -229,8 +229,10 @@ func TestMCPReadNonblockingLockOrderAndCancel(t *testing.T) {
 		t.Fatal("main lock retained while reading task")
 	}
 	d.lock.Unlock()
-	// No protocol stats means no need to acquire even the task data lock.
-	if _, err := d.MCPReadGetStats(ctx, "task_1"); err != nil {
+	if _, err := d.MCPReadGetStats(ctx, "task_1"); !errors.Is(err, ErrMCPReadBusy) {
+		t.Fatal(err)
+	}
+	if _, err := d.MCPReadGetErrors(ctx, "task_1"); !errors.Is(err, ErrMCPReadBusy) {
 		t.Fatal(err)
 	}
 	task.dataLock.Unlock()
@@ -331,6 +333,193 @@ func TestMCPReadConcurrentCachedSnapshots(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+	wg.Wait()
+}
+
+// This fixture exercises only the agreed value-copy seam; it is deliberately
+// not a Task method and supplies no production publishing implementation.
+type mcpReadPublishedFixture struct{ value MCPReadPublishedSnapshot }
+
+func (f *mcpReadPublishedFixture) mcpReadPublishedSnapshotLocked() MCPReadPublishedSnapshot {
+	return f.value
+}
+
+func TestMCPReadPublishedStatsValues(t *testing.T) {
+	for mask := 0; mask < 8; mask++ {
+		value := MCPReadPublishedStats{ActiveStreamsKnown: mask&1 != 0, ActiveStreams: 0, TargetStreamsKnown: mask&2 != 0, TargetStreams: 4, PeersKnown: mask&4 != 0, Peers: mcpReadMaxInteger}
+		got, err := mcpReadStatsDTO(value)
+		if err != nil || got.Available != (mask != 0) {
+			t.Fatalf("mask %d: %+v %v", mask, got, err)
+		}
+		for _, field := range []struct {
+			known bool
+			got   *int64
+			want  int64
+		}{
+			{value.ActiveStreamsKnown, got.ActiveStreams, value.ActiveStreams},
+			{value.TargetStreamsKnown, got.TargetStreams, value.TargetStreams},
+			{value.PeersKnown, got.Peers, value.Peers},
+		} {
+			if field.known != (field.got != nil) || (field.got != nil && *field.got != field.want) {
+				t.Fatalf("mask %d lost observation", mask)
+			}
+			if field.got != nil {
+				*field.got = 123
+			}
+		}
+		if value.ActiveStreams != 0 || value.TargetStreams != 4 || value.Peers != mcpReadMaxInteger {
+			t.Fatal("DTO aliases source")
+		}
+	}
+	for _, bad := range []int64{-1, mcpReadMaxInteger + 1} {
+		for _, value := range []MCPReadPublishedStats{
+			{ActiveStreamsKnown: true, ActiveStreams: bad, TargetStreamsKnown: true, TargetStreams: 4},
+			{TargetStreamsKnown: true, TargetStreams: bad},
+			{PeersKnown: true, Peers: bad},
+		} {
+			got, err := mcpReadStatsDTO(value)
+			if !errors.Is(err, ErrMCPReadUnavailable) || got != (MCPReadStats{}) {
+				t.Fatalf("invalid counter accepted: %+v %v", got, err)
+			}
+		}
+	}
+	// Values whose Known bit is false are never observations and never leak.
+	got, err := mcpReadStatsDTO(MCPReadPublishedStats{ActiveStreams: -1, TargetStreams: mcpReadMaxInteger + 1})
+	data, marshalErr := json.Marshal(got)
+	if err != nil || marshalErr != nil || string(data) != `{"available":false}` {
+		t.Fatalf("unknown counters escaped: %s %v", data, err)
+	}
+}
+
+func TestMCPReadPublishedErrorValues(t *testing.T) {
+	for _, category := range []string{"network", "authentication", "integrity", "storage", "cancelled", "unknown"} {
+		for _, retryable := range []bool{false, true} {
+			for _, millis := range []int64{1, 1794432000123, 253402300799999} {
+				value := MCPReadPublishedError{Known: true, Category: category, Retryable: retryable, OccurredAtMillis: millis}
+				got, err := mcpReadErrorsDTO(value)
+				if err != nil || !got.Available || got.Category != category || got.Retryable == nil || *got.Retryable != retryable {
+					t.Fatalf("event changed: %+v %v", got, err)
+				}
+				parsed, err := time.Parse(time.RFC3339Nano, got.OccurredAt)
+				if err != nil || parsed.UnixMilli() != millis || !strings.HasSuffix(got.OccurredAt, "Z") {
+					t.Fatalf("timestamp changed: %q %v", got.OccurredAt, err)
+				}
+				*got.Retryable = !retryable
+				if value.Retryable != retryable {
+					t.Fatal("retryable aliases source")
+				}
+			}
+		}
+	}
+	for _, value := range []MCPReadPublishedError{
+		{Known: true, Category: "network", OccurredAtMillis: 0},
+		{Known: true, Category: "network", OccurredAtMillis: -1},
+		{Known: true, Category: "network", OccurredAtMillis: 253402300800000},
+		{Known: true, Category: "network", OccurredAtMillis: mcpReadMaxInteger},
+		{Known: true, Category: "", OccurredAtMillis: 1},
+		{Known: true, Category: "PRIVATE_SENTINEL", OccurredAtMillis: 1},
+		// Producer must map its typed classification; the reader never guesses.
+		{Known: true, Category: "timeout", OccurredAtMillis: 1},
+	} {
+		got, err := mcpReadErrorsDTO(value)
+		if !errors.Is(err, ErrMCPReadUnavailable) || got != (MCPReadErrors{}) {
+			t.Fatalf("invalid event accepted: %+v %v", got, err)
+		}
+	}
+	got, err := mcpReadErrorsDTO(MCPReadPublishedError{Category: "PRIVATE_SENTINEL", Retryable: true, OccurredAtMillis: -1})
+	data, marshalErr := json.Marshal(got)
+	if err != nil || marshalErr != nil || string(data) != `{"available":false}` {
+		t.Fatalf("unobserved event escaped: %s %v", data, err)
+	}
+}
+
+func TestMCPReadPublishedOptionalCopy(t *testing.T) {
+	if got := mcpReadPublishedValueLocked(struct{}{}); got != (MCPReadPublishedSnapshot{}) {
+		t.Fatal("missing producer supplied values")
+	}
+	source := &mcpReadPublishedFixture{value: MCPReadPublishedSnapshot{
+		Stats: MCPReadPublishedStats{ActiveStreamsKnown: true, ActiveStreams: 0},
+		Error: MCPReadPublishedError{Known: true, Category: "network", Retryable: true, OccurredAtMillis: 1},
+	}}
+	got := mcpReadPublishedValueLocked(source)
+	if got != source.value {
+		t.Fatal("copy changed published fields")
+	}
+	got.Stats.ActiveStreams = 99
+	got.Error.Category = "storage"
+	if source.value.Stats.ActiveStreams != 0 || source.value.Error.Category != "network" {
+		t.Fatal("snapshot aliases producer")
+	}
+}
+
+func TestMCPReadPublishedNoProducerLockAndCancellation(t *testing.T) {
+	d := mcpReadFixture("task_1")
+	task := d.tasks[0]
+	task.fetcher = mcpReadForbiddenFetcher{}
+	// A status transition must not block a read on an additional lifecycle lock.
+	task.statusLock.Lock()
+	defer task.statusLock.Unlock()
+	readers := []func(context.Context) error{
+		func(ctx context.Context) error { _, err := d.MCPReadGetStats(ctx, task.ID); return err },
+		func(ctx context.Context) error { _, err := d.MCPReadGetErrors(ctx, task.ID); return err },
+	}
+	for _, read := range readers {
+		if err := read(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := read(cancelled); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel: %v", err)
+		}
+		expired, cancelDeadline := context.WithDeadline(context.Background(), time.Unix(1, 0))
+		if err := read(expired); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("deadline: %v", err)
+		}
+		cancelDeadline()
+		d.lock.Lock()
+		err := read(context.Background())
+		d.lock.Unlock()
+		if !errors.Is(err, ErrMCPReadBusy) {
+			t.Fatalf("main busy: %v", err)
+		}
+		task.dataLock.Lock()
+		err = read(context.Background())
+		task.dataLock.Unlock()
+		if !errors.Is(err, ErrMCPReadBusy) {
+			t.Fatalf("data busy: %v", err)
+		}
+		if !d.lock.TryLock() {
+			t.Fatal("main lock retained")
+		}
+		d.lock.Unlock()
+		if !task.dataLock.TryLock() {
+			t.Fatal("data lock retained")
+		}
+		task.dataLock.Unlock()
+	}
+	// Real getters with no publisher stay unavailable while unrelated progress
+	// updates contend on dataLock; this is not a simulated live statistics cache.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			task.dataLock.Lock()
+			task.Progress.Downloaded = int64(i)
+			task.dataLock.Unlock()
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		stats, se := d.MCPReadGetStats(context.Background(), task.ID)
+		last, ee := d.MCPReadGetErrors(context.Background(), task.ID)
+		if (se != nil && !errors.Is(se, ErrMCPReadBusy)) || (ee != nil && !errors.Is(ee, ErrMCPReadBusy)) {
+			t.Error("unexpected read failure", se, ee)
+		}
+		if stats != (MCPReadStats{}) || last != (MCPReadErrors{}) {
+			t.Error("missing publisher fabricated observations")
 		}
 	}
 	wg.Wait()
