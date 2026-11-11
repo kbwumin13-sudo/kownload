@@ -120,7 +120,14 @@ func (o *taskRecoveryOwner) currentLease(ctx context.Context) (*transfer.Recover
 	if !o.active.Load() {
 		return nil, transfer.ErrRecoveryStale
 	}
-	o.runContext = ctx
+	// The preparation boundary binds this run once. Progress/read snapshots
+	// must never replace its cancellation context with Background (or revive
+	// a canceled run); begin is the sole reset at the next generation.
+	if o.runContext == nil {
+		o.runContext = ctx
+	} else if o.runContext.Err() != nil {
+		return nil, transfer.ErrRecoveryStale
+	}
 	return &transfer.RecoveryLease{Token: o.token, Round: o.record.NextAction, Owner: o, SourceHash: o.record.SourceHash}, nil
 }
 
