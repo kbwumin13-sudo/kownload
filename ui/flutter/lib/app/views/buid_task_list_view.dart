@@ -655,11 +655,8 @@ class BuildTaskListView extends GetView {
     if (macos && Util.isMacos()) {
       final colors = MacColors.of(context);
       final extraction = getExtractionStatusText();
-      final httpCompletion = task.protocol == Protocol.http
-          ? task.completionView != null
-              ? HttpCompletionView.fromTaskProjection(task.completionView!)
-              : httpCompletions[task.id]
-          : null;
+      final httpCompletion = HttpCompletionView.forTask(task) ??
+          (task.protocol == Protocol.http ? httpCompletions[task.id] : null);
       var status = task.handoff?.blocked == true
           ? task.handoff!.label
           : isDone()
