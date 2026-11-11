@@ -49,8 +49,9 @@ type Fingerprint struct {
 // Gopeed, which shares that root).
 type record struct {
 	Summary
-	SourceDatabase      *Fingerprint `json:"sourceDatabase,omitempty"`
-	IgnoreLegacyChanges bool         `json:"ignoreLegacyChanges,omitempty"`
+	SourceDatabase      *Fingerprint   `json:"sourceDatabase,omitempty"`
+	IgnoreLegacyChanges bool           `json:"ignoreLegacyChanges,omitempty"`
+	StartupPolicy       *StartupPolicy `json:"startupPolicy,omitempty"`
 }
 
 // ErrLegacyChanged reports that the legacy root changed after the import, so
@@ -110,6 +111,9 @@ func Import(o Options) (Summary, error) {
 		if json.Unmarshal(data, &done) != nil || done.Version != 1 {
 			return zero, errors.New("invalid_marker")
 		}
+		if _, err = startupPolicy(done); err != nil {
+			return zero, err
+		}
 		if o.IgnoreLegacyChanges && !done.IgnoreLegacyChanges {
 			done.IgnoreLegacyChanges = true
 			if err = rewriteMarker(target, done); err != nil {
@@ -129,6 +133,9 @@ func Import(o Options) (Summary, error) {
 		var s record
 		if json.Unmarshal(data, &s) != nil {
 			return zero, errors.New("invalid_pending_import")
+		}
+		if _, err = startupPolicy(s); err != nil {
+			return zero, err
 		}
 		actual, err := summarize(target, s.Imported)
 		if err != nil || actual != s.Summary {
@@ -251,7 +258,11 @@ func Import(o Options) (Summary, error) {
 	if err != nil {
 		return zero, err
 	}
-	data, _ := json.Marshal(record{Summary: summary, SourceDatabase: &fingerprint, IgnoreLegacyChanges: o.IgnoreLegacyChanges})
+	policy := StartupPolicy{Version: 1, Mode: "normal", Reason: "fresh"}
+	if imported {
+		policy.Mode, policy.Reason = "imported-review", "imported_data"
+	}
+	data, _ := json.Marshal(record{Summary: summary, SourceDatabase: &fingerprint, IgnoreLegacyChanges: o.IgnoreLegacyChanges, StartupPolicy: &policy})
 	if err = writeSync(filepath.Join(stage, pending), data); err != nil {
 		return zero, err
 	}

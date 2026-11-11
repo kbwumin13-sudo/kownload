@@ -6,12 +6,13 @@ import 'package:path/path.dart' as path;
 
 import '../util/util.dart';
 import 'app_identity.dart';
+import 'startup_policy.dart';
 
 const _channel = MethodChannel('kownload/identity');
 
 /// Runs before Hive.init or the engine. A failed import never starts downloads.
-Future<void> bootstrapIdentity() async {
-  if (!Util.isMacos()) return;
+Future<IdentityStartupPolicy> bootstrapIdentity() async {
+  if (!Util.isMacos()) return const IdentityStartupPolicy.normal();
   final target = Util.getStorageDir();
   const previewSource = String.fromEnvironment('KOWNLOAD_MIGRATION_SOURCE');
   final source = Util.isIsolatedPreview
@@ -43,15 +44,17 @@ Future<void> bootstrapIdentity() async {
               ignoreLegacyChanges(source: source, target: target, run: run));
     }
   }
-  await runIdentityImport(source: source, target: target, run: run);
+  final policy =
+      await runIdentityImport(source: source, target: target, run: run);
   if (!Util.isIsolatedPreview) {
     await _channel.invokeMethod<void>('migratePreferences');
   }
+  return policy;
 }
 
 typedef ImportRunner = Future<ProcessResult> Function(List<String> arguments);
 
-Future<void> runIdentityImport(
+Future<IdentityStartupPolicy> runIdentityImport(
     {required String source,
     required String target,
     required ImportRunner run}) async {
@@ -81,6 +84,14 @@ Future<void> runIdentityImport(
     if (result.exitCode != 0 || reply['ok'] != true) {
       throw const IdentityBootstrapException(
           '数据导入未完成：旧库可能被占用，或目标已有未确认数据。请退出旧版后重试；原数据未改动');
+    }
+    try {
+      return IdentityStartupPolicy.fromMarker(
+          await File(path.join(target, '.kownload-identity.json'))
+              .readAsString());
+    } on FormatException {
+      throw const IdentityBootstrapException(
+          '无法识别任务启动政策，本次没有打开或继续任务。请使用配套版本和快照。');
     }
   } on IdentityBootstrapException {
     rethrow;

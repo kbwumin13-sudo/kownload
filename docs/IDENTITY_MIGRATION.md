@@ -14,6 +14,23 @@ Flutter 在 Hive.init、内核 Start、快捷键/浏览器初始化及自动继�
 
 原生 UserDefaults 只迁 `netdiskProfileFileBookmarks`，不覆盖已有新值。窗口、快捷键、历史与其他配置随 Hive 原样保留。原书签解析失败时继续走现有“选择资料文件”系统授权；不迁移 Keychain、浏览器 Cookie、密码库或整个偏好域。
 
+### S0：启动与执行许可分开
+
+开发版新增迁移标记的可选 `startupPolicy`（v1，`mode`/`reason`），不改变数据库格式。
+新空根写 `normal/fresh`；导入数据写 `imported-review/imported_data`。旧标记没有执行
+证明时按 `imported-review/legacy_marker`，不会因为打开一次 App 自动改成 normal。
+未知政策版本/值拒绝，`ignoreLegacyChanges` 只决定是否检查旧根，不授予执行许可。
+
+bootstrap 将政策作为非持久 `StartConfig.startupTaskPolicy` 传给 core；原用户
+`autoStartTasks` 和普通 DownloaderConfig 均不改写。review 下 App 可以查看记录、创建
+新任务；Flutter 不发启动自动继续，core 也不自动恢复上传、清理缺失文件记录或执行
+无明确 ID 的 Continue-all。提示解释原因，关闭提示不解禁；明确选择任务继续仍需
+通过当前 core 的状态版本/held 守卫。没有新增“修改全局自动开始以通过验收”的流程。
+
+状态能解码、能执行和能安全自动续跑分别见[兼容清单](STATE_COMPATIBILITY.md)。
+`confirmed_compatible` 是为可信兼容检查保留的 normal 原因；S0 没有自动写入或批量
+确认接口，不用手填该值替代逐状态/输出文件核验。
+
 ## Native 清单切换
 
 host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名 `io.github.kbwumin13_sudo.kownload` 与旧名 `com.gopeed.gopeed` 两份 manifest 指向同一个 `kownload-native-host`。清单生成器保留原文件的私密逐字节备份；原本不存在的清单记为 absent，供回退恢复。启动流程不写正式浏览器清单。
@@ -26,19 +43,48 @@ host 从当前数据根连接 `ipc/host.sock`，不回落连接旧库。新名 `
 
 需要测试导入时仅传 `--migration-source /private/tmp/.../legacy-clone`；该目录须是正式根的 APFS `cp -c` 克隆，权限 700，不含报告可见的原始记录。未传源时预览只初始化空实例。正式应用运行中取得的克隆属于崩溃一致快照，不等同于停写事务快照；预览导入时克隆自身已停写，随后使用锁和完整校验。正式首启仍要求退出旧版。
 
-## 简单回退
+## 配对快照与离线回退准备（S0）
 
-保持数据库格式，按“退出新版 → 备份旧根 → 把新根复制回旧根 → 恢复原清单 → 新根改名保留 → 装回 build 25 → 换回旧版助手”回退。换回旧版助手是必做步骤：新助手连到旧 host 时，旧版应用会建好任务，但助手只能显示 `legacy_host` 提示，用户再点会再建一个。新根最后改名为 `<新根>.rolled-back-<时间戳>`（脚本输出 `newRootKeptAt`），旧根备份保留，以便处理复制/安装失败。新根不留在原名下，是为了让以后再次升级时重新从旧根导入回退后旧版产生的数据，而不是静默打开回退那一刻的副本；万一改名前中断，首启的旧库指纹比对会停在错误页。没有兼容启动器或第三运行目录，也不做数据库 schema 转换。脚本兼容 macOS 自带的 Python 3.9。
+旧的“把新版活动库回灌 build25”的流程停止支持。prepared/aborted Handoff 及后续
+operation/校验/副作用等新字段可能被旧 core 忽略；JSON 可读不等于可执行。
+旧 `--new-root/--old-root/--backup-root --apply` 以及清单恢复参数在写任何文件前拒绝。
+不传 apply 的旧命令只报告缺少配对快照，不复制或移动数据。
 
-```sh
-python3 scripts/rollback-identity.py --new-root '<新根>' --old-root '<旧根>' \
-  --backup-root '<尚不存在的私密备份目录>'
-# 核对参数后显式执行；--restore-browser-manifests 按新根里的备份恢复 Chrome/Edge，
-# 其他目录可用 --manifest-pair '<原清单备份目录>' '<NativeMessagingHosts 目录>' 逐个指定：
-python3 scripts/rollback-identity.py --new-root '<新根>' --old-root '<旧根>' \
-  --backup-root '<尚不存在的私密备份目录>' --restore-browser-manifests --apply
+默认回退单位是可信冷备份采集的 **App＋同一时点数据＋偏好**。清单 v1 示例：
+
+```json
+{
+  "version": 1,
+  "sourceCommit": "<40位源码SHA>",
+  "releaseVersion": "<与App内build-manifest一致>",
+  "app": {"path": "kownload.app", "bundleId": "io.github.kbwumin13-sudo.kownload", "buildNumber": 39, "sha256": "<目录摘要>"},
+  "data": {"path": "data", "sha256": "<目录摘要>"},
+  "preferences": {"path": "preferences.plist", "domain": "io.github.kbwumin13-sudo.kownload", "sha256": "<文件摘要>"}
+}
 ```
 
-脚本默认不复制；执行时先检查进程/数据库与 Hive 锁，复制并校验到短期 staging，再把旧根原子移至私密备份并发布副本。staging 只是同格式复制的临时位置，不是兼容运行根。原 host 从旧根保留，别名清单按原文件或 absent 恢复；脚本不安装或启动 App。安装旧包后首次下载目录权限可能需要重新授权。若曾显式更改本机后端设置，请在旧版重新检查默认 IPC；远程/自定义端点保留其原有语义。
+路径只能相对清单，组件互不包含；缺件、未知版本、App Info/包内构建清单与配对信息
+不符、摘要不符均拒绝。数据目录拒绝 symlink/特殊文件；App 只允许包内相对 symlink。
+目录摘要是相对路径排序的紧凑 UTF-8 JSON 数组的 SHA256，每行记录目录
+`[path,"directory",permissions]`、文件 `[path,"file",permissions,fileSHA256]` 或包内
+链接 `[path,"link",target]`；算法见脚本 `tree_digest`。清单必须在停写后生成，
+脚本不能事后证明冷快照采集时点或来源真实性，不将匹配摘要当作执行授权。
 
-验证只对临时克隆使用 `--fixture --apply`，该模式拒绝临时根之外的路径。build 25 内核打开新版写出的 bbolt 与旧解码忽略新字段，必须单独验收；仅比较文件哈希或新版可启动不能代替旧内核实测。对外报告只写数量、哈希一致性和通过/失败，不打印记录、凭据或真实路径。
+```sh
+python3 scripts/rollback-identity.py --snapshot-manifest '<冷备份>/snapshot.json' \
+  --output '<不存在的离线副本目录>'
+# 核验通过后，仅生成离线副本；不安装、不启动、不恢复运行偏好或浏览器清单：
+python3 scripts/rollback-identity.py --snapshot-manifest '<冷备份>/snapshot.json' \
+  --output '<不存在的离线副本目录>' --apply
+```
+
+apply 复制 App.app、data、preferences.plist 与可重验的 snapshot.json，完成后才写
+restore-plan.json；原快照、新旧活动根和真实下载文件不动。输出目录独占创建、权限700，
+中断只可能留下无完成计划的离线副本，重试使用新路径。工具不会修改已安装 App、
+UserDefaults、系统关联或任何 Native 清单，也不充当安装器。
+
+计划固定 `automaticResumeAllowed=false`、`outputFilesVerified=false`：任务引用的输出
+文件可能在快照之后变化，恢复数据不恢复这些文件，不能据此启动旧版自动续跑。
+实际切换前还需在单独授权下核对配套 App/helper、执行状态、路径/文件、偏好/系统权限
+和当前清单归属；保留新版根/文件，不用旧备份覆盖后来用户改动，不重造已删除任务。
+fixture 只接受 `/private/tmp` 内路径；系统 Python3.9 和默认 Python 的测试都仅处理假数据。
