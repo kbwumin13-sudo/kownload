@@ -1,38 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/identity/app_identity.dart';
 import 'package:gopeed/identity/browser_connection.dart';
 import 'package:gopeed/identity/native_manifests.dart';
 import 'package:path/path.dart' as path;
-
-// Real IO interrupted inside a child isolate: no catch/finally is unwound and
-// no test-only crash flag enters the production service.
-class _InterruptedBackupFile implements File {
-  static String? unsupported;
-  final File file;
-  final SendPort result;
-  _InterruptedBackupFile(this.file, this.result);
-  @override
-  String get path => file.path;
-  @override
-  Future<File> create({bool recursive = false, bool exclusive = false}) =>
-      file.create(recursive: recursive, exclusive: exclusive);
-  @override
-  Future<File> writeAsBytes(List<int> bytes,
-      {FileMode mode = FileMode.write, bool flush = false}) async {
-    await file.writeAsBytes(bytes.take(5).toList(), mode: mode, flush: true);
-    Isolate.exit(result, {'interrupted': true, 'path': file.path});
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) {
-    unsupported = invocation.memberName.toString();
-    throw UnsupportedError('unexpected interrupted-file operation');
-  }
-}
 
 class _BeforePublishFile implements File {
   final File file;
@@ -51,43 +24,6 @@ class _BeforePublishFile implements File {
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnsupportedError('unexpected staging-file operation');
-}
-
-void _interruptFirstBackup(Map<String, dynamic> value) async {
-  final result = value['result'] as SendPort;
-  final outer = Zone.current;
-  final storage = value['storage'] as String;
-  final service = NativeManifestService(
-      home: value['home'] as String,
-      storageDir: storage,
-      loadAsset: () async => List<int>.from(value['asset']));
-  try {
-    final report = await IOOverrides.runZoned(
-        () => service.connectBrowser('chrome'),
-        fseGetType: (name, followLinks) => outer
-            .run(() => FileSystemEntity.type(name, followLinks: followLinks)),
-        fseGetTypeSync: (name, followLinks) => outer.run(
-            () => FileSystemEntity.typeSync(name, followLinks: followLinks)),
-        stat: (name) => outer.run(() => FileStat.stat(name)),
-        statSync: (name) => outer.run(() => FileStat.statSync(name)),
-        createFile: (name) {
-          final file = outer.run(() => File(name));
-          final backupRoot =
-              path.join(storage, 'native-manifest-backups', 'chrome');
-          if (path.isWithin(backupRoot, name) &&
-              (name.endsWith('${AppIdentity.hostName}.json') ||
-                  name.endsWith('/original'))) {
-            return _InterruptedBackupFile(file, result);
-          }
-          return file;
-        });
-    Isolate.exit(result, {
-      'unexpectedCompletion': report.toJson(),
-      'unsupported': _InterruptedBackupFile.unsupported
-    });
-  } catch (error) {
-    Isolate.exit(result, {'unexpectedError': error.runtimeType.toString()});
-  }
 }
 
 void main() {
@@ -295,21 +231,32 @@ void main() {
       () async {
     await installAsset();
     final original = await writeManifest('chrome', AppIdentity.hostName);
-    final result = ReceivePort(), exited = ReceivePort();
-    final isolate = await Isolate.spawn(
-        _interruptFirstBackup,
-        {
-          'home': home,
-          'storage': storage,
-          'asset': asset,
-          'result': result.sendPort,
-        },
-        onExit: exited.sendPort);
+    final config = File('.dart_tool/package_config.json').absolute;
+    final packages =
+        jsonDecode(await config.readAsString())['packages'] as List;
+    final flutterPackage =
+        packages.cast<Map>().firstWhere((p) => p['name'] == 'flutter');
+    final flutterRoot =
+        Directory.fromUri(config.uri.resolve(flutterPackage['rootUri']))
+            .parent
+            .parent;
+    final dart =
+        path.join(flutterRoot.path, 'bin', 'cache', 'dart-sdk', 'bin', 'dart');
+    final worker = await Process.start(dart, [
+      '--packages=${config.path}',
+      'test/fixtures/native_backup_interrupt.dart',
+      home,
+      storage,
+    ]);
+    var exited = false;
+    final output = utf8.decoder.bind(worker.stdout).join();
+    final errors = utf8.decoder.bind(worker.stderr).join();
     try {
-      final message =
-          await result.first.timeout(const Duration(seconds: 20)) as Map;
-      expect(message['interrupted'], true, reason: message.toString());
-      await exited.first.timeout(const Duration(seconds: 20));
+      final code = await worker.exitCode.timeout(const Duration(seconds: 20));
+      exited = true;
+      expect(code, 0, reason: await errors);
+      final message = jsonDecode(await output) as Map;
+      expect(message['interrupted'], true);
       expect(await manifest('chrome', AppIdentity.hostName).readAsString(),
           original);
       expect(
@@ -328,9 +275,7 @@ void main() {
       expect(await manifest('chrome', AppIdentity.hostName).readAsString(),
           original);
     } finally {
-      isolate.kill(priority: Isolate.immediate);
-      result.close();
-      exited.close();
+      if (!exited) worker.kill();
     }
   });
 
