@@ -1787,9 +1787,10 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 			deferred.Until.Format(time.RFC3339), task.ID)
 		task.runGeneration++
 		task.timer.Pause()
-		task.updateStatus(base.DownloadStatusWait)
 		task.dataLock.Lock()
+		task.updateStatusLocked(base.DownloadStatusWait)
 		task.notBefore = deferred.Until
+		task.clearReadPublishedLocked()
 		task.dataLock.Unlock()
 		if saveErr := d.saveTask(task); saveErr != nil {
 			d.Logger.Error().Err(saveErr).Msgf("persist deferred task: %s", task.ID)

@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；stats/errors 已有可选内存发布接口的读取适配，但当前 Task 尚未接入 publisher，仍为 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；直接 HTTP 的 activeStreams/targetStreams 与已接受的分类错误已由既有采样和当前 run/source 门禁发布；暂停、自动冷却让槽、新 run、换源、成功和删除均清理旧缓存。其它协议未提供的 peers 等字段仍为 unavailable，未用零补齐。真实 BuildServer/HTTP/stdio/mcporter 专项通过，正式 App 中这条新 publisher 链尚未验收。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -31,7 +31,7 @@ GOTOOLCHAIN=local "$GO_BIN" build -trimpath -o /tmp/kownload-mcp .
 | `kownload_get_stats` | `id` | `/api/v1/mcp/read/v1/tasks/{id}/stats` | Stats |
 | `kownload_get_errors` | `id` | `/api/v1/mcp/read/v1/tasks/{id}/errors` | LastError |
 
-`id` 为 1…64 个 `[A-Za-z0-9_-]`。cursor 为至多 128 个同字符集字符，空字符串表示末页；只能编码分页位置，不能携带私密 URL、路径、令牌。App 应提供稳定分页语义，单页任务不可重复；桥拒绝超过请求 limit 的结果。S7a stats 为单任务，不伪装全局统计。 `available:true` 必须至少包含一个真实已知的统计字段；已知 0 保留为数字 0，未知字段省略。`available:false` 不携带统计或错误字段，不能据此判断为零连接或无错误。桥对该契约的受控 UDS 测试不代表 App 已有发布缓存。
+`id` 为 1…64 个 `[A-Za-z0-9_-]`。cursor 为至多 128 个同字符集字符，空字符串表示末页；只能编码分页位置，不能携带私密 URL、路径、令牌。App 应提供稳定分页语义，单页任务不可重复；桥拒绝超过请求 limit 的结果。S7a stats 为单任务，不伪装全局统计。 `available:true` 必须至少包含一个真实已知的统计字段；已知 0 保留为数字 0，未知字段省略。`available:false` 不携带统计或错误字段，不能据此判断为零连接或无错误。纯 DTO 测试不代表 publisher；当前直接 HTTP 的真实发布证据来自 BuildServer/HTTP/stdio/mcporter 专项，正式 App 验收仍单列。
 
 Task：`{id,protocol,status,createdAt,updatedAt,progress}`。
 
