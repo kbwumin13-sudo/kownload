@@ -17,6 +17,8 @@ import tempfile
 import zipfile
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+MCP_HELPER = 'Contents/Helpers/kownload-mcp'
+MCP_SDK_VERSION = 'v1.7.0'
 
 
 def run(*args, cwd=None, env=None):
@@ -33,6 +35,96 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def mcp_version(release, commit):
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise RuntimeError('MCP source must be a full Git commit')
+    return release + '+' + commit
+
+
+def mcp_helper(app):
+    helper = app / MCP_HELPER
+    for entry in [app / 'Contents', helper.parent, helper]:
+        if entry.is_symlink():
+            raise RuntimeError('MCP helper must use ordinary package entries')
+    if not helper.is_file():
+        raise RuntimeError('MCP helper is missing or is not a regular file')
+    return helper
+
+
+def sha256_file(file):
+    with file.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def mcp_metadata(app, manifest, sdk_version):
+    if sdk_version != MCP_SDK_VERSION or manifest['architecture'] != 'arm64':
+        raise RuntimeError('Unexpected MCP SDK or architecture')
+    return {'manifestVersion': 1, 'helperPath': MCP_HELPER,
+            'version': mcp_version(manifest['releaseVersion'], manifest['sourceCommit']),
+            'sourceCommit': manifest['sourceCommit'], 'readApiVersion': 1,
+            'sdkVersion': sdk_version, 'architecture': 'arm64',
+            'sha256': sha256_file(mcp_helper(app))}
+
+
+def verify_packaged_mcp(app, manifest, execute_version=False):
+    metadata = manifest.get('mcp')
+    if metadata is None:
+        return
+    expected = mcp_metadata(app, manifest, MCP_SDK_VERSION)
+    if metadata != expected:
+        raise RuntimeError('MCP package metadata or final helper digest differs')
+    if execute_version:
+        # The caller has verified the sealed App. Never execute a stable entry
+        # or a path supplied by package metadata before the fixed-path checks.
+        wanted = 'kownload-mcp ' + metadata['version'] + ' read-api=1'
+        if output(mcp_helper(app), '--version') != wanted:
+            raise RuntimeError('MCP packaged helper version differs')
+
+
+def seal_candidate(app, entitlements, manifest, mcp_sdk=None):
+    # Sign all inner code first; outer signing deliberately omits --deep, so
+    # it cannot mutate an already hashed Helper behind the manifest's back.
+    prestripped_mcp = mcp_helper(app) if mcp_sdk is not None else None
+    mach = []
+    for file in app.rglob('*'):
+        if file.is_file() and not file.is_symlink():
+            with file.open('rb') as f:
+                magic = f.read(4)
+            if magic in [b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe']:
+                mach.append(file)
+    for file in mach:
+        # Go already linked this helper with -w -s. Apple strip rejects its
+        # cgo indirect symbols on supported SDKs; signing still applies below.
+        if file != prestripped_mcp:
+            run('xcrun', 'strip', '-S', '-x', file)
+        run('codesign', '--force', '--sign', '-', file)
+    for framework in sorted(app.rglob('*.framework'), key=lambda x: len(x.parts), reverse=True):
+        if not framework.is_symlink():
+            run('codesign', '--force', '--sign', '-', framework)
+    if mcp_sdk is not None:
+        manifest['mcp'] = mcp_metadata(app, manifest, mcp_sdk)
+    (app / 'Contents/Resources/build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    run('codesign', '--force', '--sign', '-', '--entitlements', entitlements, app)
+    run('codesign', '--verify', '--deep', '--strict', app)
+    verify_packaged_mcp(app, manifest, execute_version=True)
+
+
+def add_module_sources(bundle, modules, go, source, mcp_index=None):
+    for name, value in [('go-modules.json', modules), ('mcp-go-modules.json', mcp_index)]:
+        if value is None:
+            continue
+        data = (json.dumps(value, indent=2) + '\n').encode()
+        member = tarfile.TarInfo(name)
+        member.size = len(data)
+        bundle.addfile(member, io.BytesIO(data))
+    # Includes the union of dependencies actually linked by the engine, hosts
+    # and nested MCP module. Exact module ZIPs are shared, not omitted/doubled.
+    notices = load('kownload_source_notices', source / 'scripts/collect-macos-notices.py')
+    for module in modules:
+        meta = notices.module_source(go, source, module)
+        bundle.add(meta['Zip'], arcname='dependency-sources/go/' + pathlib.Path(meta['Zip']).name.replace('.zip', '') + '-' + hashlib.sha256(module['module'].encode()).hexdigest()[:12] + '.zip')
 
 
 def main():
@@ -97,6 +189,9 @@ def main():
     core = work / 'libgopeed.dylib'
     host = work / identity['hostExecutable']
     migration = work / identity['migrationExecutable']
+    mcp_root = source / 'cmd/kownload-mcp'
+    mcp = work / 'kownload-mcp' if (mcp_root / 'go.mod').is_file() else None
+    mcp_sdk = None
     run(go, 'build', '-trimpath', '-tags', 'nosqlite', '-buildmode=c-shared',
         '-ldflags=-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=' + release,
         '-o', core, './bind/desktop', cwd=source, env=env)
@@ -105,6 +200,15 @@ def main():
                   (' -X main.previewBuild=true' if a.preview else ''))
     run(go, 'build', '-trimpath', '-ldflags=' + host_flags, '-o', host, './cmd/native-host', cwd=source, env=env)
     run(go, 'build', '-trimpath', '-ldflags=-w -s', '-o', migration, './cmd/identity-migrate', cwd=source, env=env)
+    if mcp is not None:
+        sdk = json.loads(output(go, 'list', '-m', '-json', 'github.com/modelcontextprotocol/go-sdk', cwd=mcp_root))
+        mcp_sdk = sdk['Version']
+        if mcp_sdk != MCP_SDK_VERSION:
+            raise RuntimeError('MCP SDK differs from the reviewed fixed version')
+        run(go, 'mod', 'verify', cwd=mcp_root, env=env)
+        run(go, 'build', '-mod=readonly', '-trimpath',
+            '-ldflags=-w -s -X main.version=' + mcp_version(release, commit),
+            '-o', mcp, '.', cwd=mcp_root, env=env)
     (ui / 'macos/Frameworks').mkdir(parents=True, exist_ok=True)
     (ui / 'assets/exec').mkdir(parents=True, exist_ok=True)
     shutil.copy2(core, ui / 'macos/Frameworks/libgopeed.dylib')
@@ -139,6 +243,8 @@ def main():
     shutil.copytree(ui / ('build/macos/Build/Products/Release/' + identity['productName'] + '.app'), app, symlinks=True)
     (app / 'Contents/Helpers').mkdir(exist_ok=True)
     shutil.copy2(migration, app / ('Contents/Helpers/' + identity['migrationExecutable']))
+    if mcp is not None:
+        shutil.copy2(mcp, app / MCP_HELPER)
     info_path = app / 'Contents/Info.plist'
     info = plistlib.loads(info_path.read_bytes())
     if a.preview:
@@ -151,7 +257,18 @@ def main():
     resources = app / 'Contents/Resources'
     legal = resources / 'legal'
     notices = load('kownload_notices', source / 'scripts/collect-macos-notices.py')
-    modules = notices.collect(source, legal, [core, host, migration], go, flutter)
+    modules = notices.collect(source, legal, [core, host, migration] + ([mcp] if mcp is not None else []), go, flutter)
+    mcp_index = None
+    if mcp is not None:
+        used = {(m['module'], m['version']) for m in notices.binary_modules(go, mcp)}
+        mcp_index = {'modulePath': 'cmd/kownload-mcp',
+                     'goModSha256': sha256_file(mcp_root / 'go.mod'),
+                     'goSumSha256': sha256_file(mcp_root / 'go.sum'),
+                     'modules': [m for m in modules if (m['module'], m['version']) in used]}
+        if ('github.com/modelcontextprotocol/go-sdk', MCP_SDK_VERSION) not in used:
+            raise RuntimeError('MCP compiled SDK provenance is missing')
+        (legal / 'mcp-go-modules.json').write_text(json.dumps(mcp_index, indent=2) + '\n')
+        shutil.copytree(mcp_root / 'licenses', legal / 'mcp-module-licenses')
     helper = resources / 'browser-media-extension'
     helper.mkdir()
     for file in (source / 'browser-media-extension').iterdir():
@@ -184,23 +301,9 @@ def main():
                 'projectComponentsFromSourceCommit': ['Go engine', 'Native host', 'Identity migration', 'Flutter app'],
                 'nativePlugins': 'rebuilt from locked third-party source',
                 'automaticInstaller': False}
-    (resources / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    # Remove local object/debug symbols, then ad-hoc seal copied payloads only.
-    mach = []
-    for file in app.rglob('*'):
-        if file.is_file() and not file.is_symlink():
-            with file.open('rb') as f:
-                magic = f.read(4)
-            if magic in [b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe']:
-                mach.append(file)
-    for file in mach:
-        run('xcrun', 'strip', '-S', '-x', file)
-        run('codesign', '--force', '--sign', '-', file)
-    for framework in sorted(app.rglob('*.framework'), key=lambda x: len(x.parts), reverse=True):
-        if not framework.is_symlink():
-            run('codesign', '--force', '--sign', '-', framework)
-    run('codesign', '--force', '--sign', '-', '--entitlements', ui / 'macos/Runner/Release.entitlements', app)
-    run('codesign', '--verify', '--deep', '--strict', app)
+    if mcp is not None:
+        manifest['projectComponentsFromSourceCommit'].append('MCP stdio bridge')
+    seal_candidate(app, ui / 'macos/Runner/Release.entitlements', manifest, mcp_sdk)
     scanner = load('kownload_path_scan', source / 'scripts/scan-package-paths.py')
     result = scanner.scan(app)
     (destination / 'app-path-scan.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -224,6 +327,10 @@ def main():
         if final_scan['personalPaths']:
             raise RuntimeError('Personal paths in final DMG')
         run('codesign', '--verify', '--deep', '--strict', mount / 'kownload.app')
+        embedded = json.loads((mount / 'kownload.app/Contents/Resources/build-manifest.json').read_text())
+        if embedded != manifest:
+            raise RuntimeError('Final image manifest differs from the sealed App')
+        verify_packaged_mcp(mount / 'kownload.app', embedded)
     finally:
         if os.path.ismount(mount):
             run('hdiutil', 'detach', mount)
@@ -237,13 +344,7 @@ def main():
         with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
             for member in tree.getmembers():
                 bundle.addfile(member, tree.extractfile(member) if member.isfile() else None)
-        module_data = (json.dumps(modules, indent=2) + '\n').encode()
-        member = tarfile.TarInfo('go-modules.json')
-        member.size = len(module_data)
-        bundle.addfile(member, io.BytesIO(module_data))
-        for m in modules:
-            meta = json.loads(output(go, 'mod', 'download', '-json', m['module'] + '@' + m['version'], cwd=source))
-            bundle.add(meta['Zip'], arcname='dependency-sources/go/' + pathlib.Path(meta['Zip']).name.replace('.zip', '') + '-' + hashlib.sha256(m['module'].encode()).hexdigest()[:12] + '.zip')
+        add_module_sources(bundle, modules, go, source, mcp_index)
     (destination / 'go-modules.json').write_text(json.dumps(modules, indent=2) + '\n')
     (destination / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     assets = [dmg, helper_zip, destination / source_name]

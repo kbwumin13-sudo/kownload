@@ -27,6 +27,7 @@ import '../../../../api/model/request.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../core/libgopeed_boot.dart';
 import '../../../../identity/app_identity.dart';
+import '../../../../identity/managed_ipc_directory.dart';
 import '../../../../database/database.dart';
 import '../../../../database/entity.dart';
 import '../../../../i18n/message.dart';
@@ -716,6 +717,9 @@ class AppController extends GetxController with WindowListener, TrayListener {
   }
 
   Future<StartConfig> _initDefaultStartConfig() async {
+    if (Util.isMacos()) {
+      await ensureManagedIpcDirectory(storageRoot: Util.getStorageDir());
+    }
     if (_defaultStartConfig != null) {
       return _defaultStartConfig!;
     }
@@ -733,7 +737,6 @@ class AppController extends GetxController with WindowListener, TrayListener {
     }
     _defaultStartConfig!.apiToken = '';
     if (Util.isMacos()) {
-      await File(_defaultStartConfig!.address).parent.create(recursive: true);
       if (utf8.encode(_defaultStartConfig!.address).length >= 104) {
         throw StateError('IPC 路径过长，请使用更短的数据目录');
       }
