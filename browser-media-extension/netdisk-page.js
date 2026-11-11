@@ -1,4 +1,13 @@
 // Selection layouts derived from hmjz100/LinkSwift (AGPL-3.0-or-later).
+// Upstream header: @author Hmjz100、油小猴; @copyright © 2022 hmjz100.
+// Pinned source: https://github.com/hmjz100/LinkSwift/blob/88f775d84a57764def07a32da9457cf3043ad11b/（改）网盘直链下载助手.user.js
+// Kownload modifications recorded 2026-10-14 (4d20c368ed29275dc8a5f52281aec8870fb4f8cb)
+// and 2026-10-26 (e97808ae3f06dae008f55f617a7b77dc48e85d13): bounded MAIN-world
+// collection, normalized records and credential selection/isolation.
+// Dates identify repository commits, not the original upstream creation date.
+// Fragment mapping and remaining attribution gaps: ../third_party/linkswift/NOTICE.md.
+// Original license text: ../third_party/linkswift/LICENSE.
+// Attribution notice updated 2026-11-11; executable code unchanged.
 // This function is serialized by chrome.scripting; keep every dependency inside it.
 // No network, cookie access, storage writes, event bridge or token refresh in MAIN.
 export function readNetdiskPage(provider, sourcePage) {
