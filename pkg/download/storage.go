@@ -214,6 +214,9 @@ func (b *BoltStorage) Get(bucket string, key string, v any) (bool, error) {
 	var data []byte
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucket))
+		if b == nil {
+			return nil
+		}
 		// Operation queries decode after View returns; retain an owned snapshot,
 		// not a page slice whose read transaction has already ended.
 		data = append([]byte(nil), b.Get([]byte(key))...)
