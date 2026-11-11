@@ -108,6 +108,23 @@ unavailable，不从原始error字符串猜测，不回显URL/headers/路径/设
 不改全局配置。受理/恢复/成功出口消费同一冻结的有效选项；不能后来套新全局值扩副作用。
 普通无SHA路径全部保持。Core若尚不能证明这一语义，应cap不支持，不先假装接受。
 
+### 服务器文件时间（planned）
+
+UseServerCtime保留原有效true/false语义，不永久静默降为false。首次R从实际HTTP有效config
+捕获内部bool `verifiedUseServerCtime`，保存在原member.Options.Extra的server-frozen执行map，
+位置同已冻结autoTorrent/autoExtract，不改caller raw或canonical/hash，不加Task字段或
+第二policy ledger。caller raw同名key不构成授权。同R先核raw意图再复用原bool，不随随后
+global切换；缺/坏须held，不从Task.Meta.Extra或当前config补。HTTP ParseOptExtra会丢未知key，
+runtime须从同View的R owned map读取，并保持原UseNumber。
+
+实际服务器Last-Modified已存为Task.Meta.Res.Files[0].Ctime（JSON名ctime），恢复复用该
+持久快照，无需新增record字段；nil沿原无操作。锁定setft在macOS/Linux只改atime/mtime，
+不直接设置creation；但本机APFS可随更早mtime自动下调birthtime，fd与legacy Chtimes真实
+对照相同，不能承诺birthtime不变或因选项名把它称为独立设置macOS创建时间。writer join后/hash前按同run/
+固定inode的fd adapter应用等价时间语义，禁止SHA模式downloadLoop对最终pathname的原
+SetFileTime副作用或任何路径fallback。fd adapter/Run Fence/实际流水线仍待相应owner验证；
+本段只冻结planned表达，不激活cap、不更改无SHA路径或build40产物。
+
 ## 三方持久状态与提交
 
 Task.completion={version:1,completionId:string}；ID必须非空且等于原R冻结的completionId及
