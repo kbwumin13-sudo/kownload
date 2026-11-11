@@ -12,7 +12,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/GopeedLab/gopeed/pkg/util"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -263,9 +262,9 @@ func extension(name string) string {
 	if !utf8.ValidString(name) || strings.ContainsAny(name, "/\\\x00") || name == "." || name == ".." {
 		return ""
 	}
-	// Reuse existing UTF-8 safe filename handling for the matching hint only.
-	// The original filename/tree remains the fetcher's responsibility.
-	name = util.SafeFilename(norm.NFC.String(name))
+	// Extract the original suffix before any filename truncation/sanitization
+	// can change it. The original name/tree remains the fetcher's responsibility.
+	name = norm.NFC.String(name)
 	ext := filepath.Ext(name)
 	if len(name) == len(ext) || !validExtension(ext) {
 		return ""

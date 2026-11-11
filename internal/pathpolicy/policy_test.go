@@ -231,6 +231,31 @@ func TestBasenameHintsDoNotCreateOrRewritePaths(t *testing.T) {
 	}
 }
 
+func TestLongSuffixUsesOriginalBasename(t *testing.T) {
+	suffix := ".mp4" + strings.Repeat("x", 20)
+	in := input()
+	in.Name = strings.Repeat("a", 96) + suffix
+	for _, tc := range []struct {
+		name   string
+		rules  []Rule
+		winner string
+	}{
+		{"does not fabricate short suffix", []Rule{rule("videos", ExtensionRule, Match{Extension: ".mp4"})}, ""},
+		{"matches original long suffix", []Rule{rule("long", ExtensionRule, Match{Extension: suffix})}, "long"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := in
+			d := evaluate(t, in, config(tc.rules...))
+			if d.RuleID != tc.winner || in != before {
+				t.Fatalf("original suffix %q: %+v", suffix, d)
+			}
+			if tc.winner == "" && d.Root != in.Path {
+				t.Fatalf("unmatched suffix changed root: %+v", d)
+			}
+		})
+	}
+}
+
 func TestInvalidConfigurationReturnsNoDecision(t *testing.T) {
 	valid := rule("one", ExtensionRule, Match{Extension: ".mp4"})
 	cases := []Config{
