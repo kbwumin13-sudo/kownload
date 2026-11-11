@@ -5,6 +5,7 @@ package rest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -32,7 +33,7 @@ type mcpBuiltFixture struct {
 	downloader   *download.Downloader
 }
 
-func newMCPBuiltFixture(t *testing.T, network, token string, web, webAuth bool) *mcpBuiltFixture {
+func newMCPBuiltFixture(t *testing.T, network, token string, web, webAuth bool, doneTotals ...int64) *mcpBuiltFixture {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "kmr-")
 	if err != nil {
@@ -54,9 +55,19 @@ func newMCPBuiltFixture(t *testing.T, network, token string, web, webAuth bool) 
 		Progress: &download.Progress{Downloaded: 42},
 		Meta:     &fetcher.FetcherMeta{Req: &base.Request{URL: "https://SYNTHETIC_PRIVATE.invalid"}, Opts: &base.Options{Path: root}, Res: &base.Resource{Size: 99}},
 	}
-	if err := seed.Put("task", task.ID, task); err != nil {
-		seed.Close()
-		t.Fatal(err)
+	tasks := []*download.Task{task}
+	for i, total := range doneTotals {
+		tasks = append(tasks, &download.Task{
+			ID: fmt.Sprintf("done_%d", i), Protocol: "http", Status: base.DownloadStatusDone,
+			CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+			Progress: &download.Progress{Downloaded: total}, Meta: task.Meta,
+		})
+	}
+	for _, seeded := range tasks {
+		if err := seed.Put("task", seeded.ID, seeded); err != nil {
+			seed.Close()
+			t.Fatal(err)
+		}
 	}
 	if err := seed.Close(); err != nil {
 		t.Fatal(err)
@@ -278,7 +289,7 @@ func TestMCPReadBuildServerCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal("mcporter required")
 	}
-	f := newMCPBuiltFixture(t, "unix", "SYNTHETIC_API_SECRET", true, true)
+	f := newMCPBuiltFixture(t, "unix", "SYNTHETIC_API_SECRET", true, true, 42, 0)
 	file := filepath.Join(f.root, "token")
 	if err := os.WriteFile(file, []byte("SYNTHETIC_API_SECRET\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -391,6 +402,32 @@ func TestMCPReadBuildServerCLI(t *testing.T) {
 		}
 	}
 	readFive()
+	// Exercise non-null v1 totals through the real stdio bridge and mcporter,
+	// including numeric zero (which must not become null/omitted).
+	for i, want := range []int64{42, 0} {
+		id := fmt.Sprintf("done_%d", i)
+		args := fmt.Sprintf(`{"id":%q}`, id)
+		for _, name := range []string{"get_task", "get_progress"} {
+			out := invoke("call", "kownload.kownload_"+name, "--args", args, "--output", "json")
+			var value map[string]any
+			if json.Unmarshal([]byte(out), &value) != nil {
+				t.Fatal("completed CLI result is not JSON")
+			}
+			if name == "get_task" {
+				if value["id"] != id || value["status"] != "done" {
+					t.Fatal("completed task identity/status mismatch")
+				}
+				var ok bool
+				value, ok = value["progress"].(map[string]any)
+				if !ok {
+					t.Fatal("completed task progress missing")
+				}
+			}
+			if value["totalBytes"] != float64(want) || value["downloadedBytes"] != float64(want) || value["phase"] != "done" {
+				t.Fatal("completed CLI total lost numeric value")
+			}
+		}
+	}
 	// Keep the same configuration and stable credential path. Each CLI call
 	// launches a new bridge, so replacing the file exercises restart semantics.
 	originalConfig, _ := os.ReadFile(config)
