@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -510,5 +511,103 @@ func TestScopedBatchConcurrentSameOperation(t *testing.T) {
 	waitStartupDone(t, d, id)
 	if len(d.GetTasks()) != 1 {
 		t.Fatal("concurrent Q duplicated a Task")
+	}
+}
+
+type scopedReadCost struct {
+	datasetReader
+	operations     int
+	decodedMembers int
+	tasks          int
+	links          int
+}
+
+func (r *scopedReadCost) Get(bucket, key string, out any) (bool, error) {
+	found, err := r.datasetReader.Get(bucket, key, out)
+	if err != nil || !found {
+		return found, err
+	}
+	switch bucket {
+	case bucketTaskOperations:
+		r.operations++
+		if record, ok := out.(*batchOperationRecord); ok {
+			r.decodedMembers += len(record.Members)
+		}
+	case bucketTask:
+		r.tasks++
+	case bucketOperationTasks:
+		r.links++
+	}
+	return found, nil
+}
+func scopedReadCostFixture(t *testing.T, n int) (*Downloader, AtomicStorage, BatchOperationRequest, string) {
+	t.Helper()
+	d, store, dir := scopedOperationFixture(t, false)
+	r := operationRequest("http://127.0.0.1:1/no-network", dir)
+	for i := 1; i < n; i++ {
+		r.Reqs = append(r.Reqs, &base.CreateTaskBatchItem{Req: &base.Request{URL: r.Reqs[0].Req.URL}, Opts: &base.Options{Path: dir, Name: fmt.Sprintf("item-%d.bin", i)}})
+	}
+	items, hash := scopedReservation(t, d, store, r)
+	for i, item := range items {
+		if _, err := d.createOperationMemberInDataset(store, r.OperationID, hash, i, item, scopedDatasetA); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d, store, r, hash
+}
+func TestScopedBatchSnapshotDecodesManifestOnce(t *testing.T) {
+	for _, n := range []int{8, 16, 32} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			_, store, r, _ := scopedReadCostFixture(t, n)
+			var cost *scopedReadCost
+			err := withDatasetReadView(store, scopedDatasetA, func(reader datasetReader) error {
+				cost = &scopedReadCost{datasetReader: reader}
+				snapshot, err := readOperationSnapshotFrom(cost, r.OperationID)
+				if err == nil && len(snapshot.tasks) != n {
+					t.Error("full snapshot lost associated tasks")
+				}
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("members=%d manifestReads=%d decodedMembers=%d taskReads=%d linkReads=%d", n, cost.operations, cost.decodedMembers, cost.tasks, cost.links)
+			if cost.operations != 1 || cost.decodedMembers != n || cost.tasks != n || cost.links != n {
+				t.Fatal("full same-view snapshot repeatedly decoded its manifest")
+			}
+		})
+	}
+}
+
+func TestScopedBatchMemberPublicationReadsOnlyTarget(t *testing.T) {
+	for _, n := range []int{8, 16, 32} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			_, store, r, hash := scopedReadCostFixture(t, n)
+			total := &scopedReadCost{}
+			for index := 0; index < n; index++ {
+				err := withDatasetReadView(store, scopedDatasetA, func(reader datasetReader) error {
+					cost := &scopedReadCost{datasetReader: reader}
+					task, err := readOperationMemberFrom(cost, r.OperationID, hash, index)
+					if err == nil && (task == nil || task.CreationOperation.Index != index) {
+						t.Error("target member missing or changed")
+					}
+					total.operations += cost.operations
+					total.decodedMembers += cost.decodedMembers
+					total.tasks += cost.tasks
+					total.links += cost.links
+					if cost.operations != 1 || cost.decodedMembers != n || cost.tasks != 1 || cost.links != 1 {
+						t.Errorf("M->Q read unrelated members: %+v", cost)
+					}
+					return err
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Logf("members=%d allQManifestReads=%d allQDecodedMembers=%d allQTaskReads=%d allQLinkReads=%d", n, total.operations, total.decodedMembers, total.tasks, total.links)
+			if total.operations != n || total.decodedMembers != n*n || total.tasks != n || total.links != n {
+				t.Fatal("avoidable cubic M->Q read amplification returned")
+			}
+		})
 	}
 }

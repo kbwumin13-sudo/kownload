@@ -302,13 +302,15 @@ func operationResultFrom(reader datasetReader, id string, r *batchOperationRecor
 		}
 		item.TaskPresent = &present
 		if present {
-			// A scoped Q snapshot must also bind the row key and this member,
-			// rather than accepting another valid Task copied into this row.
-			if tasks != nil && (task.ID != item.TaskID || task.CreationOperation == nil || *task.CreationOperation != operationRef(r, i)) {
-				item.Error = "association_conflict"
-				continue
+			var associationErr error
+			if tasks != nil {
+				// This manifest was already validated in the same view. Do not
+				// reload/decode it once for every created member.
+				associationErr = checkScopedMemberAssociation(reader, &task, r, i)
+			} else {
+				associationErr = checkCreationAssociationFrom(reader, &task)
 			}
-			if err := checkCreationAssociationFrom(reader, &task); err != nil {
+			if err := associationErr; err != nil {
 				if errors.Is(err, ErrOperationUnavailable) {
 					return result, err
 				}

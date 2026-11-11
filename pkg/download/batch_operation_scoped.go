@@ -114,18 +114,71 @@ func (d *Downloader) publishOperationMemberInDataset(expectedID, id, hash string
 		}
 		return err
 	}
-	snapshot, err := d.readScopedOperation(expectedID, id)
-	if err != nil {
+	var task *Task
+	err := withDatasetReadView(d.storage, expectedID, func(reader datasetReader) error {
+		var err error
+		task, err = readOperationMemberFrom(reader, id, hash, index)
 		return err
+	})
+	if err != nil {
+		return operationReadError(err)
 	}
-	stored := snapshot.record
-	if stored == nil || stored.RequestHash != hash || index < 0 || index >= len(stored.Members) {
-		return ErrOperationConflict
-	}
-	if stored.Members[index].State != "created" {
+	if task == nil {
 		return nil
 	}
-	return d.attachScopedOperationMember(snapshot, index, createdNow)
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	return d.attachOperationSnapshotLocked(task, createdNow)
+}
+
+// M->Q needs one member, not a full batch receipt. The manifest and target
+// Task/reverse link are still decoded under the same domain-checked view.
+func readOperationMemberFrom(reader datasetReader, id, hash string, index int) (*Task, error) {
+	record, err := loadOperationFrom(reader, id)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil || record.RequestHash != hash || index < 0 || index >= len(record.Members) {
+		return nil, ErrOperationConflict
+	}
+	member := record.Members[index]
+	if member.State != "created" {
+		return nil, nil
+	}
+	var task Task
+	present, err := reader.Get(bucketTask, member.TaskID, &task)
+	if err != nil {
+		return nil, ErrOperationUnavailable
+	}
+	if !present {
+		return nil, nil
+	} // explicit deletion remains historical
+	if err = checkScopedMemberAssociation(reader, &task, record, index); err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
+// record has already passed valid() in this view. This check is constant work
+// per member; it neither rescans nor reloads the complete manifest.
+func checkScopedMemberAssociation(reader datasetReader, task *Task, record *batchOperationRecord, index int) error {
+	if index < 0 || index >= len(record.Members) {
+		return ErrOperationConflict
+	}
+	member := record.Members[index]
+	ref := operationRef(record, index)
+	if member.State != "created" || task.ID != member.TaskID || task.CreationOperation == nil || *task.CreationOperation != ref {
+		return ErrOperationConflict
+	}
+	var link operationTaskLink
+	present, err := reader.Get(bucketOperationTasks, member.TaskID, &link)
+	if err != nil {
+		return ErrOperationUnavailable
+	}
+	if !present || link.TaskID != member.TaskID || link.Ref != ref {
+		return ErrOperationConflict
+	}
+	return nil
 }
 
 // operationMu spans this snapshot and Q, coordinating Delete/replay as before.
