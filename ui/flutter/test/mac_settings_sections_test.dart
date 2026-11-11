@@ -9,6 +9,8 @@ import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
+import 'package:gopeed/api/model/downloader_config.dart';
+import 'package:gopeed/app/modules/extension/controllers/extension_controller.dart';
 import 'package:gopeed/app/modules/extension/views/extension_view.dart';
 import 'package:gopeed/app/modules/setting/controllers/setting_controller.dart';
 import 'package:gopeed/app/modules/setting/views/setting_view.dart';
@@ -44,6 +46,11 @@ class _App extends AppController {
   }
 }
 
+class _Extensions extends ExtensionController {
+  @override
+  Future<void> loadInitialData() async {}
+}
+
 class _Settings extends SettingController {
   @override
   void fetchLatestVersion() {}
@@ -62,7 +69,8 @@ class _Box extends Fake implements Box {
   }
 }
 
-Future<_App> _mountSettings(WidgetTester tester, String section) async {
+Future<_App> _mountSettings(WidgetTester tester, String section,
+    {bool shell = false}) async {
   await tester.binding.setSurfaceSize(const Size(900, 700));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   Database.instance.box = _Box();
@@ -88,10 +96,18 @@ Future<_App> _mountSettings(WidgetTester tester, String section) async {
   Get.put<SettingController>(_Settings());
   MacPanel.settingsSection.value = section;
   MacPanel.presentation.value = 'settings';
+  Widget settings() => shell
+      ? const MacShell(selectedIndex: 2, child: SettingView())
+      : const SettingView();
   await tester.pumpWidget(
       GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
-    GetPage(name: '/', page: () => const SettingView()),
-    GetPage(name: Routes.SETTING, page: () => const SettingView()),
+    GetPage(name: '/', page: settings),
+    GetPage(name: Routes.SETTING, page: settings),
+    GetPage(
+        name: Routes.EXTENSION,
+        page: () => const ExtensionView(),
+        binding:
+            BindingsBuilder(() => Get.put<ExtensionController>(_Extensions()))),
   ]));
   await tester.pumpAndSettle();
   return app;
@@ -153,6 +169,204 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, null);
   });
+
+  Future<void> openEditor(WidgetTester tester, String section) async {
+    final button = find.byKey(ValueKey('settings-$section'));
+    if (button.evaluate().isEmpty) {
+      await _reveal(tester, '协议、媒体与代理');
+      await tester.tap(find.text('协议、媒体与代理'));
+      await tester.pumpAndSettle();
+    }
+    await tester.scrollUntilVisible(
+      button,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('settings-editor-$section')), findsOneWidget);
+  }
+
+  Finder field(String label) => find.descendant(
+        of: find
+            .ancestor(of: find.text(label), matching: find.byType(Row))
+            .first,
+        matching: find.byType(TextField),
+      );
+
+  testWidgets(
+    'ordinary navigation opens media editor; cancel keeps config; save preserves unknown protocols',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'general', shell: true);
+      final protocol = app.downloaderConfig.value.protocolConfig.toJson();
+      protocol['futureProvider'] = {
+        'value': [1, null, true],
+      };
+      protocol['media']['futureMedia'] = {'mode': 'keep'};
+      app.downloaderConfig.value.protocolConfig = ProtocolConfig.fromJson(
+        protocol,
+      );
+      final before = app.downloaderConfig.value.toJson();
+      await tester.tap(find.text('下载').first);
+      await tester.pumpAndSettle();
+      await openEditor(tester, 'media');
+      Finder resolver() => find.byWidgetPredicate(
+            (w) => w is TextField && w.controller?.text == '/custom/resolver',
+          );
+      await tester.enterText(resolver(), '/edited/resolver');
+      await tester.pumpAndSettle();
+      expect(find.text('yt-dlp：/edited/resolver'), findsOneWidget);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, isEmpty);
+      expect(app.downloaderConfig.value.toJson(), before);
+      await openEditor(tester, 'media');
+      await tester.enterText(resolver(), '/saved/resolver');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, hasLength(1));
+      final saved = app.savedConfigs.single;
+      expect(saved['protocolConfig']['media']['ytDlpPath'], '/saved/resolver');
+      expect(saved['protocolConfig']['media']['futureMedia'], {'mode': 'keep'});
+      expect(saved['protocolConfig']['futureProvider'], {
+        'value': [1, null, true],
+      });
+      expect(saved['protocolConfig']['netdisk'], {'connections': 7});
+      expect(saved['protocolConfig']['http']['userAgent'], 'preserved-agent');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final section in ['http', 'bt', 'ed2k']) {
+    testWidgets(
+      'ordinary download navigation edits and saves $section settings',
+      (tester) async {
+        if (!Platform.isMacOS) return;
+        final app = await _mountSettings(tester, 'general', shell: true);
+        final before = app.downloaderConfig.value.protocolConfig.toJson();
+        await tester.tap(find.text('下载').first);
+        await tester.pumpAndSettle();
+        await openEditor(tester, section);
+        final label = section == 'http'
+            ? 'User-Agent'
+            : section == 'bt'
+                ? 'port'
+                : 'ed2kTcpPort';
+        await tester.enterText(
+          field(label),
+          section == 'http' ? 'edited-agent' : '12345',
+        );
+        await tester.tap(find.text('保存').last);
+        await tester.pumpAndSettle();
+        final saved = app.savedConfigs.single['protocolConfig'];
+        expect(
+          saved[section][section == 'http' ? 'userAgent' : 'listenPort'],
+          section == 'http' ? 'edited-agent' : 12345,
+        );
+        expect(saved['media'], before['media']);
+        expect(saved['netdisk'], before['netdisk']);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'proxy editor saves only its draft and extension management remains reachable',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'general', shell: true);
+      final original = app.downloaderConfig.value.protocolConfig.toJson();
+      await tester.tap(find.text('下载').first);
+      await tester.pumpAndSettle();
+      await openEditor(tester, 'proxy');
+      expect(tester.takeException(), isNull, reason: 'proxy open layout');
+      await tester.tap(find.text('proxy').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButtonFormField<ProxyModeEnum>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('customProxy').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'custom proxy layout');
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('HTTP').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'server'),
+        '127.0.0.1',
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'port'),
+        '7890',
+      );
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'proxy save layout');
+      expect(app.savedConfigs.single['proxy']['host'], '127.0.0.1:7890');
+      expect(app.savedConfigs.single['protocolConfig'], original);
+      final button = find.byKey(const ValueKey('settings-extensions'));
+      await tester.scrollUntilVisible(
+        button,
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(find.byType(ExtensionView), findsOneWidget);
+      expect(app.savedConfigs, hasLength(1));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'failed section save keeps draft for retry and cancel restores live values',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'download');
+      await openEditor(tester, 'http');
+      await tester.enterText(field('User-Agent'), 'retry-agent');
+      app.failSave = true;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.text('更改尚未保存，请检查下载服务后重试。'), findsOneWidget);
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'preserved-agent',
+      );
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.controller?.text == 'retry-agent',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'preserved-agent',
+      );
+      expect(app.savedConfigs, hasLength(1));
+      await openEditor(tester, 'http');
+      await tester.enterText(field('User-Agent'), 'saved-after-retry');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      app.failSave = false;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('settings-editor-http')), findsNothing);
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'saved-after-retry',
+      );
+      expect(app.savedConfigs, hasLength(3));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('general offers ordinary preferences and the shared guide',
       (tester) async {
@@ -320,14 +534,16 @@ void main() {
   });
 
   for (final legacy in ['connections', 'advanced']) {
-    testWidgets('$legacy links land on general preferences', (tester) async {
+    testWidgets('$legacy links expose existing advanced settings in download',
+        (tester) async {
       if (!Platform.isMacOS) return;
       await _mountSettings(tester, legacy);
-      expect(find.text('使用习惯'), findsOneWidget);
-      expect(find.byType(MacHotKeyEditor), findsOneWidget);
+      expect(find.text('保存位置'), findsOneWidget);
+      await openEditor(tester, 'media');
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
       expect(find.byType(ExtensionView), findsNothing);
       expect(find.text('API'), findsNothing);
-      expect(find.textContaining('扩展'), findsNothing);
       expect(tester.takeException(), isNull);
     });
   }
@@ -389,6 +605,7 @@ void main() {
     expect(saved['protocolConfig']['media']['ytDlpPath'], '/custom/resolver');
     expect(saved['protocolConfig']['http']['userAgent'], 'preserved-agent');
     expect(saved['protocolConfig']['netdisk'], {'connections': 7});
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -427,6 +644,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(app.savedConfigs.length, 2);
     expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(find.text('重试'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -443,12 +661,14 @@ void main() {
     await tester.tap(find.byType(Switch).at(1));
     await tester.pump();
     expect(app.savedConfigs.length, 1);
+    await _reveal(tester, '正在保存…');
     expect(find.text('正在保存…'), findsOneWidget);
     hold.complete();
     await tester.pumpAndSettle();
     expect(app.savedConfigs.length, 2);
     expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
     expect(app.savedConfigs.last['extra']['autoStartTasks'], isTrue);
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

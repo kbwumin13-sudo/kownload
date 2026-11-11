@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:gopeed/app/views/copy_button.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as path;
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
@@ -38,7 +39,12 @@ const _padding = SizedBox(height: 10);
 final _divider = const Divider().paddingOnly(left: 10, right: 10);
 
 class SettingView extends GetView<SettingController> {
-  const SettingView({Key? key}) : super(key: key);
+  final String? section;
+  final Rx<DownloaderConfig>? draft;
+
+  const SettingView({Key? key, this.section, this.draft})
+      : assert((section == null) == (draft == null)),
+        super(key: key);
 
   // Helper function to get display name for a category
   static String _getCategoryDisplayName(DownloadCategory category) {
@@ -50,16 +56,23 @@ class SettingView extends GetView<SettingController> {
 
   @override
   Widget build(BuildContext context) {
-    if (Util.isMacos()) {
-      return const MacSettingsView(hotKeyEditor: MacHotKeyEditor());
+    if (Util.isMacos() && section == null) {
+      return MacSettingsView(
+          hotKeyEditor: const MacHotKeyEditor(),
+          editorBuilder: (section, draft) =>
+              SettingView(section: section, draft: draft));
     }
     final appController = Get.find<AppController>();
-    final downloaderCfg = appController.downloaderConfig;
+    final downloaderCfg = draft ?? appController.downloaderConfig;
     final startCfg = appController.startConfig;
 
     Timer? timer;
     Future<bool> debounceSave(
         {Future<String> Function()? check, bool needRestart = false}) {
+      if (draft != null) {
+        downloaderCfg.refresh();
+        return Future.value(true);
+      }
       var completer = Completer<bool>();
       timer?.cancel();
       timer = Timer(const Duration(milliseconds: 1000), () async {
@@ -671,20 +684,21 @@ class SettingView extends GetView<SettingController> {
           _padding,
           Row(
             children: [
-              OutlinedButtonLoading(
-                onPressed: () async {
-                  trackerUpdateController.start();
-                  try {
-                    await appController.trackerUpdate();
-                  } catch (e) {
-                    showErrorMessage('subscribeFail'.tr);
-                  } finally {
-                    trackerUpdateController.stop();
-                  }
-                },
-                controller: trackerUpdateController,
-                child: Text('update'.tr),
-              ),
+              if (draft == null)
+                OutlinedButtonLoading(
+                  onPressed: () async {
+                    trackerUpdateController.start();
+                    try {
+                      await appController.trackerUpdate();
+                    } catch (e) {
+                      showErrorMessage('subscribeFail'.tr);
+                    } finally {
+                      trackerUpdateController.stop();
+                    }
+                  },
+                  controller: trackerUpdateController,
+                  child: Text('update'.tr),
+                ),
               Expanded(
                 child: SwitchListTile(
                     controlAffinity: ListTileControlAffinity.leading,
@@ -726,7 +740,14 @@ class SettingView extends GetView<SettingController> {
         ),
         onChanged: (value) async {
           btExtConfig.customTrackers = Util.textToLines(value);
-          appController.refreshTrackers();
+          if (draft == null) {
+            appController.refreshTrackers();
+          } else {
+            btConfig.trackers = [
+              ...btExtConfig.subscribeTrackers,
+              ...btExtConfig.customTrackers
+            ];
+          }
 
           await debounceSave();
         },
@@ -1084,6 +1105,7 @@ class SettingView extends GetView<SettingController> {
         final mode = SizedBox(
           width: 150,
           child: DropdownButtonFormField<ProxyModeEnum>(
+            isExpanded: true,
             value: proxy.proxyMode,
             onChanged: (value) async {
               if (value != null && value != proxy.proxyMode) {
@@ -1115,7 +1137,11 @@ class SettingView extends GetView<SettingController> {
         final scheme = SizedBox(
           width: 150,
           child: DropdownButtonFormField<String>(
-            value: proxy.scheme,
+            isExpanded: true,
+            value: const ['http', 'socks5'].contains(proxy.scheme)
+                ? proxy.scheme
+                : null,
+            hint: Text(proxy.scheme.isEmpty ? 'scheme'.tr : proxy.scheme),
             onChanged: (value) async {
               if (value != null && value != proxy.scheme) {
                 proxy.scheme = value;
@@ -1721,6 +1747,60 @@ class SettingView extends GetView<SettingController> {
                   : CopyButton(logsDir()),
             ],
           ));
+    }
+
+    // The macOS sheet reuses these exact editors against an in-memory draft.
+    // No legacy page, startup option, or backend write runs inside the sheet.
+    if (section != null) {
+      return Obx(() {
+        final effectiveMedia = downloaderCfg.value.protocolConfig.media;
+        final rows = switch (section) {
+          'media' => [
+              buildYtDlpPath(),
+              buildFfmpegPath(),
+              buildJsRuntimePath(),
+              buildMediaConnections(),
+              Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('有效路径（按配置规则显示，尚未探测文件）'),
+                      Text(
+                          'yt-dlp：${effectiveMedia.ytDlpPath.isEmpty ? 'yt-dlp（PATH）' : effectiveMedia.ytDlpPath}',
+                          key: const ValueKey('effective-yt-dlp')),
+                      Text(
+                          'ffmpeg：${path.isAbsolute(effectiveMedia.ffmpegPath) ? effectiveMedia.ffmpegPath : '/opt/homebrew/bin/ffmpeg'}',
+                          key: const ValueKey('effective-ffmpeg')),
+                      Text(
+                          'Node：${effectiveMedia.jsRuntimePath == null ? '/opt/homebrew/bin/node（默认）' : path.isAbsolute(effectiveMedia.jsRuntimePath!) ? effectiveMedia.jsRuntimePath : '未显式启用，需填写绝对路径'}',
+                          key: const ValueKey('effective-node')),
+                    ]),
+              ),
+            ],
+          'http' => [
+              buildHttpUa(),
+              buildHttpConnections(),
+              buildHttpUseServerCtime()
+            ],
+          'bt' => [
+              buildBtListenPort(),
+              buildBtTrackerSubscribeUrls(),
+              buildBtTrackers(),
+              buildBtSeedConfig()
+            ],
+          'ed2k' => [
+              buildEd2kListenPort(),
+              buildEd2kUdpPort(),
+              buildEd2kServerAddr(),
+              buildEd2kServerMet(),
+              buildEd2kNodesDat()
+            ],
+          'proxy' => [buildProxy()],
+          _ => throw StateError('Unknown settings section: $section'),
+        };
+        return Column(mainAxisSize: MainAxisSize.min, children: rows);
+      });
     }
 
     return Obx(() {

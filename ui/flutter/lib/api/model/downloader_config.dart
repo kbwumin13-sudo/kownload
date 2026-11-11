@@ -27,8 +27,39 @@ class DownloaderConfig {
   Map<String, dynamic> toJson() => _$DownloaderConfigToJson(this);
 }
 
+// Protocols may add fields before this frontend exposes an editor for them.
+// Keep those JSON values in place while typed fields retain their normal rules.
+mixin _ProtocolFields {
+  Map<String, dynamic> _unrecognizedFields = {};
+
+  void _readProtocolFields(Map<String, dynamic> json, Set<String> known) {
+    _unrecognizedFields = {
+      for (final entry in json.entries)
+        if (!known.contains(entry.key))
+          entry.key: _copyProtocolValue(entry.value),
+    };
+  }
+
+  Map<String, dynamic> _writeProtocolFields(Map<String, dynamic> known) => {
+        for (final entry in _unrecognizedFields.entries)
+          entry.key: _copyProtocolValue(entry.value),
+        ...known,
+      };
+}
+
+dynamic _copyProtocolValue(dynamic value) {
+  if (value is Map) {
+    return {
+      for (final entry in value.entries)
+        entry.key: _copyProtocolValue(entry.value),
+    };
+  }
+  if (value is List) return value.map(_copyProtocolValue).toList();
+  return value;
+}
+
 @JsonSerializable(explicitToJson: true)
-class ProtocolConfig {
+class ProtocolConfig with _ProtocolFields {
   HttpConfig http = HttpConfig();
   BtConfig bt = BtConfig();
   Ed2kConfig ed2k = Ed2kConfig();
@@ -40,14 +71,18 @@ class ProtocolConfig {
 
   ProtocolConfig();
 
-  factory ProtocolConfig.fromJson(Map<String, dynamic>? json) =>
-      json == null ? ProtocolConfig() : _$ProtocolConfigFromJson(json);
+  factory ProtocolConfig.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return ProtocolConfig();
+    return _$ProtocolConfigFromJson(json)
+      .._readProtocolFields(json, {'http', 'bt', 'ed2k', 'media', 'netdisk'});
+  }
 
-  Map<String, dynamic> toJson() => _$ProtocolConfigToJson(this);
+  Map<String, dynamic> toJson() =>
+      _writeProtocolFields(_$ProtocolConfigToJson(this));
 }
 
 @JsonSerializable()
-class MediaConfig {
+class MediaConfig with _ProtocolFields {
   String ytDlpPath;
   String ffmpegPath;
   @JsonKey(includeIfNull: false)
@@ -61,14 +96,23 @@ class MediaConfig {
     this.connections = 4,
   });
 
-  factory MediaConfig.fromJson(Map<String, dynamic>? json) =>
-      json == null ? MediaConfig() : _$MediaConfigFromJson(json);
+  factory MediaConfig.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return MediaConfig();
+    return _$MediaConfigFromJson(json)
+      .._readProtocolFields(json, {
+        'ytDlpPath',
+        'ffmpegPath',
+        'jsRuntimePath',
+        'connections',
+      });
+  }
 
-  Map<String, dynamic> toJson() => _$MediaConfigToJson(this);
+  Map<String, dynamic> toJson() =>
+      _writeProtocolFields(_$MediaConfigToJson(this));
 }
 
 @JsonSerializable()
-class HttpConfig {
+class HttpConfig with _ProtocolFields {
   String userAgent;
   int connections;
   bool useServerCtime;
@@ -79,14 +123,21 @@ class HttpConfig {
     this.useServerCtime = false,
   });
 
-  factory HttpConfig.fromJson(Map<String, dynamic> json) =>
-      _$HttpConfigFromJson(json);
+  factory HttpConfig.fromJson(Map<String, dynamic> json) {
+    return _$HttpConfigFromJson(json)
+      .._readProtocolFields(json, {
+        'userAgent',
+        'connections',
+        'useServerCtime',
+      });
+  }
 
-  Map<String, dynamic> toJson() => _$HttpConfigToJson(this);
+  Map<String, dynamic> toJson() =>
+      _writeProtocolFields(_$HttpConfigToJson(this));
 }
 
 @JsonSerializable()
-class BtConfig {
+class BtConfig with _ProtocolFields {
   int listenPort;
   List<String> trackers;
   bool seedKeep;
@@ -101,14 +152,22 @@ class BtConfig {
     this.seedTime = 0,
   });
 
-  factory BtConfig.fromJson(Map<String, dynamic> json) =>
-      _$BtConfigFromJson(json);
+  factory BtConfig.fromJson(Map<String, dynamic> json) {
+    return _$BtConfigFromJson(json)
+      .._readProtocolFields(json, {
+        'listenPort',
+        'trackers',
+        'seedKeep',
+        'seedRatio',
+        'seedTime',
+      });
+  }
 
-  Map<String, dynamic> toJson() => _$BtConfigToJson(this);
+  Map<String, dynamic> toJson() => _writeProtocolFields(_$BtConfigToJson(this));
 }
 
 @JsonSerializable()
-class Ed2kConfig {
+class Ed2kConfig with _ProtocolFields {
   int listenPort;
   int udpPort;
   String serverAddr;
@@ -123,10 +182,20 @@ class Ed2kConfig {
     this.nodesDat = '',
   });
 
-  factory Ed2kConfig.fromJson(Map<String, dynamic>? json) =>
-      json == null ? Ed2kConfig() : _$Ed2kConfigFromJson(json);
+  factory Ed2kConfig.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return Ed2kConfig();
+    return _$Ed2kConfigFromJson(json)
+      .._readProtocolFields(json, {
+        'listenPort',
+        'udpPort',
+        'serverAddr',
+        'serverMet',
+        'nodesDat',
+      });
+  }
 
-  Map<String, dynamic> toJson() => _$Ed2kConfigToJson(this);
+  Map<String, dynamic> toJson() =>
+      _writeProtocolFields(_$Ed2kConfigToJson(this));
 }
 
 @JsonSerializable(explicitToJson: true)

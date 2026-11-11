@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../../api/model/downloader_config.dart';
+import '../../../routes/app_pages.dart';
 import '../../../../i18n/message.dart';
 import '../../../../identity/browser_connection.dart';
 import '../../../../identity/native_manifests.dart';
@@ -22,8 +24,11 @@ import '../controllers/setting_controller.dart';
 /// downloader configuration used by the other platforms and download engine.
 class MacSettingsView extends StatefulWidget {
   final Widget hotKeyEditor;
+  final Widget Function(String section, Rx<DownloaderConfig> draft)
+      editorBuilder;
 
-  const MacSettingsView({super.key, required this.hotKeyEditor});
+  const MacSettingsView(
+      {super.key, required this.hotKeyEditor, required this.editorBuilder});
 
   @override
   State<MacSettingsView> createState() => _MacSettingsViewState();
@@ -253,8 +258,9 @@ class _MacSettingsViewState extends State<MacSettingsView> {
     return ValueListenableBuilder<String>(
       valueListenable: MacPanel.settingsSection,
       builder: (context, requestedSection, _) {
-        // Old deep links continue to land on ordinary preferences.
-        final download = requestedSection == 'download';
+        // Legacy advanced links keep the existing editors reachable in Download.
+        final download = const ['download', 'advanced', 'connections']
+            .contains(requestedSection);
         if (requestedSection != 'browser') _browserFocused = false;
         if (requestedSection == 'browser' && !_browserFocused) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -561,6 +567,113 @@ class _MacSettingsViewState extends State<MacSettingsView> {
       });
   }
 
+  Future<void> _editSection(String section, String title) async {
+    if (_saving) return;
+    _settings.clearTap();
+    final draft =
+        DownloaderConfig.fromJson(_app.downloaderConfig.value.toJson()).obs;
+    var saving = false;
+    String? error;
+    final editor = widget.editorBuilder(section, draft);
+    await MacPanel.transient(() => showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(builder: (context, update) {
+              return PopScope(
+                canPop: !saving,
+                child: AlertDialog(
+                  key: ValueKey('settings-editor-$section'),
+                  title: Text(title),
+                  content: SizedBox(
+                    width: 600,
+                    child: SingleChildScrollView(
+                        child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AbsorbPointer(absorbing: saving, child: editor),
+                        if (error != null)
+                          Text(error!,
+                              style: TextStyle(
+                                  color: Theme.of(context).colorScheme.error)),
+                      ],
+                    )),
+                  ),
+                  actions: [
+                    TextButton(
+                        onPressed: saving
+                            ? null
+                            : () => Navigator.of(dialogContext).pop(),
+                        child: const Text('取消')),
+                    TextButton(
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                update(() {
+                                  saving = true;
+                                  error = null;
+                                });
+                                final config = _app.downloaderConfig.value;
+                                final restore =
+                                    _applySection(config, draft.value, section);
+                                try {
+                                  await _app.saveConfig();
+                                  _app.downloaderConfig.refresh();
+                                  if (dialogContext.mounted) {
+                                    Navigator.of(dialogContext).pop();
+                                  }
+                                  if (mounted) setState(() => _saved = true);
+                                } catch (_) {
+                                  restore();
+                                  if (dialogContext.mounted) {
+                                    update(() {
+                                      saving = false;
+                                      error = '更改尚未保存，请检查下载服务后重试。';
+                                    });
+                                  }
+                                }
+                              },
+                        child: Text(saving ? '正在保存…' : '保存')),
+                  ],
+                ),
+              );
+            })));
+    _settings.clearTap();
+  }
+
+  // Replace only the edited section. Unknown protocol fields and unrelated
+  // settings stay on the live configuration; a failed save restores the section.
+  VoidCallback _applySection(
+      DownloaderConfig config, DownloaderConfig draft, String section) {
+    switch (section) {
+      case 'media':
+        final previous = config.protocolConfig.media;
+        config.protocolConfig.media = draft.protocolConfig.media;
+        return () => config.protocolConfig.media = previous;
+      case 'http':
+        final previous = config.protocolConfig.http;
+        config.protocolConfig.http = draft.protocolConfig.http;
+        return () => config.protocolConfig.http = previous;
+      case 'bt':
+        final previous = config.protocolConfig.bt;
+        final extra = config.extra.bt;
+        config.protocolConfig.bt = draft.protocolConfig.bt;
+        config.extra.bt = draft.extra.bt;
+        return () {
+          config.protocolConfig.bt = previous;
+          config.extra.bt = extra;
+        };
+      case 'ed2k':
+        final previous = config.protocolConfig.ed2k;
+        config.protocolConfig.ed2k = draft.protocolConfig.ed2k;
+        return () => config.protocolConfig.ed2k = previous;
+      case 'proxy':
+        final previous = config.proxy;
+        config.proxy = draft.proxy;
+        return () => config.proxy = previous;
+      default:
+        throw StateError('Unknown settings section: $section');
+    }
+  }
+
   List<Widget> _download(BuildContext context) {
     final cfg = _app.downloaderConfig.value;
     final counts = <int>{1, 2, 3, 4, 5, 8, 10, 16};
@@ -608,6 +721,33 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         if (cfg.archive.autoExtract)
           _toggle(context, '解压成功后删除压缩包', cfg.archive.deleteAfterExtract,
               (value) => cfg.archive.deleteAfterExtract = value),
+      ]),
+      _group(context, '连接与工具', [
+        ExpansionTile(
+          key: const ValueKey('settings-advanced'),
+          title: const Text('协议、媒体与代理'),
+          children: [
+            for (final entry in const {
+              'media': '媒体下载工具',
+              'http': 'HTTP',
+              'bt': 'BitTorrent',
+              'ed2k': 'ED2K',
+              'proxy': '代理',
+            }.entries)
+              _row(context, entry.value,
+                  control: MacButton(
+                      key: ValueKey('settings-${entry.key}'),
+                      onPressed: _saving
+                          ? null
+                          : () => _editSection(entry.key, entry.value),
+                      child: const Text('编辑…'))),
+            _row(context, '下载扩展',
+                control: MacButton(
+                    key: const ValueKey('settings-extensions'),
+                    onPressed: () => Get.rootDelegate.toNamed(Routes.EXTENSION),
+                    child: const Text('管理…'))),
+          ],
+        ),
       ]),
       _group(context, '种子文件', [
         _toggle(context, '下载种子文件后自动添加任务', cfg.autoTorrent.enable,
