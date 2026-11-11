@@ -11,6 +11,7 @@ import pathlib
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -19,6 +20,58 @@ import zipfile
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MCP_HELPER = 'Contents/Helpers/kownload-mcp'
 MCP_SDK_VERSION = 'v1.7.0'
+
+
+def private_preview_storage(home, identity):
+    """Validate an existing private HOME without creating or changing paths."""
+    anchor = pathlib.Path('/private/tmp')
+    if (not home.is_absolute() or not home.is_relative_to(anchor) or
+            home == anchor or '..' in home.parts):
+        raise RuntimeError('Preview HOME must be canonical and private under /private/tmp')
+
+    def check_directory(path):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError('Preview HOME entries must be ordinary directories')
+        if info.st_uid != os.getuid():
+            raise RuntimeError('Preview HOME directory owner differs')
+        if info.st_mode & 0o022:
+            raise RuntimeError('Preview HOME directory permissions allow other writers')
+
+    current = anchor
+    for part in home.relative_to(anchor).parts:
+        current = current / part
+        try:
+            check_directory(current)
+        except OSError as error:
+            raise RuntimeError('Preview HOME cannot be inspected') from error
+    if home.resolve(strict=True) != home:
+        raise RuntimeError('Preview HOME must be canonical without links')
+    bundle_id = identity.get('bundleId')
+    if not isinstance(bundle_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]+', bundle_id):
+        raise RuntimeError('Invalid managed preview bundle identity')
+    storage = home / 'Library/Application Support' / bundle_id
+    directory_targets = [storage]
+    for key in ['apiSocket', 'hostSocket']:
+        value = identity.get(key)
+        if not isinstance(value, str) or not value or '\0' in value:
+            raise RuntimeError('Invalid preview socket path')
+        relative = pathlib.PurePosixPath(value)
+        if relative.is_absolute() or '..' in relative.parts:
+            raise RuntimeError('Invalid preview socket path')
+        # Darwin sockaddr_un.sun_path has 104 bytes including the trailing NUL.
+        if len(str(storage / relative).encode('utf-8')) > 103:
+            raise RuntimeError('Preview socket path exceeds the Darwin byte limit')
+        directory_targets.append((storage / relative).parent)
+    for target in directory_targets:
+        current = home
+        for part in target.relative_to(home).parts:
+            current = current / part
+            try:
+                check_directory(current)
+            except FileNotFoundError:
+                break
+    return storage
 
 
 def run(*args, cwd=None, env=None):
@@ -132,9 +185,13 @@ def main():
     p.add_argument('--ref', default='HEAD')
     p.add_argument('--output', type=pathlib.Path, required=True)
     p.add_argument('--preview', action='store_true')
+    p.add_argument('--preview-home', type=pathlib.Path,
+                   help='existing private /private/tmp HOME; requires --preview')
     p.add_argument('--migration-source', type=pathlib.Path)
     p.add_argument('--work-dir', type=pathlib.Path)
     a = p.parse_args()
+    if a.preview_home is not None and not a.preview:
+        p.error('--preview-home requires --preview')
     if a.migration_source and not a.preview:
         p.error('--migration-source is available only for isolated previews')
     if a.migration_source and (not a.migration_source.is_dir() or
@@ -146,6 +203,10 @@ def main():
     commit = output('git', 'rev-parse', '--verify', a.ref + '^{commit}', cwd=REPO)
     if commit != output('git', 'rev-parse', 'HEAD', cwd=REPO):
         raise RuntimeError('Check out the selected commit before building')
+    preview_storage_override = None
+    if a.preview_home is not None:
+        identity = json.loads((REPO / 'config/identity.json').read_text())
+        preview_storage_override = private_preview_storage(a.preview_home, identity)
     destination = a.output.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     work = a.work_dir.resolve() if a.work_dir else pathlib.Path(tempfile.mkdtemp(prefix='kownload-build-'))
@@ -229,7 +290,7 @@ def main():
              '--dart-define=KOWNLOAD_RELEASE_VERSION=' + release,
              '--dart-define=KOWNLOAD_SOURCE_COMMIT=' + commit,
              '--split-debug-info=' + str(work / 'symbols')]
-    preview_storage = work / 'preview-data'
+    preview_storage = preview_storage_override if preview_storage_override is not None else work / 'preview-data'
     if a.preview:
         flags.append('--dart-define=KOWNLOAD_PREVIEW_STORAGE=' + str(preview_storage))
         if a.migration_source:

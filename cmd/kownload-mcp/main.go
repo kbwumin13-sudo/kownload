@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,12 +21,19 @@ var version = "0.1.0-dev"
 func main() {
 	if err := run(); err != nil {
 		// Never print errors containing paths, request data or backend responses.
-		fmt.Fprintln(os.Stderr, "kownload-mcp: session ended")
+		if errors.Is(err, errInstallDurability) {
+			fmt.Fprintln(os.Stderr, "kownload-mcp: helper published; durability not confirmed")
+		} else {
+			fmt.Fprintln(os.Stderr, "kownload-mcp: session ended")
+		}
 		os.Exit(1)
 	}
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "install-helper" {
+		return runInstall(os.Args[2:])
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
