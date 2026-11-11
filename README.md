@@ -84,7 +84,9 @@ A keyboard-first download manager for macOS. Paste a link. Get back to what matt
 2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，选择「加载已解压的扩展程序」，加载助手目录。
 3. 到应用「设置 → 通用 → 浏览器助手」点「连接…」，完成浏览器连接。助手更新后，在扩展页点「重新加载」。
 
-当前 build 30 配套文件为 `kownload-browser-helper-0.4.2-1.9.3-kownload.18.zip`。[助手源码与说明 →](browser-media-extension/)
+当前 build 39 配套文件为 `kownload-browser-helper-0.6.0-1.9.3-kownload.26.zip`。[助手源码与说明 →](browser-media-extension/)
+
+在 App 设置中管理各浏览器的普通下载接管、可选确认与媒体偏好；首次启用普通下载接管需在浏览器中允许下载权限。使用本地助手接管时，关闭其他扩展的普通下载接管可避免冲突，其媒体功能可继续保留。可明确关联的 HTTP(S) GET 下载支持交接；POST、blob/data、无痕及关联不明的下载保留给浏览器。确认前浏览器已完成时保留原文件，不再新建第二份下载。
 
 ### 下载网页媒体
 
@@ -131,12 +133,20 @@ pipx install yt-dlp
 - **更新由你决定。** 应用只提示新版本并打开 Release 页面，手动下载和安装。
 - **没有内置在线扩展市场或安装统计上报。** 已安装扩展、配置、更新与手动 Git URL 安装继续保留。
 
-### 当前发行版 · build 30
+### 当前发行版 · build 39
 
-`1.9.3-kownload.18` · 浏览器助手 `0.4.2`。本版加入程序坞显示开关，并改用应用自己的系统文件选择框。[查看完整发行说明 →](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.18)
+`1.9.3-kownload.26` · 浏览器助手 `0.6.0`。[查看发行说明与下载 →](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.26)
+
+- 网页普通下载由自有助手接管：先持久保存待交接任务，确认原浏览器取消后才启动同一任务；回执丢失时按同一操作恢复，避免重复创建。
+- 设置、可选确认与媒体格式选择集中在 App 原生面板；下载按钮靠近输入框，任务进度、未完成与真实错误分别显示。
+- 浏览器资料授权读取失败时保留原书签，并明确提示重新允许；同一 Edge `Local State` 重新授权后的 App 资料枚举与两次重复读取已实测。
+
+Chrome/Edge 的本机未限速普通下载、持续失联与同任务恢复，以及 MP4/HLS 完整性已有实测。没有把这些结果扩大为所有网站或九盘完整通过；本轮新的真实网盘登录同步、目录到下载流程尚待样本，新的资料授权也未做冷重启验证。升级保留现有任务与配置。
+
+该版本安装包固定对应源码提交 `5babaf7b2a9e90a7a58e9ff690228c2664f430ea`；main 可另含纯文档更新。随 Release 提供相同提交的源码归档、构建清单与 SHA-256 校验文件。
 
 <details>
-<summary><strong>版本改动与验证记录</strong></summary>
+<summary><strong>历史 build 30 / 28 改动与验证记录</strong></summary>
 
 内核与 Release 版本 `1.9.3-kownload.18`，浏览器助手 0.4.2。
 
