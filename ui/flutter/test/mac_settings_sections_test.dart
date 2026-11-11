@@ -24,6 +24,7 @@ import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:gopeed/macos/mac_shell.dart';
 import 'package:gopeed/macos/mac_theme.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
 import 'package:gopeed/util/package_info.dart';
 import 'package:gopeed/util/util.dart';
 
@@ -55,12 +56,25 @@ class _App extends AppController {
   final savedStarts = <Map<String, String>>[];
   final trackerRequests = <List<String>>[];
   bool failTracker = false;
+  Completer<void>? trackerGate;
+  bool produceTrackerResult = false;
 
   @override
   Future<void> trackerUpdate() async {
     trackerRequests
         .add(List.of(downloaderConfig.value.extra.bt.trackerSubscribeUrls));
     if (failTracker) throw StateError('fixture update failed');
+    final captured = downloaderConfig.value.extra.bt;
+    await trackerGate?.future;
+    if (produceTrackerResult) {
+      captured.subscribeTrackers = ['fresh-auto'];
+      captured.lastTrackerUpdateTime = DateTime.utc(2026, 1, 2);
+      downloaderConfig.value.protocolConfig.bt.trackers = [
+        ...captured.subscribeTrackers,
+        ...captured.customTrackers
+      ];
+      await saveConfig();
+    }
   }
 
   Completer<void>? holdStartSave;
@@ -864,6 +878,98 @@ void main() {
     expect(find.text('未能更新 Tracker，请检查网络后重试。'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('review BT manual update and editor are mutually exclusive',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    await openEditor(tester, 'bt');
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    final btButton = find.byKey(const ValueKey('settings-bt'));
+    final oldOpen = tester.widget<MacButton>(btButton).onPressed!;
+    final updateButton = find.byKey(const ValueKey('settings-tracker-update'));
+    app.trackerGate = Completer<void>();
+    app.produceTrackerResult = true;
+    await tester.ensureVisible(updateButton);
+    await tester.pumpAndSettle();
+    await tester.tap(updateButton);
+    await tester.pumpAndSettle();
+    expect(tester.widget<MacButton>(btButton).onPressed, isNull);
+    oldOpen();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('settings-editor-bt')), findsNothing);
+    expect(app.trackerRequests, hasLength(1));
+    app.trackerGate!.complete();
+    await tester.pumpAndSettle();
+    expect(tester.widget<MacButton>(btButton).onPressed, isNotNull);
+    final oldUpdate = tester.widget<MacButton>(updateButton).onPressed!;
+    await openEditor(tester, 'bt');
+    oldUpdate();
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, hasLength(1));
+    await tester.tap(find.text('port').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(field('port'), '43210');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(
+        app.downloaderConfig.value.protocolConfig.bt.trackers, ['fresh-auto']);
+    expect(app.downloaderConfig.value.protocolConfig.bt.listenPort, 43210);
+    expect(app.savedConfigs, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final updateFirst in [true, false]) {
+    testWidgets(
+        'review BT automatic update finishing ${updateFirst ? 'before' : 'after'} save retains current objects and generated fields',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'download');
+      final current = app.downloaderConfig.value;
+      current.protocolConfig.bt = BtConfig.fromJson({
+        ...current.protocolConfig.bt.toJson(),
+        'futureBt': {'keep': true}
+      });
+      current.extra.bt.subscribeTrackers = ['old-auto'];
+      current.protocolConfig.bt.trackers = ['old-auto'];
+      final capturedExtra = current.extra.bt,
+          capturedProtocol = current.protocolConfig.bt;
+      app.trackerGate = Completer<void>();
+      app.produceTrackerResult = true;
+      final updating = app
+          .trackerUpdate(); // existing automatic path, not the manual button.
+      await openEditor(tester, 'bt');
+      await tester.tap(find.text('port').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(field('port'), '43210');
+      if (updateFirst) {
+        app.trackerGate!.complete();
+        await updating;
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      if (!updateFirst) {
+        app.trackerGate!.complete();
+        await updating;
+        await tester.pumpAndSettle();
+      }
+      expect(identical(current.extra.bt, capturedExtra), isTrue);
+      expect(identical(current.protocolConfig.bt, capturedProtocol), isTrue);
+      expect(current.protocolConfig.bt.trackers, ['fresh-auto']);
+      expect(current.extra.bt.subscribeTrackers, ['fresh-auto']);
+      expect(current.extra.bt.lastTrackerUpdateTime, DateTime.utc(2026, 1, 2));
+      expect(current.protocolConfig.bt.listenPort, 43210);
+      expect(current.protocolConfig.bt.toJson()['futureBt'], {'keep': true});
+      expect(app.savedConfigs.last['protocolConfig']['bt']['trackers'],
+          ['fresh-auto']);
+      expect(
+          app.savedConfigs.last['protocolConfig']['bt']['listenPort'], 43210);
+      expect(app.savedConfigs, hasLength(2));
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets(
       'remaining extra API waits for preference persistence before acknowledging',

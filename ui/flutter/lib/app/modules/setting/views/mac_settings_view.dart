@@ -21,6 +21,7 @@ import '../../app/controllers/app_controller.dart';
 import '../../../services/browser_integration.dart';
 import '../controllers/setting_controller.dart';
 import 'api_endpoint_draft.dart';
+import 'bt_settings_draft.dart';
 
 /// The macOS preferences expose everyday choices while preserving the full
 /// downloader configuration used by the other platforms and download engine.
@@ -46,6 +47,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   bool _saveRequested = false;
   bool _saved = false;
   bool _updatingTrackers = false;
+  bool _btEditing = false;
   String? _trackerNotice;
   static const _browserNames = {'chrome': 'Chrome', 'edge': 'Edge'};
   final _reports = <String, BrowserConnectionReport>{};
@@ -725,10 +727,14 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   }
 
   Future<void> _editSection(String section, String title) async {
-    if (_saving) return;
+    if (_saving || (section == 'bt' && (_updatingTrackers || _btEditing))) {
+      return;
+    }
+    if (section == 'bt') setState(() => _btEditing = true);
     _settings.clearTap();
     final draft =
         DownloaderConfig.fromJson(_app.downloaderConfig.value.toJson()).obs;
+    final btEdits = section == 'bt' ? BtSettingsDraft(draft.value) : null;
     var saving = false;
     String? error;
     final start = _app.startConfig.value;
@@ -785,8 +791,12 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                                   error = null;
                                 });
                                 final config = _app.downloaderConfig.value;
-                                final restore = _applySection(config,
-                                    draft.value, section, startDraft.value);
+                                final restore = _applySection(
+                                    config,
+                                    draft.value,
+                                    section,
+                                    startDraft.value,
+                                    btEdits);
                                 try {
                                   if (section == 'api') {
                                     await _app.saveStartConfig();
@@ -814,14 +824,16 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                   ],
                 ),
               );
-            })));
+            }))).whenComplete(() {
+      if (section == 'bt' && mounted) setState(() => _btEditing = false);
+    });
     _settings.clearTap();
   }
 
-  // Replace only the edited section. Unknown protocol fields and unrelated
-  // settings stay on the live configuration; a failed save restores the section.
+  // Apply only the selected section. BT patches changed user fields in place;
+  // generated/unknown fields remain current, including on a failed save.
   VoidCallback _applySection(DownloaderConfig config, DownloaderConfig draft,
-      String section, StartConfig startDraft) {
+      String section, StartConfig startDraft, BtSettingsDraft? btEdits) {
     switch (section) {
       case 'media':
         final previous = config.protocolConfig.media;
@@ -832,14 +844,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         config.protocolConfig.http = draft.protocolConfig.http;
         return () => config.protocolConfig.http = previous;
       case 'bt':
-        final previous = config.protocolConfig.bt;
-        final extra = config.extra.bt;
-        config.protocolConfig.bt = draft.protocolConfig.bt;
-        config.extra.bt = draft.extra.bt;
-        return () {
-          config.protocolConfig.bt = previous;
-          config.extra.bt = extra;
-        };
+        return btEdits!.apply(config, draft);
       case 'ed2k':
         final previous = config.protocolConfig.ed2k;
         config.protocolConfig.ed2k = draft.protocolConfig.ed2k;
@@ -894,7 +899,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   }
 
   Future<void> _updateTrackers() async {
-    if (_updatingTrackers || _saving) return;
+    if (_updatingTrackers || _btEditing || _saving) return;
     setState(() {
       _updatingTrackers = true;
       _trackerNotice = null;
@@ -978,16 +983,18 @@ class _MacSettingsViewState extends State<MacSettingsView> {
               _row(context, entry.value,
                   control: MacButton(
                       key: ValueKey('settings-${entry.key}'),
-                      onPressed: _saving
-                          ? null
-                          : () => _editSection(entry.key, entry.value),
+                      onPressed:
+                          _saving || (entry.key == 'bt' && _updatingTrackers)
+                              ? null
+                              : () => _editSection(entry.key, entry.value),
                       child: const Text('编辑…'))),
             _row(context, 'BT Tracker',
                 detail: _trackerNotice ?? '使用已保存的订阅，点击后才连接网络更新。',
                 control: MacButton(
                     key: const ValueKey('settings-tracker-update'),
-                    onPressed:
-                        _updatingTrackers || _saving ? null : _updateTrackers,
+                    onPressed: _updatingTrackers || _btEditing || _saving
+                        ? null
+                        : _updateTrackers,
                     child: Text(_updatingTrackers ? '正在更新…' : '立即更新'))),
             _row(context, '下载扩展',
                 control: MacButton(
