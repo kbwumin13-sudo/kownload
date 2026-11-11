@@ -122,6 +122,7 @@ func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 	f.doneCh = make(chan error, 1)
 	result := f.doneCh
 	f.boundRun.Store(&httpBoundRun{ctx: ctx})
+	f.readPublished.Store(nil)
 	return func() error {
 		select {
 		case err := <-result:
