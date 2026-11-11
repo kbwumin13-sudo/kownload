@@ -1062,35 +1062,40 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 	}()
 
 	var selected []*Task
-	if filter == nil || filter.IsEmpty() {
-		d.lock.Lock()
-		selected = append(selected, d.tasks...)
-		for _, task := range selected {
-			invalidateDeletedRun(task)
-		}
-		d.tasks = make([]*Task, 0)
-		d.clearQueueLocked()
-		d.lock.Unlock()
+	all := filter == nil || filter.IsEmpty()
+	if all {
+		selected = d.taskList()
 	} else {
 		selected = d.getTasksByFilter(filter)
-		d.lock.Lock()
-		for _, task := range selected {
-			invalidateDeletedRun(task)
-			for i, t := range d.tasks {
-				if t.ID == task.ID {
-					d.tasks = append(d.tasks[:i], d.tasks[i+1:]...)
-					break
-				}
-			}
-			for i, t := range d.waitTasks {
-				if t.ID == task.ID {
-					d.dequeueLocked(i)
-					break
-				}
+	}
+	if force {
+		if err := d.checkCompletionForceDelete(selected); err != nil {
+			return err
+		}
+	}
+	// Use exactly the preflight selection. A changing status filter or a new
+	// task must not add an unexamined member after force admission.
+	d.lock.Lock()
+	for _, task := range selected {
+		invalidateDeletedRun(task)
+		for i, current := range d.tasks {
+			if current == task {
+				d.tasks = append(d.tasks[:i], d.tasks[i+1:]...)
+				break
 			}
 		}
-		d.lock.Unlock()
+		for i, current := range d.waitTasks {
+			if current == task {
+				d.dequeueLocked(i)
+				break
+			}
+		}
 	}
+	if all && len(d.tasks) == 0 {
+		d.clearQueueLocked()
+	}
+	d.lock.Unlock()
+
 	for _, task := range selected {
 		invalidateTaskRecovery(task)
 		if err = d.doDelete(task, force); err != nil {
