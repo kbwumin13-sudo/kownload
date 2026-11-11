@@ -489,7 +489,9 @@ class _CreateViewState extends State<CreateView> {
           }
         }
       }
-    } else if (_urlController.text.isEmpty && !_clipboardChecked) {
+    } else if (!Util.isIsolatedPreview &&
+        _urlController.text.isEmpty &&
+        !_clipboardChecked) {
       _clipboardChecked = true;
       // read clipboard
       Clipboard.getData('text/plain').then((value) {

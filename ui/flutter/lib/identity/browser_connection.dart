@@ -1,50 +1,69 @@
 import 'dart:io';
 
-import 'package:path/path.dart' as path;
+import 'package:flutter/services.dart';
 
 import '../util/util.dart';
 import 'app_identity.dart';
 import 'native_manifests.dart';
+import 'native_manifest_service.dart';
 
-/// Browser routes as shown in Settings: null means the browser is not set up.
-Future<Map<String, ManifestRoute?>> browserRoutes() async {
-  final home = Platform.environment['HOME'] ?? '';
-  final executable = await Util.homePathJoin(AppIdentity.hostExecutable);
-  final routes = <String, ManifestRoute?>{};
-  for (final browser in switchableBrowsers) {
-    final directory = macNativeHostsDirectory(browser, home: home);
-    routes[browser] = directory == null ||
-            home.isEmpty ||
-            !await Directory(path.dirname(directory)).exists()
-        ? null
-        : await manifestRoute(directory, executable);
-  }
-  return routes;
-}
+export 'native_manifest_service.dart';
 
-/// The explicit connect action. Previews only write into the temporary
-/// directory named by KOWNLOAD_NATIVE_MANIFEST_DIR.
-Future<List<String>> connectBrowsers() async {
-  final executable = await Util.homePathJoin(AppIdentity.hostExecutable);
-  if (Util.isIsolatedPreview) {
-    await writeNativeManifests(
-        directory: macManifestDirectory('chrome',
-            preview: true,
-            home: '',
-            override: Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR']),
-        executable: executable,
-        backupDirectory: path.join(
-            Util.getStorageDir(), 'native-manifest-backups', 'preview'));
-    return const ['preview'];
-  }
-  return switchBrowserManifests(
-      home: Platform.environment['HOME'] ?? '',
-      executable: executable,
-      storageDir: Util.getStorageDir());
-}
+Future<NativeManifestService>? _currentService;
+Future<NativeManifestService> _service() => _currentService ??= () async {
+      return NativeManifestService(
+        home: Platform.environment['HOME'] ?? '',
+        storageDir: Util.getStorageDir(),
+        previewDirectory: Util.isIsolatedPreview
+            ? macManifestDirectory('chrome',
+                preview: true,
+                home: '',
+                override: Platform.environment['KOWNLOAD_NATIVE_MANIFEST_DIR'])
+            : null,
+        loadAsset: () async {
+          final value = await rootBundle
+              .load('assets/exec/${AppIdentity.hostExecutable}');
+          return value.buffer
+              .asUint8List(value.offsetInBytes, value.lengthInBytes);
+        },
+      );
+    }();
 
-/// Replaceable in widget tests so they never touch real browser directories.
+Future<BrowserConnectionReport> inspectBrowser(String browser) async =>
+    (await _service()).inspectBrowser(browser);
+Future<BrowserConnectionReport> connectBrowser(String browser,
+        {bool legacyCompatibility = false}) async =>
+    (await _service())
+        .connectBrowser(browser, legacyCompatibility: legacyCompatibility);
+Future<BrowserConnectionReport> restoreBrowser(String browser,
+        {String hostName = AppIdentity.hostName}) async =>
+    (await _service()).restoreBrowser(browser, hostName: hostName);
+
+/// Compatibility presentation only. This is disk configuration, never proof
+/// of the active browser connection; the new settings UI uses inspectBrowser.
+Future<Map<String, ManifestRoute?>> browserRoutes() async => {
+      for (final browser in switchableBrowsers)
+        browser: switch (await inspectBrowser(browser)) {
+          final report when report.configured => ManifestRoute.thisApp,
+          final report when !report.newHost.present => ManifestRoute.none,
+          _ => ManifestRoute.elsewhere,
+        },
+    };
+
+/// Old no-argument callers must choose a browser. Never guess Chrome or alter
+/// two browsers/aliases behind the old combined settings action.
+Future<List<String>> connectBrowsers() async =>
+    throw StateError('请选择 Chrome 或 Edge 后连接；未修改浏览器清单');
+
+/// Replaceable in widget tests; the services themselves only act on explicit
+/// paths and a single browser. No test mode or fake profile enters production.
 class BrowserConnection {
   static Future<Map<String, ManifestRoute?>> Function() routes = browserRoutes;
   static Future<List<String>> Function() connect = connectBrowsers;
+  static Future<BrowserConnectionReport> Function(String) inspect =
+      inspectBrowser;
+  static Future<BrowserConnectionReport> Function(String,
+      {bool legacyCompatibility}) connectOne = connectBrowser;
+  static Future<BrowserConnectionReport> Function(String, {String hostName})
+      restoreOne = restoreBrowser;
 }

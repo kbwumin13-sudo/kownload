@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {identityReply} from './fixtures/native.js';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
@@ -112,17 +113,19 @@ test('Alipan bare-domain redirect is explicitly bootstrapped without wildcard ho
 async function claimProbe(expectedURL,currentURL,{shareId=netdiskSourceIdentity(expectedURL)?.shareId,captureTokens,committedURL}={}) {
   const provider=detectNetdisk(currentURL),messages=[],scripts=[],ports=[];
   let handler,cookieReads=0;
+  const local={netdiskInstanceId:'url-instance'};
   const event={addListener(){}};
   const frameURL=new URL(committedURL || currentURL);frameURL.hash='';
   const chrome={
     webNavigation:{onCommitted:event,onHistoryStateUpdated:event,onReferenceFragmentUpdated:event,getFrame:async()=>({url:frameURL.href,documentId:'doc-a',documentLifecycle:'active'})},
     tabs:{onRemoved:event,get:async()=>({id:7,url:currentURL})},
-    storage:{local:{get:async()=>({netdiskInstanceId:'url-instance'}),set:async()=>{throw new Error('unexpected persistence');}}},
+    storage:{local:{get:async()=>structuredClone(local),set:async value=>{assert.deepEqual(Object.keys(value),['nativeBridgeBindingV1']);Object.assign(local,structuredClone(value));}}},
     cookies:{getAllCookieStores:async()=>[{id:'store-a',tabIds:[7]}],getAll:async()=>{cookieReads++;return [];}},
     scripting:{executeScript:async script=>{scripts.push(script);return [{frameId:0,documentId:'doc-a',result:{...readPage(provider.id,currentURL),...(captureTokens!==undefined?{tokens:captureTokens}:provider.id==='tcloud'?{tokens:{browserId:'initialized-browser'}}:{})}}];}},
     runtime:{id:'url-extension',onMessage:{addListener:fn=>{handler=fn;}},connectNative:()=>{
       let respond;
       const port={closed:false,onMessage:{addListener:fn=>{respond=fn;}},onDisconnect:{addListener(){}},disconnect(){this.closed=true;},postMessage(message){
+        const identity=identityReply(message,'url-extension');if(identity){queueMicrotask(()=>respond(identity));return;}
         messages.push(message);
         let response;
         if(message.method==='ping') response={code:0,data:true};

@@ -9,19 +9,40 @@ import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
+import 'package:gopeed/api/model/downloader_config.dart';
+import 'package:gopeed/core/common/start_config.dart';
+import 'package:gopeed/app/modules/extension/controllers/extension_controller.dart';
 import 'package:gopeed/app/modules/extension/views/extension_view.dart';
 import 'package:gopeed/app/modules/setting/controllers/setting_controller.dart';
 import 'package:gopeed/app/modules/setting/views/setting_view.dart';
 import 'package:gopeed/app/routes/app_pages.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/identity/browser_connection.dart';
-import 'package:gopeed/identity/native_manifests.dart';
+import 'package:gopeed/identity/app_identity.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_appearance.dart';
 import 'package:gopeed/macos/mac_shell.dart';
 import 'package:gopeed/macos/mac_theme.dart';
+import 'package:gopeed/macos/mac_widgets.dart';
 import 'package:gopeed/util/package_info.dart';
+import 'package:gopeed/util/util.dart';
+
+import 'support/onboarding_check_fixture.dart';
+
+ManifestEvidence _manifest(String name, String owner) => ManifestEvidence(name,
+    present: owner != 'missing',
+    schemaValid: owner != 'missing' && owner != 'unknown',
+    allowedOrigin: owner == 'this_app',
+    owner: owner,
+    executable: owner == 'this_app' ? 'current_asset' : 'unavailable');
+BrowserConnectionReport _report(String browser,
+        {String owner = 'missing',
+        String alias = 'foreign',
+        List<String> issues = const []}) =>
+    BrowserConnectionReport(browser, _manifest(AppIdentity.hostName, owner),
+        _manifest(AppIdentity.legacyHostName, alias),
+        issues: issues);
 
 class _App extends AppController {
   @override
@@ -32,6 +53,42 @@ class _App extends AppController {
   bool failSave = false;
   Completer<void>? holdSave;
   final savedConfigs = <Map<String, dynamic>>[];
+  final savedStarts = <Map<String, String>>[];
+  final trackerRequests = <List<String>>[];
+  bool failTracker = false;
+  Completer<void>? trackerGate;
+  bool produceTrackerResult = false;
+
+  @override
+  Future<void> trackerUpdate() async {
+    trackerRequests
+        .add(List.of(downloaderConfig.value.extra.bt.trackerSubscribeUrls));
+    if (failTracker) throw StateError('fixture update failed');
+    final captured = downloaderConfig.value.extra.bt;
+    await trackerGate?.future;
+    if (produceTrackerResult) {
+      captured.subscribeTrackers = ['fresh-auto'];
+      captured.lastTrackerUpdateTime = DateTime.utc(2026, 1, 2);
+      downloaderConfig.value.protocolConfig.bt.trackers = [
+        ...captured.subscribeTrackers,
+        ...captured.customTrackers
+      ];
+      await saveConfig();
+    }
+  }
+
+  Completer<void>? holdStartSave;
+
+  @override
+  Future<void> saveStartConfig() async {
+    savedStarts.add({
+      'network': startConfig.value.network,
+      'address': startConfig.value.address,
+      'apiToken': startConfig.value.apiToken
+    });
+    if (failSave) throw StateError('fixture preference write failed');
+    await holdStartSave?.future;
+  }
 
   @override
   Future<void> saveConfig() async {
@@ -42,6 +99,15 @@ class _App extends AppController {
     holdSave = null;
     await hold?.future;
   }
+}
+
+class _PolicyStart extends StartConfig {
+  final policy = 'fixture-policy-must-survive';
+}
+
+class _Extensions extends ExtensionController {
+  @override
+  Future<void> loadInitialData() async {}
 }
 
 class _Settings extends SettingController {
@@ -62,7 +128,8 @@ class _Box extends Fake implements Box {
   }
 }
 
-Future<_App> _mountSettings(WidgetTester tester, String section) async {
+Future<_App> _mountSettings(WidgetTester tester, String section,
+    {bool shell = false, Future<void> Function(String)? webhookTest}) async {
   await tester.binding.setSurfaceSize(const Size(900, 700));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   Database.instance.box = _Box();
@@ -88,10 +155,20 @@ Future<_App> _mountSettings(WidgetTester tester, String section) async {
   Get.put<SettingController>(_Settings());
   MacPanel.settingsSection.value = section;
   MacPanel.presentation.value = 'settings';
+  Widget settings() {
+    final view = SettingView(webhookTest: webhookTest);
+    return shell ? MacShell(selectedIndex: 2, child: view) : view;
+  }
+
   await tester.pumpWidget(
       GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
-    GetPage(name: '/', page: () => const SettingView()),
-    GetPage(name: Routes.SETTING, page: () => const SettingView()),
+    GetPage(name: '/', page: settings),
+    GetPage(name: Routes.SETTING, page: settings),
+    GetPage(
+        name: Routes.EXTENSION,
+        page: () => const ExtensionView(),
+        binding:
+            BindingsBuilder(() => Get.put<ExtensionController>(_Extensions()))),
   ]));
   await tester.pumpAndSettle();
   return app;
@@ -138,20 +215,942 @@ void main() {
     Get.testMode = true;
     // Settings must never read or write the real browser directories.
     BrowserConnection.routes =
-        () async => {'chrome': ManifestRoute.none, 'edge': null};
-    BrowserConnection.connect = () async => throw StateError('unexpected');
+        () async => throw StateError('combined presentation forbidden');
+    BrowserConnection.connect =
+        () async => throw StateError('combined registration forbidden');
+    BrowserConnection.inspect = (browser) async => _report(browser);
+    BrowserConnection.connectOne = (browser,
+            {bool legacyCompatibility = false}) async =>
+        throw StateError('unexpected registration');
+    BrowserConnection.restoreOne = (browser,
+            {String hostName = AppIdentity.hostName}) async =>
+        throw StateError('unexpected restore');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, (call) async => null);
   });
   tearDown(() {
     BrowserConnection.routes = browserRoutes;
     BrowserConnection.connect = connectBrowsers;
+    BrowserConnection.inspect = inspectBrowser;
+    BrowserConnection.connectOne = connectBrowser;
+    BrowserConnection.restoreOne = restoreBrowser;
     Get.reset();
     Get.routerDelegate = null;
     Get.routeInformationParser = null;
     MacPanel.settingsSection.value = 'general';
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(MacPanel.channel, null);
+  });
+
+  Future<void> openEditor(WidgetTester tester, String section) async {
+    final button = find.byKey(ValueKey('settings-$section'));
+    if (button.evaluate().isEmpty) {
+      await _reveal(tester, '协议、媒体与代理');
+      await tester.tap(find.text('协议、媒体与代理'));
+      await tester.pumpAndSettle();
+    }
+    await tester.scrollUntilVisible(
+      button,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('settings-editor-$section')), findsOneWidget);
+  }
+
+  Finder field(String label) => find.descendant(
+        of: find
+            .ancestor(of: find.text(label), matching: find.byType(Row))
+            .first,
+        matching: find.byType(TextField),
+      );
+
+  testWidgets(
+    'ordinary navigation opens media editor; cancel keeps config; save preserves unknown protocols',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'general', shell: true);
+      final protocol = app.downloaderConfig.value.protocolConfig.toJson();
+      protocol['futureProvider'] = {
+        'value': [1, null, true],
+      };
+      protocol['media']['futureMedia'] = {'mode': 'keep'};
+      app.downloaderConfig.value.protocolConfig = ProtocolConfig.fromJson(
+        protocol,
+      );
+      final before = app.downloaderConfig.value.toJson();
+      await tester.tap(find.text('下载').first);
+      await tester.pumpAndSettle();
+      await openEditor(tester, 'media');
+      Finder resolver() => find.byWidgetPredicate(
+            (w) => w is TextField && w.controller?.text == '/custom/resolver',
+          );
+      await tester.enterText(resolver(), '/edited/resolver');
+      await tester.pumpAndSettle();
+      expect(find.text('yt-dlp：/edited/resolver'), findsOneWidget);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, isEmpty);
+      expect(app.downloaderConfig.value.toJson(), before);
+      await openEditor(tester, 'media');
+      await tester.enterText(resolver(), '/saved/resolver');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, hasLength(1));
+      final saved = app.savedConfigs.single;
+      expect(saved['protocolConfig']['media']['ytDlpPath'], '/saved/resolver');
+      expect(saved['protocolConfig']['media']['futureMedia'], {'mode': 'keep'});
+      expect(saved['protocolConfig']['futureProvider'], {
+        'value': [1, null, true],
+      });
+      expect(saved['protocolConfig']['netdisk'], {'connections': 7});
+      expect(saved['protocolConfig']['http']['userAgent'], 'preserved-agent');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final section in ['http', 'bt', 'ed2k']) {
+    testWidgets(
+      'ordinary download navigation edits and saves $section settings',
+      (tester) async {
+        if (!Platform.isMacOS) return;
+        final app = await _mountSettings(tester, 'general', shell: true);
+        final before = app.downloaderConfig.value.protocolConfig.toJson();
+        await tester.tap(find.text('下载').first);
+        await tester.pumpAndSettle();
+        await openEditor(tester, section);
+        final label = section == 'http'
+            ? 'User-Agent'
+            : section == 'bt'
+                ? 'port'
+                : 'ed2kTcpPort';
+        await tester.enterText(
+          field(label),
+          section == 'http' ? 'edited-agent' : '12345',
+        );
+        await tester.tap(find.text('保存').last);
+        await tester.pumpAndSettle();
+        final saved = app.savedConfigs.single['protocolConfig'];
+        expect(
+          saved[section][section == 'http' ? 'userAgent' : 'listenPort'],
+          section == 'http' ? 'edited-agent' : 12345,
+        );
+        expect(saved['media'], before['media']);
+        expect(saved['netdisk'], before['netdisk']);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'proxy editor saves only its draft and extension management remains reachable',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'general', shell: true);
+      final original = app.downloaderConfig.value.protocolConfig.toJson();
+      await tester.tap(find.text('下载').first);
+      await tester.pumpAndSettle();
+      await openEditor(tester, 'proxy');
+      expect(tester.takeException(), isNull, reason: 'proxy open layout');
+      await tester.tap(find.text('proxy').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButtonFormField<ProxyModeEnum>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('customProxy').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'custom proxy layout');
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('HTTP').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'server'),
+        '127.0.0.1',
+      );
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'port'),
+        '7890',
+      );
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: 'proxy save layout');
+      expect(app.savedConfigs.single['proxy']['host'], '127.0.0.1:7890');
+      expect(app.savedConfigs.single['protocolConfig'], original);
+      final button = find.byKey(const ValueKey('settings-extensions'));
+      await tester.scrollUntilVisible(
+        button,
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(find.byType(ExtensionView), findsOneWidget);
+      expect(app.savedConfigs, hasLength(1));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'failed section save keeps draft for retry and cancel restores live values',
+    (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'download');
+      await openEditor(tester, 'http');
+      await tester.enterText(field('User-Agent'), 'retry-agent');
+      app.failSave = true;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.text('更改尚未保存，请检查下载服务后重试。'), findsOneWidget);
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'preserved-agent',
+      );
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.controller?.text == 'retry-agent',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'preserved-agent',
+      );
+      expect(app.savedConfigs, hasLength(1));
+      await openEditor(tester, 'http');
+      await tester.enterText(field('User-Agent'), 'saved-after-retry');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      app.failSave = false;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('settings-editor-http')), findsNothing);
+      expect(
+        app.downloaderConfig.value.protocolConfig.http.userAgent,
+        'saved-after-retry',
+      );
+      expect(app.savedConfigs, hasLength(3));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  Future<String> apiStorage(WidgetTester tester) async {
+    final root = Directory('/tmp').createTempSync('settings-api-review-');
+    await tester.runAsync(() => Util.initStorageDir(previewStorage: root.path));
+    addTearDown(() async {
+      await Util.initStorageDir();
+      await root.delete(recursive: true);
+    });
+    return '${root.path}/${AppIdentity.apiSocket}';
+  }
+
+  Future<void> selectApiProtocol(WidgetTester tester, String label) async {
+    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label).last);
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> nestedEntry(WidgetTester tester, String value,
+      {bool chooseScript = false}) async {
+    await tester.tap(find.widgetWithText(OutlinedButton, 'add').last);
+    await tester.pumpAndSettle();
+    if (chooseScript) {
+      await tester.tap(find.byIcon(Icons.folder_open).last);
+      await tester.pumpAndSettle();
+    } else {
+      final nested = find.byType(AlertDialog).last;
+      await tester.enterText(
+          find
+              .descendant(of: nested, matching: find.byType(TextFormField))
+              .last,
+          value);
+    }
+    await tester.tap(find.text('confirm').last);
+    await tester.pumpAndSettle();
+  }
+
+  for (final scheme in ['https', 'future-proxy']) {
+    testWidgets('remaining proxy preserves existing $scheme selection',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'download');
+      app.downloaderConfig.value.proxy
+        ..proxyMode = ProxyModeEnum.customProxy
+        ..scheme = scheme;
+      await openEditor(tester, 'proxy');
+      await tester.tap(find.text('proxy').last);
+      await tester.pumpAndSettle();
+      final dropdown = tester.widget<DropdownButtonFormField<String>>(
+          find.byType(DropdownButtonFormField<String>));
+      expect(dropdown.initialValue, scheme == 'https' ? scheme : null);
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs.single['proxy']['scheme'], scheme);
+      expect(app.downloaderConfig.value.proxy.scheme, scheme);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'remaining settings API saves three fields on the same current start object',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'general', shell: true);
+    final current = _PolicyStart()
+      ..network = 'tcp'
+      ..address = '127.0.0.1:9999'
+      ..apiToken = 'fixture-original';
+    app.startConfig.value = current;
+    final json = app.downloaderConfig.value.protocolConfig.toJson();
+    json['futureProvider'] = {
+      'unknown': [1, null, 'kept']
+    };
+    json['http']['futureHttp'] = {'rule': false};
+    app.downloaderConfig.value.protocolConfig = ProtocolConfig.fromJson(json);
+    final original = app.downloaderConfig.value.toJson();
+    await tester.tap(find.text('下载').first);
+    await tester.pumpAndSettle();
+    await openEditor(tester, 'api');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'IP'), '127.0.0.2');
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '0');
+    await tester.pumpAndSettle();
+    await tester.enterText(field('apiToken'), 'fixture-new');
+    expect(tester.widget<TextField>(field('apiToken')).obscureText, isTrue);
+    expect(app.savedConfigs, isEmpty);
+    expect(current.address, '127.0.0.1:9999');
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts, isEmpty);
+    expect(current.apiToken, 'fixture-original');
+    await openEditor(tester, 'api');
+    await tester.enterText(field('apiToken'), 'fixture-saved');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts, [
+      {
+        'network': 'tcp',
+        'address': '127.0.0.1:9999',
+        'apiToken': 'fixture-saved'
+      }
+    ]);
+    expect(identical(app.startConfig.value, current), isTrue);
+    expect(current.policy, 'fixture-policy-must-survive');
+    expect(app.savedConfigs, isEmpty);
+    expect(app.downloaderConfig.value.toJson(), original);
+    expect(app.trackerRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'remaining settings API failure restores current values and keeps retry draft',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    final unixAddress = await apiStorage(tester);
+    final current = app.startConfig.value;
+    final original = (current.network, current.address, current.apiToken);
+    await openEditor(tester, 'api');
+    await tester.enterText(field('apiToken'), 'fixture-retry');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.widgetWithText(TextFormField, 'IP'), '127.0.0.9');
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '12345');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unix').last);
+    await tester.pumpAndSettle();
+    app.failSave = true;
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect((current.network, current.address, current.apiToken), original);
+    expect(identical(current, app.startConfig.value), isTrue);
+    expect(find.text('启动设置保存未完成，请重试。'), findsOneWidget);
+    expect(app.savedStarts.single, {
+      'network': 'unix',
+      'address': unixAddress,
+      'apiToken': 'fixture-retry'
+    });
+    expect(app.savedConfigs, isEmpty);
+    app.failSave = false;
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(current.apiToken, 'fixture-retry');
+    expect(current.network, 'unix');
+    expect(current.address, unixAddress);
+    expect(app.savedStarts, hasLength(2));
+    expect(app.savedStarts.last, app.savedStarts.first);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final network in ['unix', 'tcp']) {
+    testWidgets(
+        'review API switches $network endpoint before saving without address edits',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final unixAddress = await apiStorage(tester);
+      final app = await _mountSettings(tester, 'download');
+      app.startConfig.value.network = network;
+      app.startConfig.value.address =
+          network == 'unix' ? unixAddress : '127.0.0.1:9999';
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      await selectApiProtocol(tester, network == 'unix' ? 'TCP' : 'Unix');
+      if (network == 'unix') {
+        expect(
+            tester
+                .widget<TextFormField>(find.widgetWithText(TextFormField, 'IP'))
+                .controller!
+                .text,
+            '127.0.0.1');
+        expect(
+            tester
+                .widget<TextFormField>(
+                    find.widgetWithText(TextFormField, 'port'))
+                .controller!
+                .text,
+            '0');
+      } else {
+        expect(
+            tester
+                .widget<TextFormField>(
+                    find.byKey(const ValueKey('api-unix-address')))
+                .controller!
+                .text,
+            unixAddress);
+      }
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedStarts.single['network'],
+          network == 'unix' ? 'tcp' : 'unix');
+      expect(app.savedStarts.single['address'],
+          network == 'unix' ? '127.0.0.1:0' : unixAddress);
+      expect(app.savedConfigs, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'review API preserves TCP draft while Unix is read only and managed',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final unixAddress = await apiStorage(tester);
+    final app = await _mountSettings(tester, 'download');
+    app.startConfig.value.network = 'unix';
+    app.startConfig.value.address = unixAddress;
+    await openEditor(tester, 'api');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextField>(find.descendant(
+                of: find.byKey(const ValueKey('api-unix-address')),
+                matching: find.byType(TextField)))
+            .readOnly,
+        isTrue);
+    await selectApiProtocol(tester, 'TCP');
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '43210');
+    await tester.pumpAndSettle();
+    await selectApiProtocol(tester, 'Unix');
+    expect(
+        tester
+            .widget<TextFormField>(
+                find.byKey(const ValueKey('api-unix-address')))
+            .controller!
+            .text,
+        unixAddress);
+    await selectApiProtocol(tester, 'TCP');
+    expect(
+        tester
+            .widget<TextFormField>(find.widgetWithText(TextFormField, 'port'))
+            .controller!
+            .text,
+        '43210');
+    await tester.enterText(find.widgetWithText(TextFormField, 'port'), '');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('TCP 地址须包含'), findsOneWidget);
+    expect(app.savedStarts, isEmpty);
+    await selectApiProtocol(tester, 'Unix');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(
+        app.savedStarts, isEmpty); // returned to the original pair: no write.
+    expect(app.startConfig.value.address, unixAddress);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'review Unix legacy file path is read only and unchanged Save or Cancel writes nothing',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final canonical = await apiStorage(tester);
+    final original = File('${File(canonical).parent.parent.path}/existing.txt')
+      ..writeAsStringSync('user bytes must survive');
+    final app = await _mountSettings(tester, 'download');
+    app.startConfig.value.network = 'unix';
+    app.startConfig.value.address = original.path;
+    for (final action in ['取消', '保存']) {
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      final field = tester.widget<TextFormField>(
+          find.byKey(const ValueKey('api-unix-address')));
+      expect(
+          tester
+              .widget<TextField>(find.descendant(
+                  of: find.byKey(const ValueKey('api-unix-address')),
+                  matching: find.byType(TextField)))
+              .readOnly,
+          isTrue);
+      expect(field.controller!.text, original.path);
+      expect(find.textContaining('已有自定义地址仅展示、未验证'), findsOneWidget);
+      await tester.tap(find.text(action).last);
+      await tester.pumpAndSettle();
+      expect(app.startConfig.value.address, original.path);
+      expect(app.savedStarts, isEmpty);
+      expect(app.savedConfigs, isEmpty);
+      expect(original.readAsStringSync(), 'user bytes must survive');
+    }
+    await openEditor(tester, 'api');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('api-use-managed-unix')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts.single['address'], canonical);
+    expect(original.readAsStringSync(), 'user bytes must survive');
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final kind in ['file', 'directory', 'link']) {
+    testWidgets(
+        'review Unix occupied managed $kind target is never saved or deleted',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final canonical = await apiStorage(tester);
+      File(canonical).parent.createSync(recursive: true);
+      final bytes = [70, 0, 71, 255];
+      final original =
+          File('${File(canonical).parent.parent.path}/original.bin')
+            ..writeAsBytesSync(bytes);
+      if (kind == 'file') File(canonical).writeAsBytesSync(bytes);
+      if (kind == 'directory') Directory(canonical).createSync();
+      if (kind == 'link') Link(canonical).createSync(original.path);
+      final type = FileSystemEntity.typeSync(canonical, followLinks: false);
+      final app = await _mountSettings(tester, 'download');
+      final originalAddress = app.startConfig.value.address;
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      await selectApiProtocol(tester, 'Unix');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('IPC 路径已有非 socket 对象'), findsOneWidget);
+      expect(app.savedStarts, isEmpty);
+      expect(app.startConfig.value.address, originalAddress);
+      expect(FileSystemEntity.typeSync(canonical, followLinks: false), type);
+      if (kind == 'file') expect(File(canonical).readAsBytesSync(), bytes);
+      if (kind == 'link') expect(Link(canonical).targetSync(), original.path);
+      expect(original.readAsBytesSync(), bytes);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'remaining settings Webhook edits stay local and only explicit test invokes its substitute',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final calls = <String>[];
+    var failWebhook = false;
+    final app =
+        await _mountSettings(tester, 'download', webhookTest: (url) async {
+      calls.add(url);
+      if (failWebhook) throw StateError('fixture webhook failed');
+    });
+    final protocol = app.downloaderConfig.value.protocolConfig.toJson();
+    await openEditor(tester, 'webhook');
+    await tester.tap(find.text('webhook').last);
+    await tester.pumpAndSettle();
+    await nestedEntry(tester, 'https://fixture.invalid/hook');
+    expect(app.savedConfigs, isEmpty);
+    expect(app.downloaderConfig.value.webhook.urls, isEmpty);
+    expect(calls, isEmpty);
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs, isEmpty);
+    await openEditor(tester, 'webhook');
+    await tester.tap(find.text('webhook').last);
+    await tester.pumpAndSettle();
+    await nestedEntry(tester, 'https://fixture.invalid/hook');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs.single['webhook']['urls'],
+        ['https://fixture.invalid/hook']);
+    expect(app.savedConfigs.single['protocolConfig'], protocol);
+    expect(calls, isEmpty);
+    await openEditor(tester, 'webhook');
+    await tester.tap(find.text('webhook').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('edit').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('webhookTest').last);
+    await tester.pumpAndSettle();
+    expect(calls, ['https://fixture.invalid/hook']);
+    expect(find.text('webhookTestSuccess'), findsOneWidget);
+    failWebhook = true;
+    await tester.tap(find.text('webhookTest').last);
+    await tester.pumpAndSettle();
+    expect(calls, hasLength(2));
+    expect(find.text('webhookTestFail'), findsOneWidget);
+    await tester.tap(find.text('cancel').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs, hasLength(1));
+    expect(app.trackerRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'remaining settings completion script picker and nested edits never execute or save before apply',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    var pickerCalls = 0;
+    var webhookCalls = 0;
+    final app =
+        await _mountSettings(tester, 'download', webhookTest: (_) async {
+      webhookCalls++;
+    });
+    final before = app.downloaderConfig.value.protocolConfig.toJson();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async {
+      if (call.method == 'chooseFiles') {
+        pickerCalls++;
+        return ['/tmp/fixture-not-executed.sh'];
+      }
+      return null;
+    });
+    await openEditor(tester, 'script');
+    await tester.tap(find.text('script').last);
+    await tester.pumpAndSettle();
+    expect(pickerCalls, 0);
+    await nestedEntry(tester, '', chooseScript: true);
+    expect(pickerCalls, 1);
+    expect(app.savedConfigs, isEmpty);
+    expect(app.downloaderConfig.value.script.paths, isEmpty);
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs, isEmpty);
+    await openEditor(tester, 'script');
+    await tester.tap(find.text('script').last);
+    await tester.pumpAndSettle();
+    await nestedEntry(tester, '/tmp/fixture-not-executed.sh');
+    await tester.tap(find.byType(Switch).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs.single['script'], {
+      'enable': true,
+      'paths': ['/tmp/fixture-not-executed.sh']
+    });
+    expect(app.savedConfigs.single['protocolConfig'], before);
+    expect(webhookCalls, 0);
+    expect(app.trackerRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'remaining settings GitHub mirror confirms nested draft then applies only mirror fields',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    final before = app.downloaderConfig.value.protocolConfig.toJson();
+    await openEditor(tester, 'mirrors');
+    await tester.tap(find.text('githubMirror').last);
+    await tester.pumpAndSettle();
+    await nestedEntry(tester, 'https://fixture.invalid/mirror');
+    expect(app.savedConfigs, isEmpty);
+    expect(app.downloaderConfig.value.extra.githubMirror.mirrors, isEmpty);
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    await openEditor(tester, 'mirrors');
+    await tester.tap(find.text('githubMirror').last);
+    await tester.pumpAndSettle();
+    await nestedEntry(tester, 'https://fixture.invalid/mirror');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedConfigs, hasLength(1));
+    expect(app.downloaderConfig.value.extra.githubMirror.mirrors.single.url,
+        'https://fixture.invalid/mirror');
+    expect(app.savedConfigs.single['protocolConfig'], before);
+    expect(app.trackerRequests, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'remaining settings BT update uses saved subscriptions and requires its explicit button',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    app.downloaderConfig.value.extra.bt.trackerSubscribeUrls = [
+      'https://fixture.invalid/saved-trackers'
+    ];
+    await openEditor(tester, 'bt');
+    await tester.tap(find.text('subscribeTracker').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find
+        .descendant(
+            of: find.byKey(const ValueKey('settings-editor-bt')),
+            matching: find.byType(Checkbox))
+        .first);
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, isEmpty);
+    expect(app.downloaderConfig.value.extra.bt.trackerSubscribeUrls,
+        ['https://fixture.invalid/saved-trackers']);
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    await openEditor(tester, 'bt');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, isEmpty);
+    final update = find.byKey(const ValueKey('settings-tracker-update'));
+    await tester.ensureVisible(update);
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, isEmpty);
+    await tester.tap(update);
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, [
+      ['https://fixture.invalid/saved-trackers']
+    ]);
+    expect(app.savedConfigs, hasLength(1));
+    app.failTracker = true;
+    await tester.tap(update);
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, hasLength(2));
+    expect(find.text('未能更新 Tracker，请检查网络后重试。'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('review BT manual update and editor are mutually exclusive',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    await openEditor(tester, 'bt');
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    final btButton = find.byKey(const ValueKey('settings-bt'));
+    final oldOpen = tester.widget<MacButton>(btButton).onPressed!;
+    final updateButton = find.byKey(const ValueKey('settings-tracker-update'));
+    app.trackerGate = Completer<void>();
+    app.produceTrackerResult = true;
+    await tester.ensureVisible(updateButton);
+    await tester.pumpAndSettle();
+    await tester.tap(updateButton);
+    await tester.pumpAndSettle();
+    expect(tester.widget<MacButton>(btButton).onPressed, isNull);
+    oldOpen();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('settings-editor-bt')), findsNothing);
+    expect(app.trackerRequests, hasLength(1));
+    app.trackerGate!.complete();
+    await tester.pumpAndSettle();
+    expect(tester.widget<MacButton>(btButton).onPressed, isNotNull);
+    final oldUpdate = tester.widget<MacButton>(updateButton).onPressed!;
+    await openEditor(tester, 'bt');
+    oldUpdate();
+    await tester.pumpAndSettle();
+    expect(app.trackerRequests, hasLength(1));
+    await tester.tap(find.text('port').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(field('port'), '43210');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(
+        app.downloaderConfig.value.protocolConfig.bt.trackers, ['fresh-auto']);
+    expect(app.downloaderConfig.value.protocolConfig.bt.listenPort, 43210);
+    expect(app.savedConfigs, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final updateFirst in [true, false]) {
+    testWidgets(
+        'review BT automatic update finishing ${updateFirst ? 'before' : 'after'} save retains current objects and generated fields',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final app = await _mountSettings(tester, 'download');
+      final current = app.downloaderConfig.value;
+      current.protocolConfig.bt = BtConfig.fromJson({
+        ...current.protocolConfig.bt.toJson(),
+        'futureBt': {'keep': true}
+      });
+      current.extra.bt.subscribeTrackers = ['old-auto'];
+      current.protocolConfig.bt.trackers = ['old-auto'];
+      final capturedExtra = current.extra.bt,
+          capturedProtocol = current.protocolConfig.bt;
+      app.trackerGate = Completer<void>();
+      app.produceTrackerResult = true;
+      final updating = app
+          .trackerUpdate(); // existing automatic path, not the manual button.
+      await openEditor(tester, 'bt');
+      await tester.tap(find.text('port').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(field('port'), '43210');
+      if (updateFirst) {
+        app.trackerGate!.complete();
+        await updating;
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      if (!updateFirst) {
+        app.trackerGate!.complete();
+        await updating;
+        await tester.pumpAndSettle();
+      }
+      expect(identical(current.extra.bt, capturedExtra), isTrue);
+      expect(identical(current.protocolConfig.bt, capturedProtocol), isTrue);
+      expect(current.protocolConfig.bt.trackers, ['fresh-auto']);
+      expect(current.extra.bt.subscribeTrackers, ['fresh-auto']);
+      expect(current.extra.bt.lastTrackerUpdateTime, DateTime.utc(2026, 1, 2));
+      expect(current.protocolConfig.bt.listenPort, 43210);
+      expect(current.protocolConfig.bt.toJson()['futureBt'], {'keep': true});
+      expect(app.savedConfigs.last['protocolConfig']['bt']['trackers'],
+          ['fresh-auto']);
+      expect(
+          app.savedConfigs.last['protocolConfig']['bt']['listenPort'], 43210);
+      expect(app.savedConfigs, hasLength(2));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'remaining extra API waits for preference persistence before acknowledging',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    final pending = Completer<void>();
+    app.holdStartSave = pending;
+    await openEditor(tester, 'api');
+    await tester.enterText(field('apiToken'), 'fixture-pending');
+    await tester.tap(find.text('保存').last);
+    await tester.pump();
+    expect(app.savedStarts, hasLength(1));
+    expect(app.savedConfigs, isEmpty);
+    expect(find.byKey(const ValueKey('settings-editor-api')), findsOneWidget);
+    expect(find.text('正在保存…'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '取消').last)
+            .onPressed,
+        isNull);
+    pending.complete();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('settings-editor-api')), findsNothing);
+    expect(app.startConfig.value.apiToken, 'fixture-pending');
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final section in ['script', 'webhook', 'mirrors']) {
+    testWidgets(
+        'remaining extra $section save failure retains draft without executing actions',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      var webhookCalls = 0;
+      final app =
+          await _mountSettings(tester, 'download', webhookTest: (_) async {
+        webhookCalls++;
+      });
+      final protocol = app.downloaderConfig.value.protocolConfig.toJson();
+      Map<String, dynamic> values() => switch (section) {
+            'script' => app.downloaderConfig.value.script.toJson(),
+            'webhook' => app.downloaderConfig.value.webhook.toJson(),
+            _ => app.downloaderConfig.value.extra.githubMirror.toJson(),
+          };
+      final before = values();
+      await openEditor(tester, section);
+      await tester
+          .tap(find.text(section == 'mirrors' ? 'githubMirror' : section).last);
+      await tester.pumpAndSettle();
+      final editor = find.byKey(ValueKey('settings-editor-$section'));
+      final toggle =
+          find.descendant(of: editor, matching: find.byType(Switch)).last;
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      final draftEnabled = tester.widget<Switch>(toggle).value;
+      app.failSave = true;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(values(), before);
+      expect(tester.widget<Switch>(toggle).value, draftEnabled);
+      expect(find.text('更改尚未保存，请检查下载服务后重试。'), findsOneWidget);
+      expect(webhookCalls, 0);
+      expect(app.trackerRequests, isEmpty);
+      app.failSave = false;
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, hasLength(2));
+      expect(app.savedConfigs.last['protocolConfig'], protocol);
+      expect(webhookCalls, 0);
+      expect(app.trackerRequests, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'remaining extra mirror deletion still requires confirmation and outer cancel keeps original',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final app = await _mountSettings(tester, 'download');
+    final original = GithubMirror(
+        type: GithubMirrorType.jsdelivr,
+        url: 'https://fixture.invalid/builtin',
+        isBuiltIn: true);
+    app.downloaderConfig.value.extra.githubMirror.mirrors = [original];
+    await openEditor(tester, 'mirrors');
+    await tester.tap(find.text('githubMirror').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('delete').last);
+    await tester.pumpAndSettle();
+    expect(find.text('confirmDelete'), findsOneWidget);
+    await tester.tap(find.text('cancel').last);
+    await tester.pumpAndSettle();
+    expect(find.text('https://fixture.invalid/builtin'), findsOneWidget);
+    await tester.tap(find.byTooltip('delete').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('confirm').last);
+    await tester.pumpAndSettle();
+    expect(find.text('https://fixture.invalid/builtin'), findsNothing);
+    expect(original.isDeleted, isFalse);
+    expect(app.savedConfigs, isEmpty);
+    await tester.tap(find.text('取消').last);
+    await tester.pumpAndSettle();
+    expect(
+        identical(app.downloaderConfig.value.extra.githubMirror.mirrors.single,
+            original),
+        isTrue);
+    expect(original.isDeleted, isFalse);
+    expect(app.trackerRequests, isEmpty);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('general offers ordinary preferences and the shared guide',
@@ -169,36 +1168,245 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('browser connection asks first, then switches and refreshes',
+  Future<void> openBrowser(WidgetTester tester, String browser) async {
+    final button = find.byKey(ValueKey('browser-open-$browser'));
+    await tester.scrollUntilVisible(button, 160,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(
+        find.byKey(ValueKey('browser-diagnostics-$browser')), findsOneWidget);
+  }
+
+  testWidgets(
+      'browser diagnostics inspect only disk and never claim a live connection',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final reads = <String>[];
+    BrowserConnection.inspect = (browser) async {
+      reads.add(browser);
+      return _report(browser, owner: 'this_app', alias: 'unknown');
+    };
+    final app = await _mountSettings(tester, 'general');
+    expect(reads, ['chrome', 'edge']);
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('归属：本应用'), findsOneWidget);
+    expect(find.textContaining('归属未知，保留原文件'), findsWidgets);
+    expect(find.textContaining('App IPC：未测试'), findsOneWidget);
+    expect(find.textContaining('绑定冲突及当前权限：未检测'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(reads, ['chrome', 'edge', 'chrome', 'chrome']);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final browser in ['chrome', 'edge']) {
+    testWidgets(
+        'browser diagnostics register only $browser after explicit confirmation',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final calls = <(String, bool)>[];
+      final alias = _manifest(AppIdentity.legacyHostName, 'foreign');
+      BrowserConnection.connectOne =
+          (selected, {bool legacyCompatibility = false}) async {
+        calls.add((selected, legacyCompatibility));
+        return BrowserConnectionReport(
+            selected, _manifest(AppIdentity.hostName, 'this_app'), alias,
+            changedHostNames: const [AppIdentity.hostName]);
+      };
+      final app = await _mountSettings(tester, 'general');
+      await openBrowser(tester, browser);
+      final register = find.byKey(ValueKey('browser-register-$browser'));
+      await tester.tap(register);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('均不修改'), findsOneWidget);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(calls, isEmpty);
+      await tester.tap(register);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, '注册'));
+      await tester.pumpAndSettle();
+      expect(calls, [(browser, false)]);
+      expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+      expect(find.textContaining('App IPC：未测试'), findsOneWidget);
+      expect(find.textContaining('归属：其他程序，保留原文件'), findsOneWidget);
+      expect(alias.owner, 'foreign');
+      expect(app.savedConfigs, isEmpty);
+      await tester.tap(find.text('完成').last);
+      await tester.pumpAndSettle();
+      await openBrowser(tester, browser == 'chrome' ? 'edge' : 'chrome');
+      expect(find.textContaining('配置文件：缺失'), findsOneWidget);
+      expect(calls, hasLength(1));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final owner in ['foreign', 'unknown']) {
+    testWidgets('browser diagnostics preserve $owner new-host ownership',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      BrowserConnection.inspect =
+          (browser) async => _report(browser, owner: owner, alias: 'this_app');
+      final app = await _mountSettings(tester, 'general');
+      await openBrowser(tester, 'chrome');
+      final button = tester.widget<TextButton>(
+          find.byKey(const ValueKey('browser-register-chrome')));
+      expect(button.onPressed, isNull);
+      expect(find.textContaining('已禁止覆盖'), findsOneWidget);
+      expect(find.textContaining('旧名称不受本操作影响'), findsOneWidget);
+      expect(find.textContaining('归属：本应用'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+      'browser diagnostics registration failure keeps explicit retry and never changes settings',
       (tester) async {
     if (!Platform.isMacOS) return;
     var calls = 0;
-    var connected = false;
-    BrowserConnection.routes = () async => {
-          'chrome': connected ? ManifestRoute.thisApp : ManifestRoute.elsewhere,
-          'edge': null,
-        };
-    BrowserConnection.connect = () async {
+    BrowserConnection.connectOne =
+        (browser, {bool legacyCompatibility = false}) async {
       calls++;
-      connected = true;
-      return ['chrome'];
+      if (calls == 1) {
+        throw const FileSystemException('fixture permission denied');
+      }
+      return _report(browser, owner: 'this_app');
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.byKey(const ValueKey('browser-register-chrome')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(TextButton, '注册'));
+      await tester.pumpAndSettle();
+      expect(calls, attempt + 1);
+      if (attempt == 0) expect(find.textContaining('注册失败。请检查'), findsOneWidget);
+    }
+    expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+    expect(find.textContaining('Native 实际会话：未测试'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics read failure is unknown and retry affects only selected browser',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    var fail = true;
+    final reads = <String>[];
+    BrowserConnection.inspect = (browser) async {
+      reads.add(browser);
+      if (browser == 'chrome' && fail) {
+        throw const FileSystemException('fixture cannot read');
+      }
+      return _report(browser);
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.text('磁盘状态尚未取得，请点“重新检查”。'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-chrome')))
+            .onPressed,
+        isNull);
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('上次结果不能代表当前状态'), findsOneWidget);
+    fail = false;
+    await tester.tap(find.byKey(const ValueKey('browser-inspect-chrome')));
+    await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-chrome')))
+            .onPressed,
+        isNotNull);
+    expect(reads, ['chrome', 'edge', 'chrome', 'chrome', 'chrome']);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics do not acknowledge registration before pending service result',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final pending = Completer<BrowserConnectionReport>();
+    var calls = 0;
+    BrowserConnection.connectOne =
+        (browser, {bool legacyCompatibility = false}) {
+      calls++;
+      return pending.future;
     };
     await _mountSettings(tester, 'general');
-    await _reveal(tester, '浏览器连接');
-    expect(find.text('Chrome：指向其他程序（如旧版） · Edge：未检测到'), findsOneWidget);
-    await tester.tap(find.text('连接…'));
+    await openBrowser(tester, 'edge');
+    await tester.tap(find.byKey(const ValueKey('browser-register-edge')));
     await tester.pumpAndSettle();
-    expect(find.text('连接浏览器助手'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(calls, 0);
-    await tester.tap(find.text('连接…'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(TextButton, '连接'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '注册'));
+    await tester.pump();
     expect(calls, 1);
-    expect(find.text('Chrome：已连接本应用 · Edge：未检测到\n已连接，下次在网页上点击下载时生效。'),
-        findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, '完成'))
+            .onPressed,
+        isNull);
+    expect(
+        tester
+            .widget<TextButton>(
+                find.byKey(const ValueKey('browser-register-edge')))
+            .onPressed,
+        isNull);
+    pending.complete(_report('edge', owner: 'this_app'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('磁盘注册已准备好'), findsOneWidget);
+    expect(find.textContaining('Core 交接能力：未检测'), findsOneWidget);
+    expect(calls, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics route mismatch asks to inspect binding without resetting helper data',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    BrowserConnection.inspect = (browser) async =>
+        _report(browser, owner: 'this_app', issues: const ['route_mismatch']);
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('助手绑定与当前注册不一致'), findsOneWidget);
+    expect(find.textContaining('不自动清除助手数据或迁移未决操作'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'browser diagnostics ignore late initial disk evidence after a fresh check',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final initial = Completer<BrowserConnectionReport>();
+    var chromeReads = 0;
+    BrowserConnection.inspect = (browser) {
+      if (browser == 'chrome' && ++chromeReads == 1) return initial.future;
+      return Future.value(_report(browser, owner: 'this_app'));
+    };
+    final app = await _mountSettings(tester, 'general');
+    await openBrowser(tester, 'chrome');
+    expect(find.textContaining('归属：本应用'), findsOneWidget);
+    initial.complete(_report('chrome'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('完成').last);
+    await tester.pumpAndSettle();
+    expect(find.text('新名称的磁盘注册可用 · Native 未测试'), findsNWidgets(2));
+    expect(app.savedConfigs, isEmpty);
+    expect(app.savedStarts, isEmpty);
     expect(tester.takeException(), isNull);
   });
 
@@ -232,6 +1440,9 @@ void main() {
         tester.widget<DropdownButton<String>>(find.byWidgetPredicate((w) =>
             w is DropdownButton<String> &&
             w.items!.any((i) => i.value == 'confirm')));
+    expect(find.textContaining('最近一次上报（本机时间）'), findsOneWidget);
+    expect(find.textContaining('助手版本 0.4.3'), findsOneWidget);
+    expect(find.textContaining('下载权限：上报为允许；当前权限和连接未检测。'), findsOneWidget);
     expect(mode().value, 'direct');
     mode().onChanged!('confirm');
     await tester.pumpAndSettle();
@@ -246,6 +1457,7 @@ void main() {
     browsers.onChanged!('edge-one');
     await tester.pumpAndSettle();
     expect(mode().value, 'browser');
+    expect(find.textContaining('下载权限：未确认；当前权限和连接未检测。'), findsOneWidget);
     expect(app.browserIntegration.clients.last.preferences.showAll, false);
     expect(app.savedConfigs, isEmpty);
     expect(tester.takeException(), isNull);
@@ -320,14 +1532,20 @@ void main() {
   });
 
   for (final legacy in ['connections', 'advanced']) {
-    testWidgets('$legacy links land on general preferences', (tester) async {
+    testWidgets('$legacy links expose existing advanced settings in download',
+        (tester) async {
       if (!Platform.isMacOS) return;
-      await _mountSettings(tester, legacy);
-      expect(find.text('使用习惯'), findsOneWidget);
-      expect(find.byType(MacHotKeyEditor), findsOneWidget);
+      final app = await _mountSettings(tester, legacy);
+      expect(find.text('保存位置'), findsOneWidget);
+      await openEditor(tester, 'media');
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
       expect(find.byType(ExtensionView), findsNothing);
-      expect(find.text('API'), findsNothing);
-      expect(find.textContaining('扩展'), findsNothing);
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(app.savedConfigs, isEmpty);
+      expect(app.savedStarts, isEmpty);
       expect(tester.takeException(), isNull);
     });
   }
@@ -336,6 +1554,8 @@ void main() {
       'reopened guide synchronizes its saved directory back to settings',
       (tester) async {
     if (!Platform.isMacOS) return;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
+    addTearDown(() => MacOnboarding.checksOverride = null);
     final app = await _mountSettings(tester, 'general');
     await Database.instance.box.put(MacOnboarding.completedKey, true);
     await _reveal(tester, '重新打开…');
@@ -344,6 +1564,7 @@ void main() {
     expect(find.text('下载新手教程'), findsOneWidget);
     await tester.enterText(
         find.byKey(const ValueKey('onboarding-directory')), '/guide-downloads');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(find.text('下载新手教程'), findsNothing);
@@ -389,6 +1610,7 @@ void main() {
     expect(saved['protocolConfig']['media']['ytDlpPath'], '/custom/resolver');
     expect(saved['protocolConfig']['http']['userAgent'], 'preserved-agent');
     expect(saved['protocolConfig']['netdisk'], {'connections': 7});
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -427,6 +1649,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(app.savedConfigs.length, 2);
     expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(find.text('重试'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -443,12 +1666,14 @@ void main() {
     await tester.tap(find.byType(Switch).at(1));
     await tester.pump();
     expect(app.savedConfigs.length, 1);
+    await _reveal(tester, '正在保存…');
     expect(find.text('正在保存…'), findsOneWidget);
     hold.complete();
     await tester.pumpAndSettle();
     expect(app.savedConfigs.length, 2);
     expect(app.savedConfigs.last['extra']['defaultDirectDownload'], isTrue);
     expect(app.savedConfigs.last['extra']['autoStartTasks'], isTrue);
+    await _reveal(tester, '已保存');
     expect(find.text('已保存'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

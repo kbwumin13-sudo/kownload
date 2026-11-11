@@ -43,6 +43,7 @@ import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
 import '../../../services/browser_integration.dart';
+import '../../../../identity/app_identity_rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
 import '../../../../macos/mac_panel.dart';
@@ -552,7 +553,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
           await MacPanel.showTaskResult(ids, error);
         },
       );
+      final identityRpc = AppIdentityRpc(
+        socket: await Util.homePathJoin(AppIdentity.hostSocket),
+        preview: Util.isIsolatedPreview,
+      );
       await startRpcServer({
+        "/identity": identityRpc.handle,
         "/create": (ctx) => browserRpc.handle(
               ctx,
               create: true,
@@ -965,11 +971,17 @@ class AppController extends GetxController with WindowListener, TrayListener {
     }
   }
 
-  Future<void> saveConfig() async {
-    Database.instance.saveStartConfig(StartConfigEntity(
+  /// Save only next-launch API settings. Keep the current engine options and
+  /// object identity; this does not submit DownloaderConfig or restart the core.
+  Future<void> saveStartConfig() async {
+    await Database.instance.saveStartConfig(StartConfigEntity(
         network: startConfig.value.network,
         address: startConfig.value.address,
         apiToken: startConfig.value.apiToken));
+  }
+
+  Future<void> saveConfig() async {
+    await saveStartConfig();
     await putConfig(downloaderConfig.value);
   }
 

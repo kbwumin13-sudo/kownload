@@ -100,7 +100,9 @@ def main():
     run(go, 'build', '-trimpath', '-tags', 'nosqlite', '-buildmode=c-shared',
         '-ldflags=-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=' + release,
         '-o', core, './bind/desktop', cwd=source, env=env)
-    host_flags = '-w -s' + (' -X main.previewBuild=true' if a.preview else '')
+    host_flags = ('-w -s -X main.sourceCommit=' + commit +
+                  ' -X main.releaseVersion=' + release +
+                  (' -X main.previewBuild=true' if a.preview else ''))
     run(go, 'build', '-trimpath', '-ldflags=' + host_flags, '-o', host, './cmd/native-host', cwd=source, env=env)
     run(go, 'build', '-trimpath', '-ldflags=-w -s', '-o', migration, './cmd/identity-migrate', cwd=source, env=env)
     (ui / 'macos/Frameworks').mkdir(parents=True, exist_ok=True)
@@ -121,6 +123,7 @@ def main():
     run(flutter_bin, 'pub', 'get', '--enforce-lockfile', cwd=ui, env=env)
     flags = ['--release', '--no-pub', '--build-name=' + version, '--build-number=' + str(build),
              '--dart-define=KOWNLOAD_RELEASE_VERSION=' + release,
+             '--dart-define=KOWNLOAD_SOURCE_COMMIT=' + commit,
              '--split-debug-info=' + str(work / 'symbols')]
     preview_storage = work / 'preview-data'
     if a.preview:
