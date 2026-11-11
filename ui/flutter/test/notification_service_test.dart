@@ -192,6 +192,97 @@ void main() {
     expect(shows.length, 1);
     expect(opens, 1);
   });
+  notificationTest(
+      'live permission waits through multiple polls for committed projection',
+      (t) async {
+    tasks = [sample(phase: 'verifying')];
+    start();
+    await tick(t, opened: 1);
+    live.add(f.dataset);
+    live.add(f.dataset);
+    await t.pump();
+    await tick(t);
+    await tick(t);
+    expect(shows, isEmpty);
+    tasks = [sample(status: Status.done, phase: 'verified')];
+    await tick(t);
+    expect(shows, isEmpty);
+    tasks = [sample(status: Status.done)];
+    await tick(t);
+    expect(shows.length, 1);
+    live.add(f.dataset);
+    await tick(t);
+    expect(shows.length, 1);
+    expect(f.posts, 0);
+  });
+  for (final boundary in [
+    'epoch',
+    'dataset',
+    'disconnect',
+    'disabled',
+    'dispose'
+  ]) {
+    notificationTest('pending permission is discarded on $boundary', (t) async {
+      final second = makeLive();
+      tasks = [sample(phase: 'verifying')];
+      start(open: (s, d, c) async {
+        opens++;
+        return opens == 1 ? live.connection : second.connection;
+      });
+      await tick(t, opened: 1);
+      live.add(f.dataset);
+      await t.pump();
+      expect(shows, isEmpty);
+      switch (boundary) {
+        case 'epoch':
+          f.init('c');
+        case 'dataset':
+          f.dataset = 'c' * 32;
+        case 'disconnect':
+          unawaited(live.events.close());
+        case 'disabled':
+          app.downloaderConfig.value.extra.desktopNotification = false;
+          app.downloaderConfig.refresh();
+        case 'dispose':
+          service.onClose();
+      }
+      await t.pump();
+      tasks = [sample(status: Status.done, domain: f.dataset)];
+      if (boundary == 'disabled') {
+        app.downloaderConfig.value.extra.desktopNotification = true;
+        app.downloaderConfig.refresh();
+      }
+      if (boundary == 'dispose') {
+        await t.pump(const Duration(seconds: 4));
+      } else {
+        await tick(t);
+        await tick(t, opened: 2);
+      }
+      expect(shows, isEmpty);
+    });
+  }
+  notificationTest('pending and consumed permissions share the RAM bound',
+      (t) async {
+    tasks = List.generate(2049,
+        (i) => sample(phase: 'verifying', id: 'task-$i', cid: 'completion-$i'));
+    start();
+    await tick(t, opened: 1);
+    for (var i = 0; i < 2049; i++) {
+      live.add(f.dataset, task: 'task-$i', cid: 'completion-$i');
+    }
+    await t.pump();
+    expect(shows, isEmpty);
+    tasks = List.generate(
+        2049,
+        (i) =>
+            sample(status: Status.done, id: 'task-$i', cid: 'completion-$i'));
+    await tick(t);
+    expect(shows.length, 2048);
+    live.add(f.dataset, task: 'task-2048', cid: 'completion-2048');
+    live.add(f.dataset, task: 'task-0', cid: 'completion-0');
+    await tick(t);
+    expect(shows.length, 2048);
+  });
   for (final mode in [
     'historical',
     'bad',

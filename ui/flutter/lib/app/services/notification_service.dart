@@ -37,7 +37,8 @@ class NotificationService extends GetxService {
   int _streamEpoch = 0;
   final _currentTasks = <String, Task>{};
   final _notified = <String>{};
-  static const _maximumNotified = 2048;
+  final _pending = <String, VerifiedCompletionEvent>{};
+  static const _maximumPermissions = 2048;
   final Map<String, Status> _previousStatus = {};
 
   final AppController appController = Get.find<AppController>();
@@ -127,6 +128,7 @@ class NotificationService extends GetxService {
     ++_streamEpoch;
     _dataset = null;
     _notified.clear();
+    _pending.clear();
     _cancel?.cancel('completion_stream_closed');
     _cancel = null;
     final subscription = _events;
@@ -258,25 +260,40 @@ class NotificationService extends GetxService {
       return;
     }
     if (event.datasetId != _dataset) return;
+    final key = jsonEncode([event.datasetId, event.taskId, event.completionId]);
+    if (_notified.contains(key)) return;
+    if (!_pending.containsKey(key)) {
+      if (_notified.length + _pending.length >= _maximumPermissions) return;
+      _pending[key] = event;
+    }
+    _consumePending(source, epoch, key);
+  }
+
+  void _consumePending(api.ActiveApiSnapshot source, int epoch, String key) {
+    if (!_current(source, epoch)) return;
+    final event = _pending[key];
+    if (event == null || event.datasetId != _dataset) return;
     final task = _currentTasks[event.taskId];
-    final view = task?.completionView;
-    if (task == null ||
-        task.protocol != Protocol.http ||
-        task.status != Status.done ||
+    // A live event can precede the next task poll. Retain its permission only
+    // within this stream; a historical projection alone cannot create one.
+    if (task == null) return;
+    final view = task.completionView;
+    if (task.protocol != Protocol.http ||
         view == null ||
         !view.available ||
-        view.phase != 'committed' ||
-        view.recordedMatch != true ||
         view.trustedErrorCategory != null ||
         view.datasetId != event.datasetId ||
         view.taskId != event.taskId ||
         view.completionId != event.completionId) {
+      _pending.remove(key);
       return;
     }
-    final key = jsonEncode([event.datasetId, event.taskId, event.completionId]);
-    if (_notified.contains(key) || _notified.length >= _maximumNotified) return;
+    if (task.status != Status.done ||
+        view.phase != 'committed' ||
+        view.recordedMatch != true) return;
     // Synchronous, RAM-only consumption immediately before the existing effect.
     // Neither a failed plugin call nor a historical poll can regrant it.
+    _pending.remove(key);
     _notified.add(key);
     unawaited(
         _showNotification(title: 'notificationTaskDone'.tr, body: task.name)
@@ -328,6 +345,11 @@ class NotificationService extends GetxService {
           domains.length == 1 &&
           domains.single != _dataset) {
         _disconnect();
+      }
+      if (source != null) {
+        for (final key in _pending.keys.toList()) {
+          _consumePending(source, _streamEpoch, key);
+        }
       }
       if (source?.taskBatchRoute?.supported == true && source!.isCurrent) {
         unawaited(_ensureStream(source));
