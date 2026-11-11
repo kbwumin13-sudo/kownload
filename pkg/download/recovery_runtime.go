@@ -29,7 +29,7 @@ func (d *Downloader) ensureTaskRecovery(task *Task, defaultsHash string) (*taskR
 		return nil, err
 	}
 	task.dataLock.Lock()
-	task.Recovery = &TaskRecoveryRef{Version: 1}
+	task.Recovery = &TaskRecoveryRef{Version: owner.record.Version}
 	task.dataLock.Unlock()
 	owner.closed = &d.closed
 	task.recoveryOwner.Store(owner)
@@ -57,7 +57,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		if record.Episode != o.record.Episode || record.Generation != o.record.Generation || record.SourceRevision != o.record.SourceRevision || record.SourceHash != o.record.SourceHash {
 			return transfer.ErrRecoveryStale
 		}
-		if snapshot.ID != o.taskID || snapshot.Protocol != "http" || snapshot.Recovery == nil || snapshot.Recovery.Version != 1 || snapshot.Meta == nil || snapshot.Meta.Req == nil {
+		if snapshot.ID != o.taskID || snapshot.Protocol != "http" || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
 		}
 		digest := record.ExecutionDefaultsHash
