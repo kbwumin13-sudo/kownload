@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 始终 null，stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；正式 App 默认 IPC 父目录的私有权限增量、同源隔离 App 联调及部署仍待集成。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 始终 null，stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码，同源隔离 App 联调及部署仍待验证。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -62,7 +62,7 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 
 每次连接检查规范绝对路径及所有组件无符号链接，祖先目录 owner 为 root/当前 UID 且非共享可写（上层 sticky 临时目录例外）；socket 必须是文件系统 UDS、属当前 UID、无 group/world 写位，直接父目录必须属当前 UID 且无任何 group/world 访问位。私有父目录阻止其他 UID 到达 socket，因此 socket 自身的读/执行位（例如 0755）可以保留；父目录非私有时，即使 socket 为 0600 也拒绝。连接后检查 Darwin 内核 peer UID。
 
-同 UID 的进程仍在信任范围内；UID/产品名不证明对端是可信 App，也不抵抗同 UID 恶意进程。桥不 chmod、不创建/删除 socket、不修复目录或生产权限。实际 `BuildServer` 的原 listener、自愈机制和进程 umask 均未改动。当前默认 IPC 父目录的创建代码尚不保证私有权限，需独立 App 增量及同源隔离联调；本模块不提供手动 chmod 全数据目录的补救流程。
+同 UID 的进程仍在信任范围内；UID/产品名不证明对端是可信 App，也不抵抗同 UID 恶意进程。桥不 chmod、不创建/删除 socket、不修复目录或生产权限。实际 `BuildServer` 的原 listener、自愈机制和进程 umask 均未改动。默认 App 启动分支已接入受管 IPC 目录检查：仅对确认归属的默认数据根下 ipc 建立/收窄为 0700，拒绝链接、异主和未知类型，不递归修改子项，不改变自定义地址。同源隔离 App 启动仍待联调；本模块不提供手动 chmod 全数据目录的补救流程。
 
 ### 可选显式 API 凭据
 
@@ -102,6 +102,8 @@ stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最�
 
 `go test`/`go test -race` 使用隔离 UDS 和官方 SDK；包含五工具 schema、读路径、非法输入/未知写工具、私密字段/异常响应、限额、超时/取消、并发与 socket 边界。`tests/mcporter_smoke.py` 使用本机已有 mcporter CLI 和真实构建的桥，执行 tools/list、五读、写调用拒绝及两版本稳定路径模拟；不是自制客户端替代测试。
 
-新增 `pkg/rest/mcp_read_integration_test.go` 使用实际 `BuildServer`、原认证中间件、私有合成 Bolt 数据与原 UDS listener；覆盖鉴权矩阵、TCP 不注册、Web 兜底顺序、405、五读及 socket 自愈，不手动 chmod socket。设置 `KOWNLOAD_MCP_TEST_BINARY=/ABSOLUTE/TEST-BRIDGE` 后运行 `TestMCPReadBuildServerCLI`，通过已有 mcporter 与真实 stdio 二进制验证五读、错误/缺失 token、文件启动拒绝、凭据路径稳定/轮换和自愈后五读。测试配置与客户端 HOME 均为临时目录；未设置该变量时此 CLI 集成用例显式跳过，不能将其计为已验证。
+新增 `pkg/rest/mcp_read_integration_test.go` 使用实际 `BuildServer`、原认证中间件、私有合成 Bolt 数据与原 UDS listener；覆盖鉴权矩阵、TCP 不注册、Web 兜底顺序、S2 三条 operation 路由共存、405、五读及 socket 自愈，不手动 chmod socket。设置 `KOWNLOAD_MCP_TEST_BINARY=/ABSOLUTE/TEST-BRIDGE` 后运行 `TestMCPReadBuildServerCLI`，通过已有 mcporter 与真实 stdio 二进制验证五读、错误/缺失 token、文件启动拒绝、凭据路径稳定/轮换和自愈后五读。测试配置与客户端 HOME 均为临时目录；未设置该变量时此 CLI 集成用例显式跳过，不能将其计为已验证。
 
-尚待：默认 App IPC 私有目录增量集成、S3 安全统计/错误发布快照与有效总量、候选 App 五读完整联调、真实签名/包内集成、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。
+远端工作流新增本独立模块的 `go mod verify` 与 `go test -race ./...`；根模块 `./...` 本身不覆盖此模块。真实 mcporter 集成仍须显式设置测试二进制，不能从 CI 单测通过推断已完成 App 联调。
+
+尚待：S3 安全统计/错误发布快照与有效总量、候选 App 五读完整联调、真实签名/包内集成、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。

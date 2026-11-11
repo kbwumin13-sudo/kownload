@@ -174,6 +174,40 @@ func TestMCPReadBuildServerAuthentication(t *testing.T) {
 	}
 }
 
+// S2 routes and the MCP read namespace must coexist before the Web fallback.
+// Empty/invalid writes only exercise validation; no operation or task is created.
+func TestMCPReadBuildServerS2RoutesCoexist(t *testing.T) {
+	const token = "SYNTHETIC_API_SECRET"
+	f := newMCPBuiltFixture(t, "unix", token, true, false)
+	before, err := f.downloader.MCPReadList(context.Background(), 100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		method, path, marker string
+		status               int
+	}{
+		{"GET", "/api/v1/task-batches/operations/missing-fixture", `"state":"unknown"`, 200},
+		{"POST", "/api/v1/task-batches/operations", "invalid_operation_request", 400},
+		{"POST", "/api/v1/task-batches/operations/@/cancel", "invalid_operation_request", 400},
+	} {
+		if status, _ := f.request(t, sample.method, sample.path, "", ""); status != 401 {
+			t.Fatalf("S2 route bypassed auth: %s %s status=%d", sample.method, sample.path, status)
+		}
+		status, body := f.request(t, sample.method, sample.path, token, "")
+		if status != sample.status || !strings.Contains(body, sample.marker) {
+			t.Fatalf("S2 route lost to fallback: %s %s status=%d", sample.method, sample.path, status)
+		}
+	}
+	if status, body := f.request(t, "GET", mcpReadPrefix+"?limit=100", token, "1"); status != 200 || !strings.Contains(body, `"id":"task_1"`) {
+		t.Fatal("MCP route lost after S2 requests")
+	}
+	after, err := f.downloader.MCPReadList(context.Background(), 100, "")
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("route coexistence checks changed tasks")
+	}
+}
+
 func TestMCPReadBuildServerFiveReadsAndRecovery(t *testing.T) {
 	f := newMCPBuiltFixture(t, "unix", "SYNTHETIC_API_SECRET", true, false)
 	before, err := f.downloader.MCPReadGetTask(context.Background(), "task_1")
