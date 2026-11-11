@@ -307,13 +307,22 @@ class NativeManifestService {
       return; // Never replace the first original/absent marker.
     }
     final target = original == null ? absent : file;
-    await target.create(exclusive: true);
+    final stage = await dir.createTemp('.kownload-native-backup-');
     try {
-      await _permissions(target.path, '600');
-      await target.writeAsBytes(original ?? const [], flush: true);
-    } catch (_) {
-      await target.delete(); // Only our just-created incomplete backup.
-      rethrow;
+      await _permissions(stage.path, '700');
+      final staged = File(path.join(stage.path, 'original'));
+      await staged.writeAsBytes(original ?? const [], flush: true);
+      await _permissions(staged.path, '600');
+      // Same-directory hard-link publication is atomic and fails if the
+      // destination already exists. rename() would replace the first original.
+      // Abrupt exit before this point leaves only unpublished private staging.
+      final published =
+          await Process.run('/bin/ln', [staged.path, target.path]);
+      if (published.exitCode != 0) {
+        throw const FileSystemException('backup_conflict');
+      }
+    } finally {
+      await stage.delete(recursive: true);
     }
   }
 
