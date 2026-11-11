@@ -115,37 +115,18 @@ func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, us
 		} else {
 			method = http.MethodGet
 		}
-		if len(extra.Header) > 0 {
-			for k, v := range extra.Header {
-				headers.Set(k, strings.TrimSpace(v))
-			}
+		var headerErr error
+		headers, headerErr = transfer.CredentialHeaders(extra.Header)
+		if headerErr != nil {
+			return nil, headerErr
 		}
+
 		if extra.Body != "" {
 			body = bytes.NewBufferString(extra.Body)
 		}
 	}
 	if _, ok := headers[base.HttpHeaderUserAgent]; !ok {
 		headers.Set(base.HttpHeaderUserAgent, strings.TrimSpace(f.config.UserAgent))
-	}
-	// Cached redirect URLs bypass Client's normal redirect header filtering.
-	// Apply the same credential scope before constructing a direct range request.
-	if useRedirect && reqUrl != req.URL {
-		original, originalErr := url.Parse(req.URL)
-		target, targetErr := url.Parse(reqUrl)
-		if originalErr == nil && targetErr == nil {
-			sourceHost := strings.ToLower(original.Hostname())
-			targetHost := strings.ToLower(target.Hostname())
-			trusted := targetHost == sourceHost || (net.ParseIP(sourceHost) == nil &&
-				sourceHost != "" && strings.HasSuffix(targetHost, "."+sourceHost))
-			if !trusted {
-				for _, name := range []string{"Authorization", "Www-Authenticate", "Cookie", "Cookie2"} {
-					headers.Del(name)
-				}
-			}
-			if !strings.EqualFold(original.Host, target.Host) {
-				headers.Del(base.HttpHeaderHost)
-			}
-		}
 	}
 
 	if ctx != nil {
@@ -210,7 +191,7 @@ func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Cli
 		f.applyIfRange(httpReq)
 	}
 
-	resp, err := client.Do(httpReq)
+	resp, err := doCredentialRequest(client, httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -265,9 +246,9 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 			TLSHandshakeTimeout: timeout,
 		}
 	}
-	if f.requestPolicy != nil || f.responsePolicy != nil {
-		roundTripper = &policyTransport{transport: roundTripper, policy: f.requestPolicy, responsePolicy: f.responsePolicy}
-	}
+	roundTripper = &policyTransport{transport: roundTripper, policy: f.requestPolicy, responsePolicy: f.responsePolicy,
+		guard: outboundCredentialGuard(f.meta.Req.URL, f.targetCredentials, f.cookieJar)}
+
 	return &http.Client{
 		Transport: roundTripper,
 		Jar:       f.cookieJar,

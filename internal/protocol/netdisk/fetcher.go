@@ -255,23 +255,11 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 	}
 	jar, _ := cookiejar.New(nil)
 	cloud.SeedCookies(jar, d.Cookies, []string{u.Hostname()})
-	policy := func(r *http.Request) {
-		for _, key := range []string{"Authorization", "Cookie", "AccessToken", "X-Captcha-Token", "X-Device-Id"} {
-			r.Header.Del(key)
-		}
-		for k, v := range d.Header {
-			if strings.EqualFold(k, "Cookie") {
-				continue
-			}
-			if (r.URL.Scheme != u.Scheme || r.URL.Host != u.Host) && (strings.EqualFold(k, "Authorization") || strings.EqualFold(k, "X-Device-Id") || strings.Contains(strings.ToLower(k), "token")) {
-				continue
-			}
-			r.Header.Set(k, v)
-		}
-		for _, cookie := range jar.Cookies(r.URL) {
-			r.AddCookie(cookie)
-		}
+	credentials, err := transfer.NewTargetCredentials(d.URL, d.Header, jar)
+	if err != nil {
+		return errors.New("网盘下载认证上下文无效")
 	}
+
 	hreq := &base.Request{URL: d.URL, Extra: &httpmodel.ReqExtra{}, Proxy: f.meta.Req.Proxy, SkipVerifyCert: f.meta.Req.SkipVerifyCert}
 	hm := &httpfetch.FetcherManager{}
 	httpCtl := *f.ctl
@@ -292,7 +280,7 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 	if f.resume != nil && len(f.resume.Child) > 0 && f.resume.Resource != nil {
 		// Probe the refreshed file before using saved byte ranges.
 		probe := hm.Build().(*httpfetch.Fetcher)
-		probe.SetRequestPolicy(policy)
+		probe.SetTargetCredentials(credentials)
 		probe.SetResponsePolicy(integrity.policy)
 		probe.Setup(&httpCtl)
 		if err = probe.ResolveContext(ctx, hreq, f.meta.Opts.Clone()); err != nil {
@@ -309,12 +297,12 @@ func (f *Fetcher) resolveLocked(ctx context.Context, e *model.ReqExtra) error {
 		}
 		meta := &fetcher.FetcherMeta{Req: hreq, Res: clone(f.resume.Resource), Opts: f.meta.Opts.Clone()}
 		child = restore(meta, template).(*httpfetch.Fetcher)
-		child.SetRequestPolicy(policy)
+		child.SetTargetCredentials(credentials)
 		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
 	} else {
 		child = hm.Build().(*httpfetch.Fetcher)
-		child.SetRequestPolicy(policy)
+		child.SetTargetCredentials(credentials)
 		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
 		if err = child.ResolveContext(ctx, hreq, f.meta.Opts.Clone()); err != nil {

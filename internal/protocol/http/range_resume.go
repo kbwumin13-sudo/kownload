@@ -109,7 +109,7 @@ func (f *Fetcher) compareRangeOverlap(request *http.Request, begin int64, expect
 	request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
 	request.Header.Set("Accept-Encoding", "identity")
 	client := f.buildClient()
-	response, err := client.Do(request)
+	response, err := doCredentialRequest(client, request)
 	if err == nil {
 		response, err = f.refreshResponse(request.Context(), client, request, response)
 	}
