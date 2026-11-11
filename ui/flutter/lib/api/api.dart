@@ -23,6 +23,7 @@ import 'model/switch_extension.dart';
 import 'model/task.dart';
 import 'model/task_stats.dart';
 import 'model/task_batch_catalog.dart';
+import 'model/http_recovery.dart';
 import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
@@ -251,6 +252,69 @@ Future<Response<dynamic>> verifiedCompletionEventsRequest(
       }
     } catch (_) {}
     throw ConnectionException('completion_headers_timeout');
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
+}
+
+/// Only the versioned recovery read/retry routes, on the initialized client.
+/// A response error remains data; redirects never replay a retry POST.
+Future<Response<dynamic>> httpRecoveryRequest(
+    ActiveApiSnapshot snapshot, String method, String path,
+    {Map<String, dynamic>? data,
+    Map<String, dynamic>? queryParameters,
+    CancelToken? cancelToken}) async {
+  var allowed = method == 'GET' &&
+      path == '/api/v1/dataset/identity' &&
+      data == null &&
+      queryParameters == null;
+  final match = RegExp(
+          r'^/api/v1/datasets/[0-9a-f]{32}/tasks/[A-Za-z0-9_-]{1,128}/recovery/v1(/retry)?$')
+      .firstMatch(path);
+  if (match != null && match[0] == path) {
+    if (method == 'GET' && match[1] == null && data == null) {
+      allowed = queryParameters == null;
+      if (queryParameters != null && queryParameters.length == 3) {
+        final revision = queryParameters['expectedSourceRevision'];
+        final value = revision is String ? int.tryParse(revision) : null;
+        if (value != null && '$value' == revision) {
+          try {
+            final action = HttpRetryAction.fromJson({
+              'version': 1,
+              'decision': 'retry',
+              ...queryParameters,
+              'expectedSourceRevision': value
+            });
+            allowed =
+                action.toQuery().keys.toSet().containsAll(queryParameters.keys);
+          } on FormatException {
+            allowed = false;
+          }
+        }
+      }
+    } else if (method == 'POST' &&
+        match[1] == '/retry' &&
+        queryParameters == null &&
+        data != null) {
+      try {
+        HttpRetryAction.fromJson(data);
+        allowed = true;
+      } on FormatException {
+        allowed = false;
+      }
+    }
+  }
+  if (!allowed) throw ArgumentError('invalid_http_recovery_endpoint');
+  if (!snapshot.isCurrent || snapshot.taskBatchRoute?.supported != true) {
+    throw StateError('http_recovery_route_changed');
+  }
+  try {
+    return await snapshot._transport.dio.request(path,
+        data: data,
+        queryParameters: queryParameters,
+        cancelToken: cancelToken,
+        options: Options(method: method, followRedirects: false));
   } on DioException catch (error) {
     if (error.response != null) return error.response!;
     rethrow;

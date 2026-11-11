@@ -23,6 +23,7 @@ import '../../../../api/model/request.dart';
 import '../../../../api/model/resolve_result.dart';
 import '../../../../api/model/resolve_task.dart';
 import '../../../../api/model/task.dart';
+import '../../task/views/http_task_retry_button.dart';
 import '../../../../api/netdisk.dart';
 import '../../../../api/task_batch_api.dart';
 import '../../../../api/model/task_batch_operation.dart';
@@ -2452,6 +2453,17 @@ class _CreateViewState extends State<CreateView> {
                           : CupertinoIcons.question_circle,
                       size: 17,
                       color: c.secondary)
+                else if (failed && task.protocol == Protocol.http)
+                  HttpTaskRetryButton(
+                      key: ValueKey('retry-${task.id}'),
+                      task: task,
+                      compact: true,
+                      color: c.secondary,
+                      legacyContinue: () => continueTask(task.id),
+                      refresh: () async {
+                        await list.getTasksState();
+                      },
+                      notice: (message) => MacPanel.notice.value = message)
                 else
                   _panelIcon(
                       c,
