@@ -1370,33 +1370,14 @@ func (d *Downloader) watch(task *Task) {
 		return
 	}
 
-	task.lock.Lock()
-	task.statusLock.Lock()
-	if task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
-		task.statusLock.Unlock()
-		task.lock.Unlock()
+	committed, completionErr := d.commitTaskCompletion(task, f)
+	if completionErr != nil {
+		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr))
 		return
 	}
-	task.dataLock.Lock()
-	if task.Protocol == "media" || task.Protocol == "netdisk" {
-		task.Meta = util.DeepClone(f.Meta())
+	if !committed {
+		return
 	}
-	task.Progress.Used = task.timer.Used()
-	if task.Meta.Res.Size == 0 {
-		task.Meta.Res.Size = f.Progress().TotalDownloaded()
-	}
-	used := task.Progress.Used / int64(time.Second)
-	if used == 0 {
-		used = 1
-	}
-	totalSize := task.Meta.Res.Size
-	task.Progress.Speed = totalSize / used
-	task.Progress.Downloaded = totalSize
-	task.dataLock.Unlock()
-	task.updateStatus(base.DownloadStatusDone)
-	d.storage.Put(bucketTask, task.ID, task.clone())
-	task.statusLock.Unlock()
-	task.lock.Unlock()
 	d.emit(EventKeyDone, task)
 	d.emit(EventKeyFinally, task, err)
 	d.notifyRunning()
@@ -1460,6 +1441,70 @@ func (d *Downloader) watch(task *Task) {
 			d.enqueueExtraction(task, downloadFilePath, e)
 		}
 	}
+}
+
+// commitTaskCompletion shares deletion's persistence guard. The task operation
+// lock precedes the guard, like pause/start saves; no protocol or user callbacks
+// run under this guard. Public done is published only after acknowledged storage.
+func (d *Downloader) commitTaskCompletion(task *Task, f fetcher.Fetcher) (bool, error) {
+	task.lock.Lock()
+	defer task.lock.Unlock()
+	// Wait has finished; take final protocol snapshots before the persistence
+	// guard. No protocol lifecycle or user callbacks are run under that guard.
+	var finalMeta *fetcher.FetcherMeta
+	if task.Protocol == "media" || task.Protocol == "netdisk" {
+		finalMeta = util.DeepClone(f.Meta())
+	}
+	task.dataLock.RLock()
+	needSize := task.Meta.Res != nil && task.Meta.Res.Size == 0
+	task.dataLock.RUnlock()
+	var downloaded int64
+	if needSize {
+		downloaded = f.Progress().TotalDownloaded()
+	}
+	persistenceLock := d.errorPersistenceLock(task)
+	persistenceLock.Lock()
+	defer persistenceLock.Unlock()
+	task.statusLock.Lock()
+	defer task.statusLock.Unlock()
+	if d.closed.Load() || d.getTask(task.ID) != task || task.getStatus() != base.DownloadStatusRunning || task.Meta.Res == nil {
+		return false, nil
+	}
+	task.dataLock.Lock()
+	if finalMeta != nil {
+		task.Meta = finalMeta
+	}
+	task.Progress.Used = task.timer.Used()
+	if task.Meta.Res.Size == 0 {
+		task.Meta.Res.Size = downloaded
+	}
+	used := task.Progress.Used / int64(time.Second)
+	if used == 0 {
+		used = 1
+	}
+	totalSize := task.Meta.Res.Size
+	task.Progress.Speed = totalSize / used
+	task.Progress.Downloaded = totalSize
+	task.dataLock.Unlock()
+
+	candidate := task.clone()
+	candidate.updateStatus(base.DownloadStatusDone)
+	if err := d.storage.Put(bucketTask, task.ID, candidate); err != nil {
+		// An error may be an unknown commit acknowledgement. Never infer
+		// success or issue completion effects from it; preserve the file.
+		return false, err
+	}
+	// Delete removes membership before waiting for this persistence guard.
+	// Its later durable deletion wins even if our Put was already in flight.
+	if d.closed.Load() || d.getTask(task.ID) != task {
+		return false, nil
+	}
+	task.dataLock.Lock()
+	task.Status = candidate.Status
+	task.UpdatedAt = candidate.UpdatedAt
+	task.notBefore = time.Time{}
+	task.dataLock.Unlock()
+	return true, nil
 }
 
 func (d *Downloader) errorPersistenceLock(task *Task) *sync.Mutex {
