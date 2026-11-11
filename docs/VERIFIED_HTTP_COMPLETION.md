@@ -33,6 +33,12 @@ receiver不把它降为旧create或可忽略的Extra。Core typed
 `task-batch.create/v1`，复用原op/R/M与journal，不造第二创建账本。R已有记录短路、真实M、
 cancel及错误回读仍核same dataset；只有本次new M+已确认ACK沿现私有首次IO资格。
 
+同域同op已存在时，先核相同原始意图/hash再重用原R冻结的有效false、目标和completionId；
+不能先用后来全局true重新解析而丢旧回执、改目标或重造Task。首次R将server解析后的
+执行选项保存在原operation/member/Task既有冻结选项中，raw永久指纹仍保持原始语义，
+两者不可混淆。后续Start/恢复/C与成功出口消费已冻结的false，不重新继承后来全局值
+而突然解压/加种。显式不同raw请求仍是同op冲突；不新增独立policy账本。
+
 缺cap/method/version，404/HTML/未知包装或3xx，preflight零POST；3xx不跟随。调用POST后
 同样响应属于ACK未知：保同route/dataset/ns/op引用，只GET、不回退旧POST/换op。
 新动作查询默认走同verified前缀。旧journal不含kind，可用原scoped S2 GET安全读取
