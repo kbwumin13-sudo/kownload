@@ -51,9 +51,11 @@ type Task struct {
 	fetcher        fetcher.Fetcher
 	timer          *util.Timer
 	// dataLock protects the serialized task view; statusLock serializes lifecycle decisions.
-	dataLock   sync.RWMutex
-	statusLock *sync.Mutex
-	lock       *sync.Mutex
+	dataLock sync.RWMutex
+	// Ephemeral, copied/published only while holding dataLock. Never serialized.
+	mcpPublished MCPReadPublishedSnapshot
+	statusLock   *sync.Mutex
+	lock         *sync.Mutex
 	// Guarded by statusLock; invalidates queued start work after a pause.
 	runGeneration  uint64
 	runCancel      context.CancelFunc // Guarded by statusLock; cancels preparation for this generation.
