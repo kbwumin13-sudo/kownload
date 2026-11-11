@@ -2,9 +2,11 @@ package download
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -349,55 +351,62 @@ func TestDownloader_Extension_OnDone(t *testing.T) {
 }
 
 func TestDownloader_Extension_Errors(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/script_error", false); err != nil {
-			t.Fatal(err)
-		}
-		rr, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/test",
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rr.Res.Files) == 2 {
-			t.Fatal("script error catch failed")
-		}
-	})
-
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/function_error", false); err != nil {
-			t.Fatal(err)
-		}
-		rr, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/test",
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rr.Res.Files) == 2 {
-			t.Fatal("function error catch failed")
-		}
-	})
-
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/message_error", false); err != nil {
-			t.Fatal(err)
-		}
-		_, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/test",
-		}, nil)
-		if err == nil {
-			t.Fatalf("except error, but got nil")
-		}
-		me, ok := err.(*gojaerror.MessageError)
-		if !ok {
-			t.Fatalf("except MessageError type, but got %s", err)
-		}
-		want := "test"
-		if me.Error() != want {
-			t.Fatalf("except MessageError message %s, but got %s", want, me.Message)
-		}
-	})
+	for _, tc := range []struct {
+		name       string
+		logMessage string
+		messageErr bool
+	}{
+		{name: "script_error", logMessage: "run script failed"},
+		{name: "function_error", logMessage: "call function failed: onResolve"},
+		{name: "message_error", logMessage: "call function failed: onResolve", messageErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtensionHookFixture(t)
+			var logs bytes.Buffer
+			f.downloader.ExtensionLogger.Logger = f.downloader.ExtensionLogger.Output(&logs)
+			ext := f.install(t, tc.name)
+			rr, err := f.downloader.Resolve(&base.Request{URL: f.url + "/file"}, &base.Options{Path: t.TempDir()})
+			if tc.messageErr {
+				me, ok := err.(*gojaerror.MessageError)
+				if !ok || me.Error() != "test" {
+					t.Fatalf("expected MessageError(test), got %T: %v", err, err)
+				}
+				if rr != nil || f.served.Load() {
+					t.Fatal("MessageError must prevent HTTP fallback")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("script exception should allow HTTP fallback: %v", err)
+				}
+				if rr == nil || rr.Res == nil || len(rr.Res.Files) != 1 || !f.served.Load() {
+					t.Fatalf("expected one real HTTP resource instead of the script's two files: %+v", rr)
+				}
+				if rr.Res.Size != int64(len(f.payload)) || rr.Res.Files[0].Size != int64(len(f.payload)) {
+					t.Fatalf("HTTP fallback resource size = %d/%d, want %d", rr.Res.Size, rr.Res.Files[0].Size, len(f.payload))
+				}
+			}
+			// A successful fallback alone could also mean the script never ran.
+			// Require the actual exception at the expected script/callback stage.
+			var entry struct {
+				Level   string `json:"level"`
+				Message string `json:"message"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &entry); err != nil {
+				t.Fatalf("expected one structured exception log, got %q: %v", logs.String(), err)
+			}
+			if entry.Level != "error" || entry.Message != "["+ext.buildIdentity()+"] "+tc.logMessage {
+				t.Fatalf("unexpected exception log: %+v", entry)
+			}
+			if tc.messageErr {
+				if entry.Error != "test" {
+					t.Fatalf("logged MessageError = %q, want test", entry.Error)
+				}
+			} else if !strings.Contains(entry.Error, "TypeError:") || !strings.Contains(entry.Error, "Cannot read property 'ccc'") {
+				t.Fatalf("expected undefined-property TypeError, got %q", entry.Error)
+			}
+		})
+	}
 }
 
 func TestDownloader_Extension_Settings(t *testing.T) {
