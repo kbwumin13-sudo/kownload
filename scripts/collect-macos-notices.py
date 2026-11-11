@@ -16,6 +16,16 @@ def run(*args, cwd=None):
     return subprocess.check_output(list(map(str, args)), cwd=cwd, text=True)
 
 
+def binary_modules(go, binary):
+    modules = []
+    for line in run(go, 'version', '-m', binary).splitlines():
+        fields = line.strip().split('\t')
+        if fields[0] == 'dep':
+            modules.append({'module': fields[1], 'version': fields[2],
+                            'sum': fields[3] if len(fields) > 3 else ''})
+    return modules
+
+
 def collect(repo, destination, binaries, go, flutter):
     destination.mkdir(parents=True, exist_ok=True)
     for name in ['LICENSE', 'THIRD_PARTY_NOTICES.md']:
@@ -23,10 +33,8 @@ def collect(repo, destination, binaries, go, flutter):
     shutil.copytree(repo / 'third_party', destination / 'third_party', dirs_exist_ok=True)
     modules = {}
     for binary in binaries:
-        for line in run(go, 'version', '-m', binary).splitlines():
-            fields = line.strip().split('\t')
-            if fields[0] == 'dep':
-                modules[(fields[1], fields[2])] = fields[3] if len(fields) > 3 else ''
+        for module in binary_modules(go, binary):
+            modules[(module['module'], module['version'])] = module['sum']
     index = []
     for (name, version), checksum in sorted(modules.items()):
         meta = json.loads(run(go, 'mod', 'download', '-json', name + '@' + version, cwd=repo))
