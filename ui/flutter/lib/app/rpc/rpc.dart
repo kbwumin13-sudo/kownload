@@ -5,6 +5,7 @@ import 'package:dart_ipc/dart_ipc.dart';
 
 import '../../util/util.dart';
 import '../../identity/app_identity.dart';
+import '../../identity/managed_ipc_directory.dart';
 
 /// RPC context class that contains request information and response methods
 class RpcContext {
@@ -76,13 +77,20 @@ class RouteRegistry {
 
 /// Start RPC server
 Future<void> startRpcServer([Map<String, RouteHandler>? routes]) async {
+  // Core initialization can fail while the UI still reaches onReady. Enforce
+  // the same managed-directory prerequisite here, before mkdir/unlink/bind.
+  if (Util.isMacos()) {
+    await ensureManagedIpcDirectory(storageRoot: Util.getStorageDir());
+  }
   String path;
   if (Util.isWindows()) {
     path = r'\\.\pipe\gopeed_host';
   } else {
     path = await Util.homePathJoin(
         Util.isMacos() ? AppIdentity.hostSocket : "gopeed_host.sock");
-    await File(path).parent.create(recursive: true);
+    if (!Util.isMacos()) {
+      await File(path).parent.create(recursive: true);
+    }
     if (Util.isMacos() && utf8.encode(path).length >= 104) {
       throw StateError('IPC 路径过长，请使用更短的数据目录');
     }

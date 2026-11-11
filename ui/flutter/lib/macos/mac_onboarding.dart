@@ -10,6 +10,7 @@ import '../app/modules/app/controllers/app_controller.dart';
 import '../database/database.dart';
 import 'mac_panel.dart';
 import 'mac_widgets.dart';
+import 'onboarding_checks.dart';
 
 /// A one-time tutorial before the first download, also available from Settings.
 class MacOnboarding {
@@ -19,6 +20,9 @@ class MacOnboarding {
 
   @visibleForTesting
   static String? helperDirectoryOverride;
+
+  @visibleForTesting
+  static OnboardingChecks? checksOverride;
 
   static String get _helperDirectory =>
       helperDirectoryOverride ??
@@ -43,7 +47,7 @@ class MacOnboarding {
         return await showDialog<bool>(
               context: context,
               barrierDismissible: false,
-              builder: (_) => const _DownloadTutorial(),
+              builder: (_) => _DownloadTutorial(previouslyCompleted: completed),
             ) ??
             false;
       } finally {
@@ -58,7 +62,8 @@ class MacOnboarding {
 }
 
 class _DownloadTutorial extends StatefulWidget {
-  const _DownloadTutorial();
+  final bool previouslyCompleted;
+  const _DownloadTutorial({required this.previouslyCompleted});
 
   @override
   State<_DownloadTutorial> createState() => _DownloadTutorialState();
@@ -68,6 +73,115 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
   late final AppController _app = Get.find<AppController>();
   late final _directory =
       TextEditingController(text: _app.downloaderConfig.value.downloadDir);
+  late final _checks = MacOnboarding.checksOverride ?? OnboardingChecks();
+  DirectoryCheck? _directoryCheck;
+  String? _checkedDirectory;
+  bool _checking = false;
+  int _directoryRevision = 0;
+  MediaTool? _runningTool;
+  final _toolResults = <MediaTool, ToolCheck>{};
+  bool get _busy =>
+      _saving || _choosing || _explaining || _checking || _runningTool != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _directory.addListener(() {
+      if (mounted) {
+        setState(() {
+          _directoryRevision++;
+          _checkedDirectory = null;
+          _directoryCheck = null;
+          _error = null;
+        });
+      }
+    });
+  }
+
+  Future<void> _checkDirectory() async {
+    if (_busy) return;
+    final directory = _directory.text.trim();
+    final revision = _directoryRevision;
+    setState(() {
+      _checking = true;
+      _error = null;
+    });
+    try {
+      final result = await _checks.checkDirectory(directory);
+      if (mounted &&
+          revision == _directoryRevision &&
+          result.directory == directory) {
+        setState(() {
+          _directoryCheck = result;
+          _checkedDirectory = result.writable ? directory : null;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = '无法完成文件夹检查，请重试或选择其他位置。');
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  Future<void> _checkTool(MediaTool tool, String executable) async {
+    if (_busy) return;
+    setState(() => _runningTool = tool);
+    try {
+      final result = await _checks.checkTool(tool, executable);
+      if (mounted) setState(() => _toolResults[tool] = result);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _toolResults[tool] =
+            const ToolCheck(ToolCheckState.failed, '版本检测失败，请检查路径后重试。'));
+      }
+    } finally {
+      if (mounted) setState(() => _runningTool = null);
+    }
+  }
+
+  Widget _tools() {
+    final media = _app.downloaderConfig.value.protocolConfig.media;
+    final tools = {
+      MediaTool.ytDlp: media.ytDlpPath,
+      MediaTool.ffmpeg: media.ffmpegPath,
+      MediaTool.node: media.jsRuntimePath ?? ''
+    };
+    return ExpansionTile(
+      key: const ValueKey('onboarding-tools'),
+      tilePadding: EdgeInsets.zero,
+      title: const Text('媒体工具（可选）', style: TextStyle(fontSize: 12)),
+      children: [
+        const Text(
+            '配置由内核按既有优先级解析；此处未取得内核有效路径。仅对你明确配置的绝对路径检测版本，不安装工具。配置可在“下载 → 连接与工具”中编辑。',
+            style: TextStyle(fontSize: 11)),
+        for (final entry in tools.entries)
+          Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                        '${entry.key.label}：${entry.value.isEmpty ? '未配置自定义路径' : entry.value}',
+                        style: const TextStyle(fontSize: 12)),
+                    Text(_toolResults[entry.key]?.message ?? '有效路径及版本：未检测。',
+                        key: ValueKey(
+                            'onboarding-tool-result-${entry.key.name}'),
+                        style: const TextStyle(fontSize: 11)),
+                    Text(
+                        '仅运行此文件 ${entry.key.versionArguments.join(' ')}，最多3秒、输出最多4 KiB；不验证媒体下载。',
+                        style: const TextStyle(fontSize: 11)),
+                    MacButton(
+                        key: ValueKey('onboarding-tool-${entry.key.name}'),
+                        onPressed: _busy || !path.isAbsolute(entry.value)
+                            ? null
+                            : () => _checkTool(entry.key, entry.value),
+                        child: Text(
+                            _runningTool == entry.key ? '正在检测…' : '检测此文件版本')),
+                  ])),
+      ],
+    );
+  }
+
   bool _saving = false;
   bool _choosing = false;
   bool _explaining = false;
@@ -80,13 +194,13 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
   }
 
   void _cancel() {
-    if (!_saving && !_choosing && !_explaining) {
+    if (!_busy) {
       Navigator.of(context).pop(false);
     }
   }
 
   Future<void> _showBrowserGuide() async {
-    if (_saving || _choosing || _explaining) return;
+    if (_busy) return;
     setState(() => _explaining = true);
     try {
       await MacPanel.transient(() => showDialog<void>(
@@ -113,10 +227,17 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
   }
 
   Future<void> _complete() async {
-    if (_saving || _choosing || _explaining) return;
+    if (_busy) return;
     final directory = _directory.text.trim();
     if (directory.isEmpty) {
-      setState(() => _error = '请选择下载保存位置。');
+      setState(() => _error =
+          _directoryCheck?.state == DirectoryCheckState.empty
+              ? null
+              : '请选择下载保存位置。');
+      return;
+    }
+    if (_checkedDirectory != directory) {
+      setState(() => _error = '请先检查此文件夹的写入权限，再完成教程。');
       return;
     }
     setState(() {
@@ -127,11 +248,15 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
     final previousDirectory = config.downloadDir;
     var directorySaved = false;
     try {
-      config.downloadDir = directory;
-      await _app.saveConfig();
-      directorySaved = true;
-      // Await Hive itself: Database.save does not expose write failures.
-      await Database.instance.box.put(MacOnboarding.completedKey, true);
+      if (!widget.previouslyCompleted || directory != previousDirectory) {
+        config.downloadDir = directory;
+        await _app.saveConfig();
+        directorySaved = true;
+      }
+      // Preserve the existing v1 marker on an explicit upgrade review.
+      if (!widget.previouslyCompleted) {
+        await Database.instance.box.put(MacOnboarding.completedKey, true);
+      }
       _app.downloaderConfig.refresh();
       if (mounted) Navigator.of(context).pop(true);
     } catch (_) {
@@ -153,7 +278,7 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
   @override
   Widget build(BuildContext context) {
     final c = MacColors.of(context);
-    final busy = _saving || _choosing || _explaining;
+    final busy = _busy;
     return PopScope(
       canPop: !busy,
       child: CallbackShortcuts(
@@ -185,7 +310,10 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
                                   fontSize: 17,
                                   fontWeight: FontWeight.w500)),
                           const SizedBox(height: 6),
-                          Text('确认保存位置，即可开始下载。',
+                          Text(
+                              widget.previouslyCompleted
+                                  ? '已完成原有教程。本次为手动复查，保留已有设置。'
+                                  : '检查保存位置后继续；浏览器和媒体工具可稍后设置。',
                               style:
                                   TextStyle(color: c.secondary, fontSize: 12)),
                           const SizedBox(height: 20),
@@ -235,6 +363,34 @@ class _DownloadTutorialState extends State<_DownloadTutorial> {
                                   onPressed: busy ? null : _chooseDirectory,
                                   child: const Text('选择…')),
                             ]),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                              '点击“检查写入权限”会在当前文件夹创建并删除一个检查专用临时文件。只在你确认后执行。',
+                              style: TextStyle(fontSize: 11)),
+                          MacButton(
+                              key: const ValueKey('onboarding-check-directory'),
+                              onPressed: busy ? null : _checkDirectory,
+                              child: Text(_checking ? '正在检查…' : '检查写入权限')),
+                          if (_directoryCheck != null)
+                            Text(_directoryCheck!.message,
+                                key: const ValueKey(
+                                    'onboarding-directory-result'),
+                                style: const TextStyle(fontSize: 11)),
+                          _tools(),
+                          const ExpansionTile(
+                            key: ValueKey('onboarding-gatekeeper'),
+                            tilePadding: EdgeInsets.zero,
+                            title: Text('macOS 首次打开帮助',
+                                style: TextStyle(fontSize: 12)),
+                            children: [
+                              Text(
+                                  '此版本尚未经过 Apple 公证。如果系统提示无法验证开发者或无法检查恶意软件，先确认应用来源可信且未被篡改，再尝试打开应用，并在“系统设置 → 隐私与安全性”中按系统提示点“仍要打开”，再次确认“打开”。受管理设备可能不提供此选项。若提示会损坏电脑或应用已损坏，请停止并核实来源，不按此流程继续。',
+                                  style: TextStyle(fontSize: 11)),
+                              SelectableText(
+                                  'Apple 官方说明：https://support.apple.com/zh-cn/102445',
+                                  style: TextStyle(fontSize: 11)),
+                            ],
                           ),
                           const SizedBox(height: 14),
                           Text('直接粘贴视频或网盘链接，会按需提示下一步。',
@@ -361,7 +517,7 @@ class _BrowserDownloadGuideState extends State<_BrowserDownloadGuide> {
                               fontSize: 17,
                               fontWeight: FontWeight.w500)),
                       const SizedBox(height: 6),
-                      Text('从 Chrome 或 Edge 发送网页中的视频与网盘文件。',
+                      Text('支持 Chrome 和 Edge。浏览器运行时连接尚未验证；打开助手文件夹或完成教程不代表已连接。',
                           style: TextStyle(
                               color: c.secondary, fontSize: 12, height: 1.4)),
                       const SizedBox(height: 18),
@@ -418,7 +574,7 @@ class _BrowserDownloadGuideState extends State<_BrowserDownloadGuide> {
                               color: c.border),
                           _step(context, '3', '发送网页中的下载', [
                             Text(
-                                '回到视频或网盘网页并刷新。播放视频后点击下载按钮；网盘勾选文件后点击“kownload 下载”。',
+                                '安装或更新后，在对应浏览器资料中确认扩展已启用并按需重新加载，回到视频或网盘网页并刷新。下载接管需要开启助手内开关并按提示允许 管理下载内容的权限；未授权时可继续使用手动下载。播放视频后点击下载按钮；网盘勾选文件后点击“kownload 下载”。连接及账号同步仍须在实际使用时确认，此教程未进行验证。',
                                 style: TextStyle(
                                     color: c.secondary,
                                     fontSize: 12,

@@ -1,5 +1,6 @@
 // Independently implemented against Chrome downloads and our Native contract.
 import {newOperationId,safeHeader,protectedHeaders,createAppBridge} from './lib.js';
+import {validBridgeBinding} from './native-identity.js';
 
 const PENDING='downloadHandoffPendingV1';
 const httpURL=value=>{try{return /^https?:$/.test(new URL(value).protocol);}catch{return false;}};
@@ -24,6 +25,7 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
       version:1,id,name:job.name,operationId:job.operationId,state:job.state,stage:job.stage,
       posted:!!job.posted,download:job.download,clientId:job.clientId,browser:job.browser,
       browserRetained:!!job.browserRetained,cancelConfirmed:!!job.cancelConfirmed,
+      ...(job.bridgeBinding ? {bridgeBinding:job.bridgeBinding} : {}),
       ...(job.taskId ? {taskId:job.taskId} : {})
     }]));
     writing=writing.catch(()=>{}).then(()=>browser.storage.local.set({[PENDING]:records}));
@@ -54,7 +56,7 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
   async function returnToBrowser(job,{pending=false}={}) {
     // Durable retained flag prevents a late prepared reply from taking ownership.
     job.browserRetained=true;
-    await persist();
+    try {await persist();} catch(error) {if(job.posted)throw error;}
     try {
       let snapshot;
       try {snapshot=await current(job);} catch(error) {
@@ -66,7 +68,7 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     } finally {release(job);}
   }
   async function abort(job,reason) {
-    return appBridge.request('handoffAbort',{operationId:job.operationId,...(job.taskId?{taskId:job.taskId}:{}),reason});
+    return appBridge.request('handoffAbort',{operationId:job.operationId,...(job.taskId?{taskId:job.taskId}:{}),reason},job.bridgeBinding);
   }
   async function retain(job,reason='browser_retained') {
     job.browserRetained=true;await persist();
@@ -90,7 +92,7 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
   async function commit(job) {
     if(!job.cancelConfirmed || !job.taskId)throw Error('unconfirmed_cancellation');
     job.stage='commit';await state(job,'committing');
-    const data=await appBridge.request('handoffCommit',{operationId:job.operationId,taskId:job.taskId,download:job.download,cancelConfirmed:true,browserState:{state:'interrupted',error:'USER_CANCELED'}});
+    const data=await appBridge.request('handoffCommit',{operationId:job.operationId,taskId:job.taskId,download:job.download,cancelConfirmed:true,browserState:{state:'interrupted',error:'USER_CANCELED'}},job.bridgeBinding);
     validate(job,data);
     if(data.state!=='committed')throw Error('commit_unconfirmed');
     await state(job,'committed',{resolved:true});
@@ -143,9 +145,10 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
   }
   async function poll(job) {
     if(job.polling || job.resolved)return;
+    if(!validBridgeBinding(job.bridgeBinding)){await uncertain(job);return;}
     job.polling=true;
     try {
-      const data=await appBridge.request('handoffQuery',{operationId:job.operationId});
+      const data=await appBridge.request('handoffQuery',{operationId:job.operationId},job.bridgeBinding);
       await receipt(job,data);
     } catch {
       if(job.cancelConfirmed || job.stage==='cancel_intent' || job.stage==='commit')await uncertain(job);
@@ -153,13 +156,13 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     } finally {job.polling=false;}
   }
   async function submit(job) {
-    const capability=await appBridge.request('handoffCapabilities');
+    const capability=await appBridge.request('handoffCapabilities',{},job.bridgeBinding);
     if(capability?.version!==1){await returnToBrowser(job);return;}
     const {item,matches}=await current(job);
     if(!matches || item.state!=='in_progress' || !item.paused){await returnToBrowser(job);return;}
     job.stage='prepare';job.posted=true;await state(job,'sending');
     try {
-      const data=await appBridge.request('handoffPrepare',{operationId:job.operationId,download:job.download,req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}});
+      const data=await appBridge.request('handoffPrepare',{operationId:job.operationId,download:job.download,req:{url:job.url,extra:{header:job.header}},opts:{name:job.name}},job.bridgeBinding);
       await receipt(job,data);
     } catch {await poll(job);}
   }
@@ -175,19 +178,22 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
       if(job.clientId!==identity.clientId || job.browser!==identity.browser)continue;
       try {
         if(!job.posted){await returnToBrowser(job);continue;}
+        if(!validBridgeBinding(job.bridgeBinding)){await uncertain(job);continue;}
+        await appBridge.binding(job.bridgeBinding);
         job.releaseNative=appBridge.acquire();
         await poll(job);
       } catch {await uncertain(job);}
     }
     // Core can retain a prepared task even if the helper journal was removed.
     // Without our durable cancel proof it remains held; never guess or recreate.
+    if([...jobs.values()].some(job=>job.posted && (!validBridgeBinding(job.bridgeBinding) || job.state==='uncertain')))return;
     try {
       const data=await appBridge.request('handoffQuery',{pending:true});
       if(data?.version!==1 || !Array.isArray(data.items))return;
       for(const record of data.items) {
         if(record.state!=='prepared' || !validId(record.operationId) || !validBinding(record.download) || !validTaskId(record.taskId) || jobs.has(record.download.id))continue;
-        const job={id:record.download.id,download:record.download,operationId:record.operationId,taskId:record.taskId,...identity,posted:true,browserRetained:true,stage:'prepare',state:'prepared',resolved:false};
-        jobs.set(job.id,job);await retain(job);
+        const job={id:record.download.id,download:record.download,operationId:record.operationId,taskId:record.taskId,...identity,bridgeBinding:await appBridge.binding(),posted:true,browserRetained:true,stage:'prepare',state:'prepared',resolved:false};
+        jobs.set(job.id,job);await persist();await retain(job);
       }
     } catch {}
   }).catch(()=>{});
@@ -204,9 +210,11 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
       job.download={id:item.id,startTime:item.startTime,urlHash:await sha256(url)};
       Object.assign(job,await appBridge.identity());
       if(!validBinding(job.download))throw Error('download_identity_unavailable');
+      job.bridgeBinding=Object.freeze(await appBridge.binding());
+      await persist();
       job.releaseNative=appBridge.acquire();
-      if(activeConfig?.enabled!==false)await appBridge.wake();
-      const settings=await appBridge.settings();activeConfig=settings.downloadCapture;
+      if(activeConfig?.enabled!==false)await appBridge.wake(job.bridgeBinding);
+      const settings=await appBridge.settings(job.bridgeBinding);activeConfig=settings.downloadCapture;
       if(!activeConfig.enabled){await returnToBrowser(job);return;}
       await persist();await submit(job);
     } catch {

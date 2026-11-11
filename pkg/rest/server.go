@@ -168,6 +168,12 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	r.Methods(http.MethodPost).Path("/api/v1/webhook/test").HandlerFunc(TestWebhook)
 	r.Path("/api/v1/proxy").HandlerFunc(DoProxy)
 
+	// Keep MCP reads on the existing UDS router and its authentication chain.
+	// Register before the optional Web catch-all; never expose this on TCP.
+	if startCfg.Network == "unix" {
+		RegisterMCPReadRoutes(r, Downloader)
+	}
+
 	enableApiToken := startCfg.ApiToken != ""
 	enableWebAuth := startCfg.WebEnable && startCfg.WebAuth != nil
 	if startCfg.WebEnable {

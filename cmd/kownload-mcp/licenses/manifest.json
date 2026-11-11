@@ -1,0 +1,83 @@
+[
+  {
+    "module": "github.com/modelcontextprotocol/go-sdk@v1.7.0",
+    "files": [
+      {
+        "file": "github.com_modelcontextprotocol_go-sdk@v1.7.0_LICENSE",
+        "sha256": "af679003d933f045393a6a029f43da113f9ae364eac651d9ae268392985580f5"
+      }
+    ]
+  },
+  {
+    "module": "github.com/google/jsonschema-go@v0.4.3",
+    "files": [
+      {
+        "file": "github.com_google_jsonschema-go@v0.4.3_LICENSE",
+        "sha256": "2d56c53449691d85d9aea245eb8dac12713e9075d70d5557b82ae1e94805b357"
+      }
+    ]
+  },
+  {
+    "module": "golang.org/x/sys@v0.41.0",
+    "files": [
+      {
+        "file": "golang.org_x_sys@v0.41.0_LICENSE",
+        "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+      }
+    ]
+  },
+  {
+    "module": "github.com/segmentio/asm@v1.1.3",
+    "files": [
+      {
+        "file": "github.com_segmentio_asm@v1.1.3_LICENSE",
+        "sha256": "e2a78de21d6d8ded2dff0f3189cd32e011630d785da127ebfbc8949012c0947b"
+      }
+    ]
+  },
+  {
+    "module": "github.com/segmentio/encoding@v0.5.4",
+    "files": [
+      {
+        "file": "github.com_segmentio_encoding@v0.5.4_LICENSE",
+        "sha256": "d6d71a1f7dc6539e371120cc7af6e3257e55ca79634d473211f217b8965b0f16"
+      }
+    ]
+  },
+  {
+    "module": "github.com/yosida95/uritemplate/v3@v3.0.2",
+    "files": [
+      {
+        "file": "github.com_yosida95_uritemplate_v3@v3.0.2_LICENSE",
+        "sha256": "0761aadfb1921103752869ee942d4a71bdd54494697684d4b13dc17ad9781191"
+      }
+    ]
+  },
+  {
+    "module": "golang.org/x/oauth2@v0.35.0",
+    "files": [
+      {
+        "file": "golang.org_x_oauth2@v0.35.0_LICENSE",
+        "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+      }
+    ]
+  },
+  {
+    "module": "golang.org/x/sync@v0.20.0",
+    "files": [
+      {
+        "file": "golang.org_x_sync@v0.20.0_LICENSE",
+        "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+      }
+    ]
+  },
+  {
+    "module": "golang.org/x/time@v0.15.0",
+    "files": [
+      {
+        "file": "golang.org_x_time@v0.15.0_LICENSE",
+        "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+      }
+    ]
+  }
+]

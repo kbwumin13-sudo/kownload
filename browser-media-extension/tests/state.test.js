@@ -1,4 +1,4 @@
-import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
+import {identityReply,contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,7 +19,7 @@ function browser(seed = {}) {
     cookies:{getAllCookieStores:async () => [{id:'store-private',tabIds:[1]}],getPartitionKey:async () => ({partitionKey:{topLevelSite:'https://example.test',hasCrossSiteAncestor:true}}),getAll:async query => {cookiesQuery = query;return [];}},
     action:{setBadgeText:async () => {},setBadgeBackgroundColor:async () => {}},webNavigation:{getAllFrames:async () => [],onCommitted:{addListener:fn => {navigation.commit = fn;}},onHistoryStateUpdated:{addListener:fn => {navigation.spa = fn;}},onReferenceFragmentUpdated:event},
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k => [k,event])),
-    runtime:{onMessage:{addListener:fn => {handler = fn;}},sendMessage:async () => {counts.notifications++;},getURL:path => 'chrome-extension://test/'+path,sendNativeMessage:(host,msg,cb) => {counts.native++;nativeReply(msg).then(reply => cb(contractReply(msg,reply)));}}};
+    runtime:{id:'test',onMessage:{addListener:fn => {handler = fn;}},sendMessage:async () => {counts.notifications++;},getURL:path => 'chrome-extension://test/'+path,sendNativeMessage:(host,msg,cb) => {const info=identityReply(msg);if(info){cb(info);return;}counts.native++;nativeReply(msg).then(reply => cb(contractReply(msg,reply)));}}};
   vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,createAppBridge:()=>({settings:async()=>({sniffing:{disabledSites:local.disabledSites||{}}}),updateSettings:async patch=>{await chrome.storage.local.set({disabledSites:patch.sniffing.disabledSites});return {sniffing:{disabledSites:patch.sniffing.disabledSites}};}}),installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
   return {chrome,memory,counts,navigate:async data => {navigation.spa(data);await new Promise(resolve => setImmediate(resolve));},setNative:fn => {nativeReply = fn;},cookieQuery:() => cookiesQuery,request:(msg,sender = {}) => new Promise(resolve => handler(msg,sender,resolve))};
 }

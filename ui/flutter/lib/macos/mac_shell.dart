@@ -80,9 +80,11 @@ class _MacShellState extends State<MacShell> {
       builder: (context, section, _) {
         final selected = widget.selectedIndex == 0
             ? 'tasks'
-            : _sections.containsKey(section)
-                ? section
-                : 'general';
+            : const ['advanced', 'connections'].contains(section)
+                ? 'download'
+                : _sections.containsKey(section)
+                    ? section
+                    : 'general';
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           MacAppearance.setWindowTint(

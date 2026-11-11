@@ -12,10 +12,12 @@ import (
 )
 
 type Request struct {
-	Method      string          `json:"method"`
-	OperationID string          `json:"operationId,omitempty"`
-	Meta        map[string]any  `json:"meta,omitempty"`
-	Params      json.RawMessage `json:"params,omitempty"`
+	Method           string          `json:"method"`
+	OperationID      string          `json:"operationId,omitempty"`
+	Meta             map[string]any  `json:"meta,omitempty"`
+	Params           json.RawMessage `json:"params,omitempty"`
+	IdentityProtocol *int            `json:"identityProtocol,omitempty"`
+	BridgeBinding    *BridgeBinding  `json:"bridgeBinding,omitempty"`
 }
 type Submission struct {
 	State   string   `json:"state"`
@@ -39,8 +41,9 @@ type Wakeup interface {
 	Ensure(context.Context, bool) error
 }
 type Dispatcher struct {
-	Client IPC
-	Wakeup Wakeup
+	Client   IPC
+	Wakeup   Wakeup
+	Identity *HostIdentity
 }
 
 var operationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -66,9 +69,14 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "invalid_request", nil, nil)
 		}
 	}
+	if kind := d.validateBinding(req); kind != "" {
+		return failure(req.OperationID, kind, nil, nil)
+	}
 	silent, _ := req.Meta["silent"].(bool)
 	success := Response{OperationID: req.OperationID, Message: ""}
 	switch req.Method {
+	case "hostInfo":
+		return d.hostInfo(ctx, req)
 	case "ping":
 		probe, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
@@ -107,6 +115,9 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 		defer cancel()
 		if !d.Client.Available(requestCtx) {
 			return failure(req.OperationID, "ipc_unavailable", nil, nil)
+		}
+		if kind := d.validateBinding(req); kind != "" {
+			return failure(req.OperationID, kind, nil, nil)
 		}
 		status, reply, err := d.Client.Post(requestCtx, "/browser", req)
 		if err != nil {
@@ -157,6 +168,9 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 		}
 		requestCtx, cancel := context.WithTimeout(ctx, budget)
 		defer cancel()
+		if kind := d.validateBinding(req); kind != "" {
+			return failure(req.OperationID, kind, nil, nil)
+		}
 		status, reply, err := d.Client.Post(requestCtx, "/"+req.Method, req)
 		if err != nil {
 			if status > 0 {
