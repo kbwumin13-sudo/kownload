@@ -359,11 +359,11 @@ func (d *Downloader) RetryRecoveryForDataset(ctx context.Context, dataset, id st
 	}
 	if fresh {
 		if err := ctx.Err(); err != nil {
-			invalidateTaskRecovery(task)
+			invalidateExplicitRetry(task, generation, state)
 			return state, err
 		}
 		if err := d.Continue(&TaskFilter{IDs: []string{id}}); err != nil {
-			invalidateTaskRecovery(task)
+			invalidateExplicitRetry(task, generation, state)
 			return state, err
 		}
 	}
@@ -372,6 +372,26 @@ func (d *Downloader) RetryRecoveryForDataset(ctx context.Context, dataset, id st
 		outcome = "accepted"
 	}
 	return recoveryReceipt(state, request, outcome), nil
+}
+
+// Post-commit request cleanup owns only the preparation that committed this
+// receipt. A later Continue/new episode/source CAS must keep its own token and
+// one-shot authorization. The owner never acquires a Task lock in reverse.
+func invalidateExplicitRetry(task *Task, generation uint64, state RecoveryTaskState) {
+	task.statusLock.Lock()
+	defer task.statusLock.Unlock()
+	if task.runGeneration != generation {
+		return
+	}
+	owner := task.recoveryOwner.Load()
+	if owner == nil {
+		return
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.record.Episode == state.Episode && owner.record.Generation == state.Generation && owner.record.SourceRevision == state.SourceRevision {
+		owner.invalidate()
+	}
 }
 
 // Caller first joins the old writer outside Task/Downloader/owner locks, then
