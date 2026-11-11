@@ -32,6 +32,7 @@ class HttpTaskRetryButton extends StatefulWidget {
 class _Attempt {
   final HttpRecoveryApi api;
   final HttpRetryAction action;
+  bool acknowledged = false;
   _Attempt(this.api, this.action);
 }
 
@@ -40,6 +41,7 @@ class _Attempt {
 /// neither a new button nor an API reinit grants another POST for that entry.
 class HttpRetrySession extends ChangeNotifier {
   final _attempts = <String, _Attempt>{};
+  final _latest = <String, _Attempt>{};
   static const _capacity = 2048;
   String? _route(api.ActiveApiSnapshot? snapshot) {
     final route = snapshot?.taskBatchRoute;
@@ -51,7 +53,7 @@ class HttpRetrySession extends ChangeNotifier {
   _Attempt? _forTask(api.ActiveApiSnapshot? snapshot, String taskId) {
     final route = _route(snapshot);
     if (route == null) return null;
-    for (final attempt in _attempts.values) {
+    for (final attempt in _latest.values) {
       if (attempt.api.taskId == taskId &&
           _route(attempt.api.snapshot) == route) {
         // Also retain a different dataset's reference. The caller must hold it,
@@ -62,16 +64,40 @@ class HttpRetrySession extends ChangeNotifier {
     return null;
   }
 
-  _Attempt _retain(_Attempt candidate) {
+  void _acknowledge(_Attempt attempt, HttpRecoveryReply reply) {
+    final receipt = reply.recovery?.receipt;
+    if (receipt == null ||
+        !const ['accepted', 'replayed'].contains(receipt.state) ||
+        receipt.newEpisode == attempt.action.expectedEpisode ||
+        !_attempts.containsValue(attempt)) {
+      return;
+    }
+    if (!attempt.acknowledged) {
+      attempt.acknowledged = true;
+      notifyListeners();
+    }
+  }
+
+  _Attempt _retain(_Attempt candidate, {_Attempt? previous}) {
     final existing = _forTask(candidate.api.snapshot, candidate.api.taskId);
-    if (existing != null) return existing;
+    if (existing != null &&
+        (!identical(existing, previous) ||
+            !existing.acknowledged ||
+            candidate.action.expectedEpisode ==
+                existing.action.expectedEpisode)) {
+      return existing;
+    }
+    if (previous != null && existing == null) {
+      throw StateError('retry_state_changed');
+    }
     if (_attempts.length >= _capacity) throw StateError('retry_session_full');
     final key = jsonEncode([
       _route(candidate.api.snapshot),
       candidate.api.identity.datasetId,
       candidate.api.taskId
     ]);
-    _attempts[key] = candidate;
+    _attempts[jsonEncode([key, candidate.action.toQuery()])] = candidate;
+    _latest[key] = candidate;
     notifyListeners();
     return candidate;
   }
@@ -86,7 +112,7 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
   CancelToken? _cancel;
   HttpRetrySession get _session => widget.session ?? _applicationRetrySession;
   _Attempt? get _retained =>
-      _attempt ?? _session._forTask(api.activeApiSnapshot, widget.task.id);
+      _session._forTask(api.activeApiSnapshot, widget.task.id) ?? _attempt;
   void _sessionChanged() {
     if (mounted) setState(() {});
   }
@@ -138,7 +164,8 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
   void _message(HttpRecoveryReply reply) {
     final r = reply.recovery;
     final state = r?.receipt?.state;
-    if (state == 'accepted' || state == 'replayed') {
+    if ((state == 'accepted' || state == 'replayed') &&
+        _attempt?.acknowledged == true) {
       widget.notice('重试已受理；下载进度以任务状态为准。');
     } else if (state == 'stale') {
       widget.notice('原重试状态已变化，未重新发送。');
@@ -165,6 +192,8 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
     final reply =
         await retained.api.query(action: retained.action, cancelToken: cancel);
     if (!_current(epoch, snapshot, taskId)) return;
+    _session._acknowledge(retained, reply);
+    if (!identical(_retained, retained)) return;
     _message(reply);
     await widget.refresh();
   }
@@ -184,15 +213,21 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
         widget.task.handoff?.blocked == true) {
       return;
     }
+    // Capture intent at the click, not after a concurrent action's ACK arrives.
+    final atClick = _retained;
+    final nextIntent = atClick?.acknowledged == true;
     final epoch = ++_epoch;
     final cancel = CancelToken();
     _cancel = cancel;
     setState(() => _busy = true);
     try {
-      final retained = _retained;
+      final retained = atClick;
       if (retained != null) {
-        await _queryOriginal(retained, snapshot, epoch, taskId, cancel);
-        return;
+        _attempt = retained;
+        if (!nextIntent || !identical(retained.api.snapshot, snapshot)) {
+          await _queryOriginal(retained, snapshot, epoch, taskId, cancel);
+          return;
+        }
       }
       if (widget.task.status != Status.error) return;
       final identity =
@@ -203,8 +238,14 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
         return;
       }
       final duringIdentity = _retained;
-      if (duringIdentity != null) {
+      if (duringIdentity != null &&
+          (!nextIntent || !identical(duringIdentity, atClick))) {
         await _queryOriginal(duringIdentity, snapshot, epoch, taskId, cancel);
+        return;
+      }
+      if (atClick != null &&
+          identity.datasetId != atClick.api.identity.datasetId) {
+        widget.notice('连接或数据域已变化，原重试仅保留，未向新数据域发送。');
         return;
       }
       final client = HttpRecoveryApi(
@@ -216,14 +257,27 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
           state.status != 'error' ||
           widget.task.status != Status.error ||
           !await client.sameDataset(cancelToken: cancel)) {
-        if (_current(epoch, snapshot, taskId)) _message(read);
+        if (_current(epoch, snapshot, taskId)) {
+          if (state != null && state.status != 'error') {
+            widget.notice('任务当前未处于可重试的失败状态。');
+          } else {
+            _message(read);
+          }
+        }
         return;
       }
       if (!_current(epoch, snapshot, taskId)) return;
       if (widget.task.status != Status.error) return;
       final duringPreflight = _retained;
-      if (duringPreflight != null) {
+      if (duringPreflight != null &&
+          (!nextIntent || !identical(duringPreflight, atClick))) {
         await _queryOriginal(duringPreflight, snapshot, epoch, taskId, cancel);
+        return;
+      }
+      if (atClick != null &&
+          (state.management != 'managed' ||
+              state.episode == atClick.action.expectedEpisode)) {
+        await _queryOriginal(atClick, snapshot, epoch, taskId, cancel);
         return;
       }
       if (state.management == 'legacy') {
@@ -244,7 +298,8 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
       // Synchronous consumption before the only POST. Cancellation, late ACK,
       // repeated click or a not_recorded query cannot recreate this permission.
       final candidate = _Attempt(client, action);
-      final selected = _session._retain(candidate);
+      final selected =
+          _session._retain(candidate, previous: nextIntent ? atClick : null);
       _attempt = selected;
       if (!identical(selected, candidate)) {
         await _queryOriginal(selected, snapshot, epoch, taskId, cancel);
@@ -252,6 +307,8 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
       }
       final reply = await client.retry(action, cancelToken: cancel);
       if (!_current(epoch, snapshot, taskId)) return;
+      _session._acknowledge(candidate, reply);
+      if (!identical(_retained, candidate)) return;
       _message(reply);
       await widget.refresh();
     } catch (_) {
@@ -275,7 +332,9 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
           ? '停止等待'
           : _retained == null
               ? '重试'
-              : '查询原重试',
+              : _retained!.acknowledged
+                  ? '再次重试'
+                  : '查询原重试',
       color: widget.color,
       constraints: widget.compact
           ? const BoxConstraints.tightFor(width: 24, height: 28)
@@ -284,7 +343,7 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
       icon: Icon(
           _busy
               ? Icons.stop_circle_outlined
-              : _retained == null
+              : _retained == null || _retained!.acknowledged
                   ? Icons.refresh
                   : Icons.manage_search,
           size: widget.compact ? 16 : 18),

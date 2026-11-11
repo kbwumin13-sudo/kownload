@@ -4,28 +4,37 @@ import 'scoped_task_batch_fixture.dart';
 class HttpRecoveryFixture extends ScopedBatchFixture {
   String replyMode = 'managed';
   String taskId = '_task-1';
+  String episode = 'ep-a', status = 'error';
   @override
   void reset() {
     super.reset();
     replyMode = 'managed';
+    episode = 'ep-a';
+    status = 'error';
   }
 
   Map<String, dynamic> view({String management = 'managed', Map? action}) {
     final result = <String, dynamic>{
       'version': 1,
       'taskId': taskId,
-      'status': 'error',
+      'status': status,
       'management': management,
-      'retryAllowed': management == 'managed',
+      'retryAllowed': management == 'managed' && status == 'error',
       'reason': management == 'managed'
-          ? 'explicit_retry_available'
+          ? status == 'error'
+              ? 'explicit_retry_available'
+              : 'not_error'
           : management == 'legacy'
               ? 'not_managed'
               : 'recovery_held'
     };
     if (management != 'managed') return result;
     result.addAll({
-      'episode': action == null ? 'ep-a' : 'ep-b',
+      'episode': action == null
+          ? episode
+          : action['expectedEpisode'] == 'ep-b'
+              ? 'ep-c'
+              : 'ep-b',
       'generation': 7,
       'sourceRevision': 1,
       'totalUsed': 6,
@@ -38,7 +47,7 @@ class HttpRecoveryFixture extends ScopedBatchFixture {
           'version': 1,
           'actionId': action['actionId'],
           'fromEpisode': action['expectedEpisode'],
-          'toEpisode': 'ep-b',
+          'toEpisode': action['expectedEpisode'] == 'ep-b' ? 'ep-c' : 'ep-b',
           'sourceRevision': int.parse('${action['expectedSourceRevision']}')
         };
       }
@@ -50,7 +59,8 @@ class HttpRecoveryFixture extends ScopedBatchFixture {
             int.parse('${action['expectedSourceRevision']}'),
         'decision': 'retry',
         'state': accepted ? 'accepted' : replyMode,
-        if (accepted) 'newEpisode': 'ep-b',
+        if (accepted)
+          'newEpisode': action['expectedEpisode'] == 'ep-b' ? 'ep-c' : 'ep-b',
         'queryRequired': replyMode == 'not_recorded'
       };
     }

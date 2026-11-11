@@ -87,7 +87,7 @@ void main() {
         Map.from(f.requests.singleWhere((r) => r['method'] == 'POST')['body']);
     expect(body['expectedEpisode'], 'ep-a');
     expect(messages.single, contains('已受理'));
-    await click(t, '查询原重试');
+    await click(t, '再次重试');
     await spin(t, () => refresh == 2);
     expect(f.posts, 1);
     final q = (f.requests.last['uri'] as Uri).queryParameters;
@@ -115,6 +115,36 @@ void main() {
     expect(f.posts, 1);
     expect(
         (f.requests.last['uri'] as Uri).queryParameters['actionId'], original);
+  });
+  widgetTest(
+      'accepted then running then new error episode allows explicit next action',
+      (t) async {
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    expect(messages.single, contains('已受理'));
+    expect(f.posts, 1);
+    final first =
+        Map.from(f.requests.singleWhere((r) => r['method'] == 'POST')['body']);
+    f.episode = 'ep-b';
+    f.status = 'running';
+    await t.pumpWidget(const SizedBox());
+    await mount(t, task: sample()..status = Status.running);
+    expect(f.posts, 1);
+    f.status = 'error';
+    await t.pumpWidget(const SizedBox());
+    await mount(t);
+    await t.tap(find.byType(IconButton));
+    await t.pump();
+    await spin(t, () => refresh == 2);
+    expect(f.posts, 2);
+    final second =
+        Map.from(f.requests.lastWhere((r) => r['method'] == 'POST')['body']);
+    expect(first['expectedEpisode'], 'ep-a');
+    expect(second['expectedEpisode'], 'ep-b');
+    expect(second['expectedSourceRevision'], 1);
+    expect(second['actionId'], isNot(first['actionId']));
+    expect(legacy, 0);
   });
   widgetTest('two mounted entry points share a pending first POST action',
       (t) async {
@@ -280,6 +310,91 @@ void main() {
     } finally {
       f.taskId = originalId;
     }
+  });
+  widgetTest(
+      'unconfirmed old action cannot retry even when current episode changed',
+      (t) async {
+    f.override = (request) async {
+      if (request.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(request);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    final original = (f.requests
+        .singleWhere((r) => r['method'] == 'POST')['body'] as Map)['actionId'];
+    await t.pumpWidget(const SizedBox());
+    f.override = null;
+    f.replyMode = 'stale';
+    f.episode = 'ep-b';
+    await mount(t);
+    await click(t, '查询原重试');
+    await spin(t, () => refresh == 2);
+    expect(f.posts, 1);
+    expect(find.byTooltip('查询原重试'), findsOneWidget);
+    expect(
+        (f.requests.last['uri'] as Uri).queryParameters['actionId'], original);
+  });
+  widgetTest('acknowledged retry cannot reset while Core says running',
+      (t) async {
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    f.episode = 'ep-b';
+    f.status = 'running';
+    await click(t, '再次重试');
+    await spin(t, () => messages.length == 2);
+    expect(f.posts, 1);
+    expect(legacy, 0);
+    expect(messages.last, contains('未处于可重试'));
+  });
+  widgetTest('two next-episode clicks only reserve one new action', (t) async {
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    f.episode = 'ep-b';
+    final gate = Completer<void>();
+    cleanup.add(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    var reads = 0;
+    f.override = (request) async {
+      if (request.uri.path.endsWith('/recovery/v1') &&
+          request.uri.queryParameters.isEmpty) {
+        reads++;
+        await gate.future;
+      }
+      if (request.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(request);
+    };
+    Widget button(String id) => HttpTaskRetryButton(
+        key: ValueKey(id),
+        session: session,
+        task: sample(),
+        legacyContinue: () async {
+          legacy++;
+        },
+        refresh: () async {
+          refresh++;
+        },
+        notice: messages.add);
+    await t.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: Row(children: [button('next-a'), button('next-b')]))));
+    for (final id in ['next-a', 'next-b']) {
+      await t.tap(find.descendant(
+          of: find.byKey(ValueKey(id)), matching: find.byType(IconButton)));
+      await t.pump();
+    }
+    await spin(t, () => reads == 2);
+    gate.complete();
+    await spin(t, () => refresh == 3);
+    expect(f.posts, 2);
+    final posts = f.requests.where((r) => r['method'] == 'POST').toList();
+    final next = posts.last['body'] as Map;
+    expect(next['expectedEpisode'], 'ep-b');
+    expect(next['actionId'], isNot((posts.first['body'] as Map)['actionId']));
+    expect(legacy, 0);
   });
   for (final mode in ['lostAck', '409', '503', 'redirect', 'html']) {
     widgetTest('POST $mode retains action and subsequent click is only GET',
