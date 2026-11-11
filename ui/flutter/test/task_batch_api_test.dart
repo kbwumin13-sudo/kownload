@@ -156,6 +156,7 @@ void main() {
     final result = await client.query(op);
     expect(result.code, 1000);
     expect(result.createdTaskIds, ['_stable']);
+    expect(result.requiresQuery, isTrue);
     expect(requests.single['method'], 'GET');
   });
   test('queryRequired and unknown responses never retry create or fall back',

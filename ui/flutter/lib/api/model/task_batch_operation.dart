@@ -149,6 +149,8 @@ class TaskBatchReply {
       hasMatchingSnapshot ? receipt!.taskIds : const [];
   bool get requiresQuery =>
       !hasMatchingSnapshot ||
+      statusCode != 200 ||
+      code != 0 ||
       receipt!.queryRequired ||
       receipt!.state != 'settled';
 }

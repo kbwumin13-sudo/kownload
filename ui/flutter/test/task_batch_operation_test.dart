@@ -96,12 +96,14 @@ void main() {
   });
   for (final status in [409, 503]) {
     test('HTTP $status and business failure retain partial receipt', () {
-      final result = reply(snapshot(), status: status, code: 1000);
+      final result =
+          reply(snapshot(state: 'settled'), status: status, code: 1000);
       expect(result.statusCode, status);
       expect(result.code, 1000);
       expect(result.message, 'fixed_category');
       expect(result.createdTaskIds, ['_created']);
-      expect(result.receipt!.members, hasLength(3));
+      expect(result.receipt!.members, hasLength(2));
+      expect(result.requiresQuery, isTrue);
     });
   }
   test('short queryRequired receipt never fabricates settled or zero counts',
