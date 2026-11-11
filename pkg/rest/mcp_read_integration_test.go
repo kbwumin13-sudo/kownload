@@ -157,8 +157,17 @@ func TestMCPReadBuildServerAuthentication(t *testing.T) {
 		t.Run(sample.name, func(t *testing.T) {
 			f := newMCPBuiltFixture(t, "unix", sample.token, sample.web, sample.webAuth)
 			status, body := f.request(t, "GET", mcpReadPrefix+"?limit=1", sample.header, "1")
+			// The real core's progress loop briefly owns the membership lock.
+			// Authentication success does not guarantee a TryLock snapshot on the
+			// first attempt. Retry only that exact transient response, never auth
+			// rejection, unavailable data or another 503, and keep a fixed bound.
+			deadline := time.Now().Add(time.Second)
+			for sample.status == http.StatusOK && status == http.StatusServiceUnavailable && body == "{\"version\":1,\"error\":\"snapshot_busy\"}\n" && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+				status, body = f.request(t, "GET", mcpReadPrefix+"?limit=1", sample.header, "1")
+			}
 			if status != sample.status {
-				t.Fatalf("status=%d want=%d", status, sample.status)
+				t.Fatalf("status=%d want=%d body=%q", status, sample.status, body)
 			}
 			if status == 200 && (!strings.Contains(body, `"version":1`) || !strings.Contains(body, `"id":"task_1"`)) {
 				t.Fatal("read route lost to Web fallback")
