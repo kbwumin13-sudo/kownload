@@ -28,6 +28,10 @@ type datasetReply struct {
 
 func datasetServer(t *testing.T, kind model.Storage, token string) (*http.Server, string, *download.Downloader, string) {
 	t.Helper()
+	previousCore, previousServer, previousAES, previousPort := Downloader, srv, aesKey, runningPort
+	// BuildServer publishes legacy globals even when this fixture serves its
+	// private listener directly. Restore them after closing only our instances.
+	t.Cleanup(func() { Downloader, srv, aesKey, runningPort = previousCore, previousServer, previousAES, previousPort })
 	dir := t.TempDir()
 	server, listener, err := BuildServer(&model.StartConfig{Storage: kind, StorageDir: dir, ApiToken: token})
 	if err != nil {
@@ -192,5 +196,25 @@ func TestDatasetCatalogRESTRemainsBoundToItsCore(t *testing.T) {
 	_, repeat := datasetGET(t, firstURL+"/api/v1/dataset/identity", "")
 	if bytes.Equal(first.Data, second.Data) || !bytes.Equal(first.Data, repeat.Data) {
 		t.Fatal("GET label followed another server's global Downloader")
+	}
+}
+
+func TestDatasetFixtureRestoresLegacyStart(t *testing.T) {
+	previousCore, previousServer, previousAES, previousPort := Downloader, srv, aesKey, runningPort
+	Downloader, srv, aesKey, runningPort = nil, nil, nil, 0
+	t.Cleanup(func() { Downloader, srv, aesKey, runningPort = previousCore, previousServer, previousAES, previousPort })
+	t.Run("private-server", func(t *testing.T) {
+		_, url, _, _ := datasetServer(t, model.StorageMem, "")
+		if status, _ := datasetGET(t, url+"/api/v1/dataset/identity", ""); status != 200 {
+			t.Fatal("private server not ready")
+		}
+	})
+	t.Cleanup(Stop)
+	port, err := Start(&model.StartConfig{Storage: model.StorageMem, StorageDir: t.TempDir()})
+	if err != nil || port == 0 {
+		t.Fatalf("legacy Start after fixture cleanup: port=%d err=%v", port, err)
+	}
+	if status, response := datasetGET(t, fmt.Sprintf("http://127.0.0.1:%d/api/v1/info", port), ""); status != 200 || response.Code != 0 {
+		t.Fatal("legacy Start did not publish a usable listener")
 	}
 }
