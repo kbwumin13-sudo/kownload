@@ -53,13 +53,21 @@ class HttpCompletionProjection {
         (const {'prepared', 'waiting_verify', 'verifying'}.contains(phase)
             ? match == null
             : match == true);
+    final unavailable = linked &&
+        raw['available'] == false &&
+        completion == null &&
+        phase == null &&
+        match == null &&
+        (error == null || errors.contains(error));
     return HttpCompletionProjection._(
         dataset is String ? dataset : null,
         taskId,
         valid ? completion : null,
         valid ? phase : null,
         valid ? match as bool? : null,
-        linked && errors.contains(error) ? error as String : null,
+        (valid || unavailable) && errors.contains(error)
+            ? error as String
+            : null,
         valid);
   }
   bool get available => _valid && _scopeCurrent?.call() == true;

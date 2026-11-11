@@ -97,6 +97,25 @@ void main() {
     }
   });
   test(
+      'malformed available/unavailable shapes cannot authorize an error category',
+      () {
+    for (final raw in [
+      {
+        ...projection(),
+        'phase': 'unknown',
+        'errorCategory': 'integrity_mismatch'
+      },
+      {...projection(), 'available': false, 'errorCategory': 'publish_conflict'}
+    ]) {
+      final p = HttpCompletionProjection.fromJson(raw, taskId: 'task')
+        ..bindToDataset('a' * 32, isCurrent: () => true);
+      expect(p.available, false);
+      expect(p.trustedErrorCategory, isNull);
+      expect(HttpCompletionView.fromTaskProjection(p).labelFor(Status.error),
+          '校验完成状态未确认');
+    }
+  });
+  test(
       'only same-domain typed errors are displayed; raw errors never interpreted',
       () {
     final p = HttpCompletionProjection.fromJson({
