@@ -264,7 +264,7 @@ func TestRecoveryOldSourceWaitCleanupCannotInvalidateCurrentToken(t *testing.T) 
 	task.Meta.Res = &base.Resource{Size: 1, Files: []*base.FileInfo{{Name: "token.bin", Size: 1}}}
 	f := &recoveryLateFetcher{meta: task.Meta}
 	task.fetcher = f
-	task.fetcherManager = &recoveryLateManager{}
+	task.fetcherManager = &recoverySourceCheckpointManager{}
 	d.lock.Lock()
 	d.tasks = append(d.tasks, task)
 	d.lock.Unlock()
@@ -278,12 +278,20 @@ func TestRecoveryOldSourceWaitCleanupCannotInvalidateCurrentToken(t *testing.T) 
 		}
 		runtime.Gosched()
 	}
+	// Follow persistSnapshot's caller contract, keeping the live request and
+	// durable source CAS consistent with the real periodic sampler.
+	task.lock.Lock()
 	snapshot := task.clone()
 	snapshot.Meta.Req.URL = "https://new-source.invalid/file"
 	if err = owner.persistSnapshot(snapshot, nil, false); err != nil {
+		task.lock.Unlock()
 		t.Fatal(err)
 	}
+	task.dataLock.Lock()
+	task.Meta.Req = snapshot.Meta.Req
+	task.dataLock.Unlock()
 	current, err := owner.currentLease(context.Background())
+	task.lock.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,4 +304,12 @@ func TestRecoveryOldSourceWaitCleanupCannotInvalidateCurrentToken(t *testing.T) 
 	if current.Check() != nil || task.getStatus() != base.DownloadStatusRunning {
 		t.Fatal("old source result/cleanup consumed current token")
 	}
+}
+
+// This fake participates in a real managed progress sampler; a nil checkpoint
+// is intentionally rejected by that contract and would test a different failure.
+type recoverySourceCheckpointManager struct{ recoveryLateManager }
+
+func (*recoverySourceCheckpointManager) Store(fetcher.Fetcher) (any, error) {
+	return map[string]any{"sourceWaitFixture": true}, nil
 }
