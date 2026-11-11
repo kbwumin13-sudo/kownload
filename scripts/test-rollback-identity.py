@@ -321,6 +321,29 @@ class SnapshotPair(Rollback):
         self.assertEqual(entry.stat().st_mode & 0o7777, 0o4700)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_destination_link_swap_never_changes_its_target(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        other = self.dir / 'outside-staging'
+        other.write_bytes(b'untouched outside staging')
+        self.marker_write(other, b'untouched marker')
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        write_marker = module.write_mcp_marker
+        def swapped_copy(path, original):
+            path.rename(path.with_name('copied-before-swap'))
+            path.symlink_to(other)
+            write_marker(path, original)
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=swapped_copy):
+            with self.assertRaises(ValueError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertEqual(self.marker_read(other), b'untouched marker')
+        self.assertEqual(other.read_bytes(), b'untouched outside staging')
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
     def test_mcp_marker_read_failure_refuses_before_copy(self):
         entry, value = self.mcp_fixture()
         raw = json.dumps(value).encode()

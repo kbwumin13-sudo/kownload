@@ -54,7 +54,7 @@ def tree_digest(root, app=False):
 def read_mcp_marker(path):
     # macOS Python does not always expose os.getxattr. Read exactly this key,
     # with a bounded hex result, and never list attributes or touch quarantine.
-    process = subprocess.Popen(['/usr/bin/xattr', '-px', MCP_MARKER, str(path)],
+    process = subprocess.Popen(['/usr/bin/xattr', '-s', '-px', MCP_MARKER, str(path)],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         encoded = process.stdout.read(MCP_MARKER_LIMIT * 4 + 1)
@@ -77,7 +77,7 @@ def read_mcp_marker(path):
 
 
 def write_mcp_marker(path, raw):
-    result = subprocess.run(['/usr/bin/xattr', '-wx', MCP_MARKER, raw.hex(), str(path)],
+    result = subprocess.run(['/usr/bin/xattr', '-s', '-wx', MCP_MARKER, raw.hex(), str(path)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if result.returncode != 0:
         raise ValueError('snapshot_mcp_marker_write_failed')
