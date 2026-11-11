@@ -1,15 +1,23 @@
 package rest
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/download"
+	"github.com/GopeedLab/gopeed/pkg/rest/model"
 	"github.com/gorilla/mux"
 )
 
@@ -135,5 +143,133 @@ func TestScopedBatchRESTRejectsInvalidOrUnverifiedResults(t *testing.T) {
 	router.ServeHTTP(legacy, httptest.NewRequest(http.MethodPost, "/api/v1/task-batches/operations", strings.NewReader(`{}`)))
 	if legacy.Code != http.StatusNotFound || len(fixture.calls) != 0 {
 		t.Fatal("scoped registration intercepted legacy path")
+	}
+}
+
+func TestScopedBatchRESTActualAuthDomainAndUniqueTask(t *testing.T) {
+	for _, kind := range []model.Storage{model.StorageMem, model.StorageBolt} {
+		t.Run(string(kind), func(t *testing.T) {
+			_, endpoint, core, dir := datasetServer(t, kind, "synthetic-scoped-token")
+			status, identityReply := datasetGET(t, endpoint+"/api/v1/dataset/identity", "synthetic-scoped-token")
+			var identity download.DatasetIdentity
+			if err := json.Unmarshal(identityReply.Data, &identity); err != nil || status != http.StatusOK {
+				t.Fatal("identity", err, status)
+			}
+			root := endpoint + "/api/v1/datasets/" + identity.DatasetID + "/task-batches/v1/operations"
+			var hits atomic.Int32
+			payload := []byte("actual scoped REST fixture")
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				_, _ = w.Write(payload)
+			}))
+			defer origin.Close()
+			output := t.TempDir()
+			request := download.BatchOperationRequest{Version: 1, OperationID: "scoped-rest-actual", Reqs: []*base.CreateTaskBatchItem{{Req: &base.Request{URL: origin.URL}, Opts: &base.Options{Path: output, Name: "only.bin"}}}}
+			raw, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(method, address, token string, body []byte) (int, datasetReply) {
+				t.Helper()
+				r, err := http.NewRequest(method, address, bytes.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Header.Set("Content-Type", "application/json")
+				if token != "" {
+					r.Header.Set("X-Api-Token", token)
+				}
+				response, err := http.DefaultClient.Do(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				var reply datasetReply
+				if err := json.NewDecoder(response.Body).Decode(&reply); err != nil {
+					t.Fatal(err)
+				}
+				return response.StatusCode, reply
+			}
+			var before []byte
+			if kind == model.StorageBolt {
+				before, _ = os.ReadFile(filepath.Join(dir, "gopeed.db"))
+			}
+			for _, method := range []string{http.MethodGet, http.MethodPost, "cancel"} {
+				address := root
+				if method == http.MethodGet {
+					address += "/" + request.OperationID
+				} else if method == "cancel" {
+					address += "/" + request.OperationID + "/cancel"
+					method = http.MethodPost
+				}
+				for _, token := range []string{"", "wrong-synthetic-token"} {
+					if status, _ := call(method, address, token, raw); status != http.StatusUnauthorized {
+						t.Fatalf("scoped auth bypass: %d", status)
+					}
+				}
+				wrong := strings.Repeat("0", 32)
+				if wrong == identity.DatasetID {
+					wrong = strings.Repeat("1", 32)
+				}
+				status, reply := call(method, strings.Replace(address, identity.DatasetID, wrong, 1), "synthetic-scoped-token", raw)
+				if status != http.StatusConflict || reply.Msg != "dataset_mismatch" || string(reply.Data) != "null" {
+					t.Fatalf("actual mismatch: %d %+v", status, reply)
+				}
+			}
+			status, unknown := call(http.MethodGet, root+"/"+request.OperationID, "synthetic-scoped-token", nil)
+			var initial scopedBatchResult
+			if err := json.Unmarshal(unknown.Data, &initial); err != nil || status != http.StatusOK || initial.Operation.State != "unknown" || initial.DatasetID != identity.DatasetID {
+				t.Fatalf("actual unknown: %d %s %v", status, unknown.Data, err)
+			}
+			if len(core.GetTasks()) != 0 || hits.Load() != 0 {
+				t.Fatal("preflight/auth/mismatch created tasks or protocol requests")
+			}
+			if kind == model.StorageBolt {
+				after, _ := os.ReadFile(filepath.Join(dir, "gopeed.db"))
+				if !bytes.Equal(before, after) {
+					t.Fatal("auth/mismatch/query wrote operation or task storage")
+				}
+			}
+			status, created := call(http.MethodPost, root, "synthetic-scoped-token", raw)
+			var receipt scopedBatchResult
+			if err := json.Unmarshal(created.Data, &receipt); err != nil || status != http.StatusOK || len(receipt.Operation.TaskIDs) != 1 {
+				t.Fatalf("actual create: %d %s %v", status, created.Data, err)
+			}
+			id := receipt.Operation.TaskIDs[0]
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				_, taskReply := datasetGET(t, endpoint+"/api/v1/tasks/"+id, "synthetic-scoped-token")
+				var task struct{ Status string }
+				if err := json.Unmarshal(taskReply.Data, &task); err != nil {
+					t.Fatal(err)
+				}
+				if task.Status == "done" {
+					break
+				}
+				if task.Status == "error" || time.Now().After(deadline) {
+					t.Fatalf("synthetic task did not complete: %s", task.Status)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			file, err := os.ReadFile(filepath.Join(output, "only.bin"))
+			if err != nil || sha256.Sum256(file) != sha256.Sum256(payload) {
+				t.Fatal("actual output digest differs", err)
+			}
+			requests := hits.Load()
+			status, replay := call(http.MethodPost, root, "synthetic-scoped-token", raw)
+			var same scopedBatchResult
+			if err := json.Unmarshal(replay.Data, &same); err != nil || status != http.StatusOK || len(same.Operation.TaskIDs) != 1 || same.Operation.TaskIDs[0] != id || hits.Load() != requests || len(core.GetTasks()) != 1 {
+				t.Fatal("same operation replay created or restarted a task")
+			}
+			status, cancelled := call(http.MethodPost, root+"/"+request.OperationID+"/cancel", "synthetic-scoped-token", nil)
+			if status != http.StatusOK || json.Unmarshal(cancelled.Data, &same) != nil || same.Operation.TaskIDs[0] != id {
+				t.Fatal("same-domain cancel changed creation history")
+			}
+			status, legacy := datasetGET(t, endpoint+"/api/v1/task-batches/operations/"+request.OperationID, "synthetic-scoped-token")
+			var old download.BatchOperationResult
+			if status != http.StatusOK || json.Unmarshal(legacy.Data, &old) != nil || len(old.TaskIDs) != 1 || old.TaskIDs[0] != id || strings.Contains(string(legacy.Data), "scopeVersion") {
+				t.Fatal("legacy query shape changed")
+			}
+		})
 	}
 }

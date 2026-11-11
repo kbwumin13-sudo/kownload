@@ -132,6 +132,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	var r = mux.NewRouter()
 	r.Methods(http.MethodGet).Path("/api/v1/info").HandlerFunc(Info)
 	registerDatasetCatalogRoutes(r, Downloader)
+	registerScopedBatchOperationRoutes(r, Downloader)
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
 	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(BrowserHandoff)
