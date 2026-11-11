@@ -41,7 +41,11 @@ const (
 
 // Match uses conjunction for user rules. Empty fields impose no condition;
 // at least one field is required. Domains match exact hosts, not subdomains.
-// MIME accepts an exact type or type/*; extensions include the leading dot.
+// Domain matching folds case and ignores one final dot, with no IDNA or
+// subdomain expansion. MIME folds case, ignores parameters in hints, and
+// accepts exact type or type/* rules (rule parameters are rejected).
+// Extensions require one leading dot and match the final suffix, folded to
+// lowercase and NFC; compound suffixes and dot-only hidden names are excluded.
 type Match struct {
 	Domain    string
 	MIME      string
@@ -56,8 +60,9 @@ type Rule struct {
 }
 
 // Config.Rules is ordered by the user. Within each kind, the first matching
-// rule wins. IDs must be nonempty and unique across the entire snapshot.
-// Version identifies that immutable rule snapshot, not this package's format.
+// rule wins. A selected rule's ID must be nonempty and unique in the snapshot.
+// Version identifies that immutable rule snapshot, not this package's format;
+// it is required only when selecting a rule. The zero config is disabled.
 type Config struct {
 	Enabled bool
 	Version string
@@ -90,20 +95,26 @@ type Decision struct {
 }
 
 var (
-	ErrInput  = errors.New("invalid path policy input")
-	ErrConfig = errors.New("invalid path policy configuration")
+	ErrInput              = errors.New("invalid path policy input")
+	ErrConfig             = errors.New("invalid path policy configuration")
+	ErrUnsupportedVersion = errors.New("unsupported path policy version")
 )
 
 // Evaluate applies frozen > explicit > ordered user > domain > MIME >
 // extension > original root. Unknown incoming provenance preserves its root
 // even when rules are enabled; path equality never establishes explicitness.
 // Frozen state is copied verbatim without reinterpreting legacy provenance.
+// An unknown frozen version returns that copy AND ErrUnsupportedVersion so
+// preservation/preview cannot silently authorize execution of unknown state.
 func Evaluate(in Input, cfg Config) (Decision, error) {
 	if in.Frozen != nil {
 		d := *in.Frozen
 		if d.RuleVersion != nil {
 			v := *d.RuleVersion
 			d.RuleVersion = &v
+		}
+		if d.Version != Version {
+			return d, ErrUnsupportedVersion
 		}
 		return d, nil
 	}
@@ -132,6 +143,9 @@ func Evaluate(in Input, cfg Config) (Decision, error) {
 	for _, kind := range []Kind{UserRule, DomainRule, MIMERule, ExtensionRule} {
 		for _, rule := range cfg.Rules {
 			if rule.Kind == kind && matches(rule.Match, hints) {
+				if !validSelectedRule(rule, cfg) {
+					return Decision{}, ErrConfig
+				}
 				v := cfg.Version
 				return Decision{Version: Version, Root: rule.Root, Origin: RuleSelected, RuleID: rule.ID, RuleVersion: &v}, nil
 			}
@@ -145,15 +159,10 @@ func validRoot(root string) bool {
 }
 
 func validate(cfg Config) error {
-	if strings.TrimSpace(cfg.Version) == "" {
-		return ErrConfig
-	}
-	seen := make(map[string]bool, len(cfg.Rules))
 	for _, r := range cfg.Rules {
-		if strings.TrimSpace(r.ID) == "" || seen[r.ID] || !validRoot(r.Root) {
+		if !validRoot(r.Root) {
 			return ErrConfig
 		}
-		seen[r.ID] = true
 		m := r.Match
 		if m == (Match{}) || (m.Domain != "" && domain(m.Domain) == "") ||
 			(m.MIME != "" && !validMIMEPattern(m.MIME)) ||
@@ -179,6 +188,19 @@ func validate(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func validSelectedRule(rule Rule, cfg Config) bool {
+	if strings.TrimSpace(cfg.Version) == "" || strings.TrimSpace(rule.ID) == "" {
+		return false
+	}
+	count := 0
+	for _, r := range cfg.Rules {
+		if r.ID == rule.ID {
+			count++
+		}
+	}
+	return count == 1
 }
 
 func matches(want, have Match) bool {

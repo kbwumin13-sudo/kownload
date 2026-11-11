@@ -168,7 +168,14 @@ func TestFrozenRoundTripDoesNotRerouteOrInventProvenance(t *testing.T) {
 			t.Fatal(err)
 		}
 		in := Input{Path: "bad new path", Origin: "bad origin", Name: "changed.zip", Domain: "changed.example", Frozen: &restarted}
-		got := evaluate(t, in, Config{Enabled: true, Version: "new-rules", Rules: []Rule{{}}})
+		got, err := Evaluate(in, Config{Enabled: true, Version: "new-rules", Rules: []Rule{{}}})
+		if frozen.Version != Version {
+			if !errors.Is(err, ErrUnsupportedVersion) {
+				t.Fatalf("unknown frozen version requires unsupported: %v", err)
+			}
+		} else if err != nil {
+			t.Fatal(err)
+		}
 		if !reflect.DeepEqual(got, frozen) {
 			t.Fatalf("frozen changed: %+v -> %+v", frozen, got)
 		}
@@ -227,7 +234,7 @@ func TestBasenameHintsDoNotCreateOrRewritePaths(t *testing.T) {
 func TestInvalidConfigurationReturnsNoDecision(t *testing.T) {
 	valid := rule("one", ExtensionRule, Match{Extension: ".mp4"})
 	cases := []Config{
-		{Enabled: true}, config(Rule{}), config(valid, valid),
+		{Enabled: true, Rules: []Rule{valid}}, config(Rule{}), config(valid, valid),
 		config(Rule{ID: "id", Kind: ExtensionRule, Root: "relative", Match: Match{Extension: ".mp4"}}),
 		config(rule("x", "future", Match{Extension: ".mp4"})),
 		config(rule("x", UserRule, Match{})),
@@ -244,6 +251,23 @@ func TestInvalidConfigurationReturnsNoDecision(t *testing.T) {
 		if !errors.Is(err, ErrConfig) || got != (Decision{}) {
 			t.Fatalf("case %d: %+v %v", i, got, err)
 		}
+	}
+}
+
+func TestUnusedVersionAndIDNotRequired(t *testing.T) {
+	in := input()
+	for _, cfg := range []Config{
+		{Enabled: true},
+		{Enabled: true, Rules: []Rule{rule("", ExtensionRule, Match{Extension: ".zip"})}},
+	} {
+		got := evaluate(t, in, cfg)
+		if got.Root != in.Path || got.RuleID != "" || got.RuleVersion != nil {
+			t.Fatalf("unused settings affected fallback: %+v", got)
+		}
+	}
+	cfg := config(rule("", ExtensionRule, Match{Extension: ".mp4"}))
+	if got, err := Evaluate(in, cfg); !errors.Is(err, ErrConfig) || got != (Decision{}) {
+		t.Fatalf("selected empty ID accepted: %+v %v", got, err)
 	}
 }
 
