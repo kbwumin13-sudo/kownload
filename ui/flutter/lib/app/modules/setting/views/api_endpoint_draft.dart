@@ -5,21 +5,68 @@ import 'package:path/path.dart' as path;
 
 import '../../../../core/common/start_config.dart';
 
-/// Per-dialog addresses only; switching protocols never persists a second map.
+/// TCP drafts are local to the dialog; Unix always returns to the App IPC path.
 class ApiEndpointDraft {
   final Future<String> Function() defaultUnixAddress;
   final _addresses = <String, String>{};
+  Future<String>? _managedUnix;
   ApiEndpointDraft({required this.defaultUnixAddress});
 
   Future<void> select(StartConfig config, String network) async {
     if (network == config.network) return;
-    if (validationError(config.network, config.address) == null) {
-      _addresses[config.network] = config.address;
+    if (config.network == 'tcp' &&
+        validationError('tcp', config.address) == null) {
+      _addresses['tcp'] = config.address;
     }
-    final address = _addresses[network] ??
-        (network == 'tcp' ? '127.0.0.1:0' : await defaultUnixAddress());
-    config.network = network;
+    if (network == 'unix') {
+      await useManagedUnix(config);
+    } else {
+      config.network = network;
+      config.address = _addresses[network] ?? '127.0.0.1:0';
+    }
+  }
+
+  Future<void> useManagedUnix(StartConfig config) async {
+    final address = await (_managedUnix ??= defaultUnixAddress());
+    config.network = 'unix';
     config.address = address;
+  }
+
+  /// Read-only checks at Save. No unlink, mkdir, bind or following of links.
+  /// This is not a substitute for safe cleanup at the later Core startup.
+  static String? unixTargetError(
+      {required String address,
+      required String expectedAddress,
+      required String storageRoot}) {
+    if (address != expectedAddress ||
+        !path.isAbsolute(storageRoot) ||
+        !path.isWithin(storageRoot, expectedAddress)) {
+      return '自定义 Unix 地址仅展示、未验证。请选择“使用应用 IPC 路径”或切换 TCP 后保存。';
+    }
+    try {
+      var current = storageRoot;
+      final candidates = <String>[current];
+      for (final part
+          in path.split(path.relative(expectedAddress, from: storageRoot))) {
+        current = path.join(current, part);
+        candidates.add(current);
+      }
+      for (final candidate in candidates) {
+        final type = FileSystemEntity.typeSync(candidate, followLinks: false);
+        if (candidate == expectedAddress) {
+          if (type != FileSystemEntityType.notFound &&
+              type != FileSystemEntityType.unixDomainSock) {
+            return '应用 IPC 路径已有非 socket 对象，未保存。请先核实并保留该文件、目录或链接；本页不会删除它。';
+          }
+        } else if (type != FileSystemEntityType.directory &&
+            type != FileSystemEntityType.notFound) {
+          return '应用 IPC 目录不是普通目录或含链接，未保存。请先核实目录；本页不会修改它。';
+        }
+      }
+    } on FileSystemException {
+      return '无法确认应用 IPC 路径类型，未保存。请检查目录权限后重试。';
+    }
+    return null;
   }
 
   static (String, String)? tcpFields(String address) {

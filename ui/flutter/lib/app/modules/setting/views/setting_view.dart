@@ -1554,19 +1554,31 @@ class SettingView extends GetView<SettingController> {
         }
 
         if (apiEndpoints != null && startCfg.value.network == 'unix') {
-          final socket = TextEditingController(text: startCfg.value.address);
-          socket.addListener(() {
-            startCfg.value.address = socket.text;
-          });
           items.addAll([
             const SizedBox(width: 20),
             Flexible(
-                child: TextFormField(
-              key: const ValueKey('api-unix-address'),
-              controller: socket,
-              decoration: const InputDecoration(
-                  labelText: 'Unix socket', contentPadding: EdgeInsets.zero),
-            ))
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  TextFormField(
+                    key: const ValueKey('api-unix-address'),
+                    controller:
+                        TextEditingController(text: startCfg.value.address),
+                    readOnly: true,
+                    decoration: const InputDecoration(
+                        labelText: 'Unix socket（只读）',
+                        contentPadding: EdgeInsets.zero),
+                  ),
+                  const Text('已有自定义地址仅展示、未验证；无改动保存不会写回。切回 Unix 使用应用专用 IPC 路径。',
+                      style: TextStyle(fontSize: 11)),
+                  MacButton(
+                      key: const ValueKey('api-use-managed-unix'),
+                      onPressed: () async {
+                        await apiEndpoints.useManagedUnix(startCfg.value);
+                        startCfg.refresh();
+                      },
+                      child: const Text('使用应用 IPC 路径')),
+                ])),
           ]);
         }
         return Form(

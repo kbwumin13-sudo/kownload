@@ -8,7 +8,8 @@ import 'package:gopeed/database/entity.dart';
 import 'package:gopeed/util/local_server_config.dart';
 
 void main() {
-  test('switching restores valid per-protocol addresses and initializes TCP',
+  test(
+      'switching preserves TCP draft and explicitly returns Unix to managed path',
       () async {
     var defaults = 0;
     final editor = ApiEndpointDraft(defaultUnixAddress: () async {
@@ -22,14 +23,14 @@ void main() {
     expect(cfg.address, '127.0.0.1:0');
     cfg.address = '127.0.0.2:12345';
     await editor.select(cfg, 'unix');
-    expect(cfg.address, '/tmp/custom-api.sock');
+    expect(cfg.address, '/tmp/api-default.sock');
     await editor.select(cfg, 'tcp');
     expect(cfg.address, '127.0.0.2:12345');
-    expect(defaults, 0);
+    expect(defaults, 1);
   });
 
   test(
-      'TCP to Unix obtains the project default once and restores edited socket',
+      'TCP to Unix uses the project default instead of accepting a custom target',
       () async {
     var defaults = 0;
     final editor = ApiEndpointDraft(defaultUnixAddress: () async {
@@ -44,7 +45,7 @@ void main() {
     cfg.address = '/tmp/custom-api.sock';
     await editor.select(cfg, 'tcp');
     await editor.select(cfg, 'unix');
-    expect(cfg.address, '/tmp/custom-api.sock');
+    expect(cfg.address, '/tmp/api-default.sock');
     expect(defaults, 1);
   });
 
@@ -130,5 +131,91 @@ void main() {
     expect(ApiEndpointDraft.validationError('tcp', '127.0.0.1:0'), isNull);
     expect(ApiEndpointDraft.validationError('tcp', 'localhost:8080'), isNull);
     expect(ApiEndpointDraft.validationError('unix', '/tmp/api.sock'), isNull);
+  });
+
+  for (final kind in ['file', 'directory', 'link']) {
+    test(
+        'Unix Save refuses managed target occupied by $kind without touching bytes',
+        () async {
+      final root = Directory('/tmp').createTempSync('api-unix-guard-');
+      try {
+        Directory('${root.path}/ipc').createSync();
+        final target = '${root.path}/ipc/api.sock';
+        final original = File('${root.path}/original.bin')
+          ..writeAsBytesSync([0, 1, 127, 255]);
+        if (kind == 'file') File(target).writeAsBytesSync([65, 0, 66, 255]);
+        if (kind == 'directory') Directory(target).createSync();
+        if (kind == 'link') Link(target).createSync(original.path);
+        final type = FileSystemEntity.typeSync(target, followLinks: false);
+        final content = kind == 'file' ? File(target).readAsBytesSync() : null;
+        final error = ApiEndpointDraft.unixTargetError(
+            address: target, expectedAddress: target, storageRoot: root.path);
+        expect(error, isNotNull);
+        expect(FileSystemEntity.typeSync(target, followLinks: false), type);
+        if (content != null) expect(File(target).readAsBytesSync(), content);
+        if (kind == 'link') expect(Link(target).targetSync(), original.path);
+        expect(original.readAsBytesSync(), [0, 1, 127, 255]);
+      } finally {
+        root.deleteSync(recursive: true);
+      }
+    });
+  }
+
+  test(
+      'Unix Save rejects parent links and unmanaged existing files without unlinking',
+      () {
+    final root = Directory('/tmp').createTempSync('api-unix-parent-');
+    try {
+      final elsewhere = Directory('${root.path}/elsewhere')..createSync();
+      final original = File('${elsewhere.path}/api.sock')
+        ..writeAsStringSync('keep existing file');
+      Link('${root.path}/ipc').createSync(elsewhere.path);
+      final canonical = '${root.path}/ipc/api.sock';
+      expect(
+          ApiEndpointDraft.unixTargetError(
+              address: canonical,
+              expectedAddress: canonical,
+              storageRoot: root.path),
+          isNotNull);
+      expect(
+          ApiEndpointDraft.unixTargetError(
+              address: original.path,
+              expectedAddress: canonical,
+              storageRoot: root.path),
+          isNotNull);
+      expect(original.readAsStringSync(), 'keep existing file');
+      expect(Link('${root.path}/ipc').targetSync(), elsewhere.path);
+    } finally {
+      root.deleteSync(recursive: true);
+    }
+  });
+
+  test(
+      'Unix Save allows missing managed target and real managed socket without deleting either',
+      () async {
+    final root = Directory('/tmp').createTempSync('api-unix-socket-');
+    ServerSocket? socket;
+    try {
+      final target = '${root.path}/ipc/api.sock';
+      expect(
+          ApiEndpointDraft.unixTargetError(
+              address: target, expectedAddress: target, storageRoot: root.path),
+          isNull);
+      expect(Directory('${root.path}/ipc').existsSync(), isFalse);
+      Directory('${root.path}/ipc').createSync();
+      socket = await ServerSocket.bind(
+          InternetAddress(target, type: InternetAddressType.unix), 0);
+      expect(FileSystemEntity.typeSync(target, followLinks: false),
+          FileSystemEntityType.unixDomainSock);
+      expect(
+          ApiEndpointDraft.unixTargetError(
+              address: target, expectedAddress: target, storageRoot: root.path),
+          isNull);
+      expect(FileSystemEntity.typeSync(target, followLinks: false),
+          FileSystemEntityType.unixDomainSock);
+    } finally {
+      await socket?.close();
+      root.deleteSync(recursive: true);
+    }
   });
 }

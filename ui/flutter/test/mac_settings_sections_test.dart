@@ -646,7 +646,7 @@ void main() {
   }
 
   testWidgets(
-      'review API restores separate drafts and rejects mismatched Unix path before saving',
+      'review API preserves TCP draft while Unix is read only and managed',
       (tester) async {
     if (!Platform.isMacOS) return;
     final unixAddress = await apiStorage(tester);
@@ -656,6 +656,13 @@ void main() {
     await openEditor(tester, 'api');
     await tester.tap(find.text('protocol').last);
     await tester.pumpAndSettle();
+    expect(
+        tester
+            .widget<TextField>(find.descendant(
+                of: find.byKey(const ValueKey('api-unix-address')),
+                matching: find.byType(TextField)))
+            .readOnly,
+        isTrue);
     await selectApiProtocol(tester, 'TCP');
     await tester.enterText(find.widgetWithText(TextFormField, 'port'), '43210');
     await tester.pumpAndSettle();
@@ -667,15 +674,6 @@ void main() {
             .controller!
             .text,
         unixAddress);
-    await tester.enterText(
-        find.byKey(const ValueKey('api-unix-address')), '127.0.0.1:0');
-    await tester.tap(find.text('保存').last);
-    await tester.pumpAndSettle();
-    expect(app.savedStarts, isEmpty);
-    expect(app.startConfig.value.address, unixAddress);
-    expect(find.textContaining('Unix 地址须为完整'), findsOneWidget);
-    await tester.enterText(find.byKey(const ValueKey('api-unix-address')),
-        unixAddress.replaceFirst('api.sock', 'custom.sock'));
     await selectApiProtocol(tester, 'TCP');
     expect(
         tester
@@ -689,20 +687,93 @@ void main() {
     expect(find.textContaining('TCP 地址须包含'), findsOneWidget);
     expect(app.savedStarts, isEmpty);
     await selectApiProtocol(tester, 'Unix');
-    expect(
-        tester
-            .widget<TextFormField>(
-                find.byKey(const ValueKey('api-unix-address')))
-            .controller!
-            .text,
-        unixAddress.replaceFirst('api.sock', 'custom.sock'));
     await tester.tap(find.text('保存').last);
     await tester.pumpAndSettle();
-    expect(app.savedStarts.single['address'],
-        unixAddress.replaceFirst('api.sock', 'custom.sock'));
-    expect(app.savedConfigs, isEmpty);
+    expect(
+        app.savedStarts, isEmpty); // returned to the original pair: no write.
+    expect(app.startConfig.value.address, unixAddress);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+      'review Unix legacy file path is read only and unchanged Save or Cancel writes nothing',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    final canonical = await apiStorage(tester);
+    final original = File('${File(canonical).parent.parent.path}/existing.txt')
+      ..writeAsStringSync('user bytes must survive');
+    final app = await _mountSettings(tester, 'download');
+    app.startConfig.value.network = 'unix';
+    app.startConfig.value.address = original.path;
+    for (final action in ['取消', '保存']) {
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      final field = tester.widget<TextFormField>(
+          find.byKey(const ValueKey('api-unix-address')));
+      expect(
+          tester
+              .widget<TextField>(find.descendant(
+                  of: find.byKey(const ValueKey('api-unix-address')),
+                  matching: find.byType(TextField)))
+              .readOnly,
+          isTrue);
+      expect(field.controller!.text, original.path);
+      expect(find.textContaining('已有自定义地址仅展示、未验证'), findsOneWidget);
+      await tester.tap(find.text(action).last);
+      await tester.pumpAndSettle();
+      expect(app.startConfig.value.address, original.path);
+      expect(app.savedStarts, isEmpty);
+      expect(app.savedConfigs, isEmpty);
+      expect(original.readAsStringSync(), 'user bytes must survive');
+    }
+    await openEditor(tester, 'api');
+    await tester.tap(find.text('protocol').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('api-use-managed-unix')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+    expect(app.savedStarts.single['address'], canonical);
+    expect(original.readAsStringSync(), 'user bytes must survive');
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final kind in ['file', 'directory', 'link']) {
+    testWidgets(
+        'review Unix occupied managed $kind target is never saved or deleted',
+        (tester) async {
+      if (!Platform.isMacOS) return;
+      final canonical = await apiStorage(tester);
+      File(canonical).parent.createSync(recursive: true);
+      final bytes = [70, 0, 71, 255];
+      final original =
+          File('${File(canonical).parent.parent.path}/original.bin')
+            ..writeAsBytesSync(bytes);
+      if (kind == 'file') File(canonical).writeAsBytesSync(bytes);
+      if (kind == 'directory') Directory(canonical).createSync();
+      if (kind == 'link') Link(canonical).createSync(original.path);
+      final type = FileSystemEntity.typeSync(canonical, followLinks: false);
+      final app = await _mountSettings(tester, 'download');
+      final originalAddress = app.startConfig.value.address;
+      await openEditor(tester, 'api');
+      await tester.tap(find.text('protocol').last);
+      await tester.pumpAndSettle();
+      await selectApiProtocol(tester, 'Unix');
+      await tester.tap(find.text('保存').last);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('IPC 路径已有非 socket 对象'), findsOneWidget);
+      expect(app.savedStarts, isEmpty);
+      expect(app.startConfig.value.address, originalAddress);
+      expect(FileSystemEntity.typeSync(canonical, followLinks: false), type);
+      if (kind == 'file') expect(File(canonical).readAsBytesSync(), bytes);
+      if (kind == 'link') expect(Link(canonical).targetSync(), original.path);
+      expect(original.readAsBytesSync(), bytes);
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets(
       'remaining settings Webhook edits stay local and only explicit test invokes its substitute',

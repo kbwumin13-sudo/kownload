@@ -738,6 +738,7 @@ class _MacSettingsViewState extends State<MacSettingsView> {
     var saving = false;
     String? error;
     final start = _app.startConfig.value;
+    final originalApi = (start.network, start.address, start.apiToken);
     final startDraft = (StartConfig()
           ..network = start.network
           ..address = start.address
@@ -776,20 +777,43 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                         onPressed: saving
                             ? null
                             : () async {
-                                if (section == 'api') {
-                                  final invalid =
-                                      ApiEndpointDraft.validationError(
-                                          startDraft.value.network,
-                                          startDraft.value.address);
-                                  if (invalid != null) {
-                                    update(() => error = invalid);
-                                    return;
-                                  }
+                                final proposed = startDraft.value;
+                                if (section == 'api' &&
+                                    (
+                                          proposed.network,
+                                          proposed.address,
+                                          proposed.apiToken
+                                        ) ==
+                                        originalApi) {
+                                  Navigator.of(dialogContext).pop();
+                                  return;
                                 }
                                 update(() {
                                   saving = true;
                                   error = null;
                                 });
+                                if (section == 'api') {
+                                  var invalid =
+                                      ApiEndpointDraft.validationError(
+                                          proposed.network, proposed.address);
+                                  if (invalid == null &&
+                                      proposed.network == 'unix') {
+                                    invalid = ApiEndpointDraft.unixTargetError(
+                                        address: proposed.address,
+                                        expectedAddress:
+                                            await Util.homePathJoin(
+                                                AppIdentity.apiSocket),
+                                        storageRoot: Util.getStorageDir());
+                                  }
+                                  if (!dialogContext.mounted) return;
+                                  if (invalid != null) {
+                                    update(() {
+                                      saving = false;
+                                      error = invalid;
+                                    });
+                                    return;
+                                  }
+                                }
                                 final config = _app.downloaderConfig.value;
                                 final restore = _applySection(
                                     config,
