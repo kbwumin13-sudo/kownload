@@ -33,10 +33,7 @@ func (d *Downloader) prepareVerifiedOutput(ctx context.Context, dataset string, 
 		record = next
 		// The root and basenames are already frozen/ACKed. No body write or
 		// pathname-open of the final artifact is performed here.
-		if err := os.MkdirAll(root, 0755); err != nil {
-			return err
-		}
-		directory, err := transfer.OpenCompletionDirectory(root)
+		directory, err := transfer.CreateCompletionDirectory(root)
 		if err != nil {
 			return err
 		}

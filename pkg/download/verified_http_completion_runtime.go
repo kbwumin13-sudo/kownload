@@ -37,6 +37,16 @@ func (d *Downloader) acceptVerifiedCompletion(task *Task, owned *Task) error {
 }
 
 func (d *Downloader) completeVerifiedHTTP(task *Task, f fetcher.Fetcher, generation uint64, lease *transfer.RecoveryLease) (bool, error) {
+	store, ok := d.storage.(AtomicStorage)
+	if !ok {
+		return false, transfer.ErrRecoveryHeld
+	}
+	return d.completeVerifiedHTTPStored(task, f, generation, lease, store)
+}
+
+// The write dependency is passed explicitly; authoritative reads always use
+// this Downloader's domain view. An unconfirmed write can never grant success.
+func (d *Downloader) completeVerifiedHTTPStored(task *Task, f fetcher.Fetcher, generation uint64, lease *transfer.RecoveryLease, store AtomicStorage) (bool, error) {
 	if lease == nil || lease.Token.Generation != generation || d.verifiedCompleter == nil {
 		return false, transfer.ErrRecoveryHeld
 	}
@@ -64,8 +74,7 @@ func (d *Downloader) completeVerifiedHTTP(task *Task, f fetcher.Fetcher, generat
 		return false, err
 	}
 	dataset := identity.DatasetID
-	store, ok := d.storage.(AtomicStorage)
-	if !ok {
+	if store == nil {
 		return false, transfer.ErrRecoveryHeld
 	}
 	store = verifiedAssociatedStore{store, dataset, task.ID}
@@ -183,6 +192,9 @@ func (d *Downloader) completeVerifiedHTTP(task *Task, f fetcher.Fetcher, generat
 				return false, err
 			}
 			current = record
+			if fresh {
+				d.installVerifiedSuccess(task, dataset, record.ID, lease.Token)
+			}
 			return fresh, nil
 		},
 	})
@@ -206,26 +218,6 @@ func (d *Downloader) completeVerifiedHTTP(task *Task, f fetcher.Fetcher, generat
 		return false, err
 	}
 	return permit.Fresh, nil
-}
-
-// A live event is emitted only by the caller holding this call's fresh C ACK
-// result, after the Fence has published API done. Reads never call this method.
-func (d *Downloader) publishVerifiedHTTPDone(task *Task) {
-	if d.closed.Load() || d.getTask(task.ID) != task || d.verifiedDone == nil {
-		return
-	}
-	identity, err := d.DatasetIdentity()
-	if err != nil {
-		return
-	}
-	task.dataLock.RLock()
-	ref := task.Completion
-	status := task.Status
-	task.dataLock.RUnlock()
-	if ref == nil || status != base.DownloadStatusDone {
-		return
-	}
-	d.verifiedDone.publish(VerifiedHTTPDoneEvent{Version: 1, DatasetID: identity.DatasetID, TaskID: task.ID, CompletionID: ref.CompletionID})
 }
 
 // Ordinary saves may update pause/error/progress, but cannot overwrite C or

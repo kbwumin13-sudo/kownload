@@ -203,6 +203,7 @@ func (o *taskRecoveryOwner) markCleanPaused() error {
 // Called while removing membership. No status/task lock is taken: completion
 // persistence may already own those locks until Delete removes membership.
 func invalidateDeletedRun(task *Task) {
+	cancelVerifiedSuccess(task)
 	invalidateTaskRecovery(task)
 	if task.Protocol == "http" {
 		if cancel := task.recoveryRunCancel.Load(); cancel != nil {

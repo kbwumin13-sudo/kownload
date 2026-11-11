@@ -11,11 +11,19 @@ import (
 	"github.com/GopeedLab/gopeed/pkg/base"
 )
 
-func verifiedFenceFixture(t *testing.T) (*Downloader, *Task, *taskRecoveryOwner, *transfer.RecoveryLease) {
+func verifiedFenceFixture(t *testing.T, expected ...string) (*Downloader, *Task, *taskRecoveryOwner, *transfer.RecoveryLease) {
 	t.Helper()
-	d, store, dir := scopedOperationFixture(t, false)
+	return verifiedFenceFixtureStore(t, false, expected...)
+}
+
+func verifiedFenceFixtureStore(t *testing.T, bolt bool, expected ...string) (*Downloader, *Task, *taskRecoveryOwner, *transfer.RecoveryLease) {
+	t.Helper()
+	d, store, dir := scopedOperationFixture(t, bolt)
 	request := operationRequest("https://fixture.invalid/verified", dir)
 	request.integrity = &VerifiedHTTPIntegrityIntent{1, verifiedHTTPCapability, "sha256", strings.Repeat("a", 64)}
+	if len(expected) > 0 {
+		request.integrity.ExpectedSHA256 = expected[0]
+	}
 	items, hash, err := canonicalBatch(request)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -54,7 +55,14 @@ func (d *Downloader) getScriptPaths() []string {
 
 // executeScriptAtPath executes a single script with the given data
 // Returns any error that occurred during execution
-func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData) error {
+func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData, permits ...*verifiedSuccessPermit) error {
+	ctx := context.Background()
+	if len(permits) > 0 {
+		if !d.verifiedSuccessAllowed(permits[0]) {
+			return context.Canceled
+		}
+		ctx = permits[0].ctx
+	}
 	if scriptPath == "" {
 		return fmt.Errorf("script path is empty")
 	}
@@ -67,18 +75,18 @@ func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData) er
 	// Determine the script interpreter based on file extension
 	var cmd *exec.Cmd
 	ext := filepath.Ext(scriptPath)
-	
+
 	switch ext {
 	case ".sh", ".bash":
-		cmd = exec.Command("bash", scriptPath)
+		cmd = exec.CommandContext(ctx, "bash", scriptPath)
 	case ".py":
-		cmd = exec.Command("python3", scriptPath)
+		cmd = exec.CommandContext(ctx, "python3", scriptPath)
 	case ".js":
-		cmd = exec.Command("node", scriptPath)
+		cmd = exec.CommandContext(ctx, "node", scriptPath)
 	case ".bat", ".cmd":
 		// Windows batch files
 		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd", "/c", scriptPath)
+			cmd = exec.CommandContext(ctx, "cmd", "/c", scriptPath)
 		} else {
 			// Batch files are Windows-specific
 			return fmt.Errorf("batch files (.bat/.cmd) are only supported on Windows")
@@ -86,17 +94,17 @@ func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData) er
 	case ".ps1":
 		// PowerShell scripts
 		if runtime.GOOS == "windows" {
-			cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+			cmd = exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
 		} else {
 			// Try pwsh (PowerShell Core) on non-Windows systems
-			cmd = exec.Command("pwsh", "-File", scriptPath)
+			cmd = exec.CommandContext(ctx, "pwsh", "-File", scriptPath)
 		}
 	case "":
 		// No extension, try to execute directly (assumes shebang or executable)
-		cmd = exec.Command(scriptPath)
+		cmd = exec.CommandContext(ctx, scriptPath)
 	default:
 		// Unknown extension, try to execute directly
-		cmd = exec.Command(scriptPath)
+		cmd = exec.CommandContext(ctx, scriptPath)
 	}
 
 	// Set environment variables with task information
@@ -127,7 +135,7 @@ func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData) er
 }
 
 // triggerScripts executes all configured scripts
-func (d *Downloader) triggerScripts(event ScriptEvent, task *Task, err error) {
+func (d *Downloader) triggerScripts(event ScriptEvent, task *Task, err error, permits ...*verifiedSuccessPermit) {
 	paths := d.getScriptPaths()
 	if len(paths) == 0 {
 		return
@@ -141,16 +149,16 @@ func (d *Downloader) triggerScripts(event ScriptEvent, task *Task, err error) {
 		},
 	}
 
-	go d.executeScripts(paths, data)
+	go d.executeScripts(paths, data, permits...)
 }
 
-func (d *Downloader) executeScripts(paths []string, data *ScriptData) {
+func (d *Downloader) executeScripts(paths []string, data *ScriptData, permits ...*verifiedSuccessPermit) {
 	for _, path := range paths {
 		if path == "" {
 			continue
 		}
 		go func(scriptPath string) {
-			err := d.executeScriptAtPath(scriptPath, data)
+			err := d.executeScriptAtPath(scriptPath, data, permits...)
 			if err != nil {
 				d.Logger.Warn().Err(err).Str("path", scriptPath).Msg("script: failed to execute")
 				return

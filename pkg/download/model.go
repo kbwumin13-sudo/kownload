@@ -84,6 +84,8 @@ type Task struct {
 	// Network writers have joined; the same run may still be verifying. No
 	// second Task/queue or persisted status is created for the bounded hash slot.
 	verificationOnly atomic.Bool
+	// Fresh C permission is process-local and survives only this Task membership.
+	verifiedSuccess atomic.Pointer[verifiedSuccessPermit]
 }
 
 func NewTask() *Task {

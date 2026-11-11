@@ -26,7 +26,7 @@ func validateVerifiedHTTPRequest(r VerifiedHTTPRequest) error {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || (req.Protocol != "" && req.Protocol != "http") {
 		return ErrVerifiedHTTPInvalid
 	}
-	if r.Request.Opts != nil && len(r.Request.Opts.SelectFiles) > 1 {
+	if r.Request.Opts != nil && (len(r.Request.Opts.SelectFiles) > 1 || (len(r.Request.Opts.SelectFiles) == 1 && r.Request.Opts.SelectFiles[0] != 0)) {
 		return ErrVerifiedHTTPInvalid
 	}
 	return nil

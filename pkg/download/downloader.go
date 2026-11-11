@@ -596,6 +596,9 @@ func (d *Downloader) saveActiveTask(task *Task) error {
 	if d.getTask(task.ID) != task {
 		return nil
 	}
+	if task.Completion != nil {
+		return d.saveTask(task)
+	}
 	if task.fetcherManager == nil || task.fetcher == nil {
 		return d.storage.Put(bucketTask, task.ID, task.clone())
 	}
@@ -605,6 +608,15 @@ func (d *Downloader) saveActiveTask(task *Task) error {
 func (d *Downloader) saveTask(task *Task) error {
 	if err := d.checkTaskRecovery(task); err != nil {
 		return err
+	}
+	// Sealed verification deliberately has no protocol instance or new wire
+	// checkpoint. Keep its existing checkpoint and atomically guard the Task.
+	if task.Completion != nil && task.fetcher == nil {
+		owner := task.recoveryOwner.Load()
+		if owner == nil {
+			return transfer.ErrRecoveryHeld
+		}
+		return owner.persistSnapshot(task.clone(), nil, false)
 	}
 	data, err := task.fetcherManager.Store(task.fetcher)
 	if err != nil {
@@ -1190,6 +1202,11 @@ func (d *Downloader) Close() error {
 	d.operationMu.Unlock()
 	d.handoffMu.Unlock()
 	d.verifiedDone.close()
+	d.lock.Lock()
+	for _, task := range d.tasks {
+		cancelVerifiedSuccess(task)
+	}
+	d.lock.Unlock()
 
 	closeArr := []func() error{
 		d.pauseAll,
@@ -1539,7 +1556,9 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 		return
 	}
 	if task.Completion != nil {
-		d.publishVerifiedHTTPDone(task)
+		d.deliverVerifiedSuccess(task)
+		d.notifyRunning()
+		return // The verified v1 execution policy freezes both auto actions false.
 	}
 	d.emit(EventKeyDone, task)
 	d.emit(EventKeyFinally, task, err)
@@ -2098,7 +2117,13 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if e != nil {
 				return e
 			}
-			owner, e := d.ensureTaskRecovery(task, "")
+			// Sealed recovery restores only the verified stored binding. There
+			// is no new HTTP snapshot/default capture and no network permission.
+			_, storedRecovery, e := readRecovery(d.storage, task.ID)
+			if e != nil {
+				return e
+			}
+			owner, e := d.ensureTaskRecovery(task, storedRecovery.ExecutionDefaultsHash)
 			if e != nil {
 				return e
 			}
@@ -2326,7 +2351,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		}
 
 		task.statusLock.Lock()
-		if task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation || d.closed.Load() {
+		if task.getStatus() != base.DownloadStatusRunning || task.runGeneration != generation || d.closed.Load() || runCtx.Err() != nil {
 			task.statusLock.Unlock()
 			return nil
 		}

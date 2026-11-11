@@ -2,6 +2,7 @@ package download
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -96,7 +97,14 @@ func (d *Downloader) getWebhookUrls() []string {
 
 // sendWebhookToUrl sends webhook data to a single URL
 // Returns the HTTP status code and any error that occurred
-func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData) (int, error) {
+func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData, permits ...*verifiedSuccessPermit) (int, error) {
+	ctx := context.Background()
+	if len(permits) > 0 {
+		if !d.verifiedSuccessAllowed(permits[0]) {
+			return 0, context.Canceled
+		}
+		ctx = permits[0].ctx
+	}
 	if url == "" {
 		return 0, fmt.Errorf("webhook URL is empty")
 	}
@@ -110,7 +118,7 @@ func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData) (int, error
 		Timeout: webhookTimeout,
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return 0, err
 	}
@@ -127,7 +135,7 @@ func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData) (int, error
 }
 
 // triggerWebhooks sends webhook notifications to all configured URLs
-func (d *Downloader) triggerWebhooks(event WebhookEvent, task *Task, err error) {
+func (d *Downloader) triggerWebhooks(event WebhookEvent, task *Task, err error, permits ...*verifiedSuccessPermit) {
 	urls := d.getWebhookUrls()
 	if len(urls) == 0 {
 		return
@@ -141,16 +149,16 @@ func (d *Downloader) triggerWebhooks(event WebhookEvent, task *Task, err error) 
 		},
 	}
 
-	go d.sendWebhooks(urls, data)
+	go d.sendWebhooks(urls, data, permits...)
 }
 
-func (d *Downloader) sendWebhooks(urls []string, data *WebhookData) {
+func (d *Downloader) sendWebhooks(urls []string, data *WebhookData, permits ...*verifiedSuccessPermit) {
 	for _, url := range urls {
 		if url == "" {
 			continue
 		}
 		go func(webhookUrl string) {
-			statusCode, err := d.sendWebhookToUrl(webhookUrl, data)
+			statusCode, err := d.sendWebhookToUrl(webhookUrl, data, permits...)
 			if err != nil {
 				d.Logger.Warn().Err(err).Str("url", webhookUrl).Msg("webhook: failed to send request")
 				return
