@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -342,6 +343,9 @@ void main() {
   test('default launcher returns while a newly started browser is still alive',
       () async {
     final root = await Directory.systemTemp.createTemp('netdisk-launch-');
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    Socket? socket;
+    StreamIterator<String>? signals;
     int? processId;
     try {
       final app = '${root.path}/Google Chrome.app';
@@ -364,18 +368,37 @@ void main() {
 #include <stdio.h>
 #include <unistd.h>
 #include <limits.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 int main(int argc, char **argv) {
+  int signal = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in address = {0};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(FIXTURE_PORT);
+  if (signal < 0 || connect(signal, (struct sockaddr *)&address,
+                            sizeof(address)) != 0) return 3;
+  char pid[32];
+  int length = snprintf(pid, sizeof(pid), "%d\n", getpid());
+  if (send(signal, pid, length, 0) != length) return 4;
+  // The test releases this gate only after launch() has returned.
+  char command;
+  if (recv(signal, &command, 1, 0) != 1 || command != 'W') return 5;
   char path[PATH_MAX];
   snprintf(path, sizeof(path), "%s.invocation", argv[0]);
   FILE *file = fopen(path, "w");
   if (!file) return 2;
   fprintf(file, "%d\n", getpid());
   for (int i = 1; i < argc; i++) fprintf(file, "%s\n", argv[i]);
-  fclose(file);
-  sleep(30);
+  if (fclose(file) != 0) return 6;
+  if (send(signal, "ready\n", 6, 0) != 6) return 7;
+  // Stay alive until test cleanup, without depending on a timed sleep.
+  recv(signal, &command, 1, 0);
+  close(signal);
   return 0;
 }
-''');
+'''
+          .replaceAll('FIXTURE_PORT', '${server.port}'));
       final compile = await Process.run(
           '/usr/bin/xcrun', ['clang', source.path, '-o', executable.path]);
       expect(compile.exitCode, 0,
@@ -395,13 +418,20 @@ int main(int argc, char **argv) {
                     provider: 'quark', url: 'https://pan.quark.cn/s/a'),
                 requestId: 'claim')
             .timeout(const Duration(seconds: 3));
-        final deadline = DateTime.now().add(const Duration(seconds: 2));
-        while (
-            !await invocation.exists() && DateTime.now().isBefore(deadline)) {
-          await Future<void>.delayed(const Duration(milliseconds: 10));
-        }
+        socket = await server.first;
+        signals = StreamIterator(socket
+            .cast<List<int>>()
+            .transform(utf8.decoder)
+            .transform(const LineSplitter()));
+        expect(await signals.moveNext(), isTrue);
+        processId = int.parse(signals.current);
+        // open(1) completion does not mean the app has written its argv yet.
+        expect(await invocation.exists(), isFalse);
+        socket.write('W');
+        expect(await signals.moveNext(), isTrue);
+        expect(signals.current, 'ready');
         final args = await invocation.readAsLines();
-        processId = int.parse(args.first);
+        expect(int.parse(args.first), processId);
         expect(args.skip(1), [
           '--profile-directory=Default',
           '--user-data-dir=${root.path}',
@@ -415,9 +445,14 @@ int main(int argc, char **argv) {
         }
       }
     } finally {
+      socket?.write('Q');
+      await socket?.flush();
       if (processId != null) {
         Process.killPid(processId, ProcessSignal.sigterm);
       }
+      await signals?.cancel();
+      socket?.destroy();
+      await server.close();
       await root.delete(recursive: true);
     }
   });
