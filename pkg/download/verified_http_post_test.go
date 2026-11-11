@@ -60,7 +60,7 @@ func TestVerifiedHTTPNewMPostRedirectCompletesThroughSamePinnedOutput(t *testing
 	sum := sha256.Sum256(body)
 	item := &base.CreateTaskBatchItem{Req: &base.Request{URL: source.URL + "/entry", Extra: map[string]any{"method": "POST", "body": "explicit original body"}}, Opts: &base.Options{Path: root, Name: "post.bin", Extra: map[string]any{"connections": 1}}}
 	request := VerifiedHTTPRequest{1, "post-verified", item, VerifiedHTTPIntegrityIntent{1, verifiedHTTPCapability, "sha256", hex.EncodeToString(sum[:])}}
-	result, err := d.createVerifiedOperation(context.Background(), scopedDatasetA, request)
+	result, err := d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, request)
 	if err != nil || len(result.Operation.TaskIDs) != 1 {
 		t.Fatal(result, err)
 	}
@@ -73,7 +73,7 @@ func TestVerifiedHTTPNewMPostRedirectCompletesThroughSamePinnedOutput(t *testing
 	if posts.Load() != 1 || gets.Load() < 2 || ranges.Load() < 1 {
 		t.Fatal("did not use first POST plus redirected range continuation", posts.Load(), gets.Load(), ranges.Load())
 	}
-	query, err := d.queryVerifiedOperation(scopedDatasetA, request.OperationID)
+	query, err := d.QueryVerifiedHTTPOperationForDataset(scopedDatasetA, request.OperationID)
 	if err != nil || len(query.CompletionViews) != 1 || query.CompletionViews[0].Phase != "committed" {
 		t.Fatal(query, err)
 	}

@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-func TestVerifiedHTTPInactiveCoreNeverFallsBack(t *testing.T) {
+func TestVerifiedHTTPUnreadyCoreNeverFallsBack(t *testing.T) {
 	d, store, _ := scopedOperationFixture(t, false)
+	d.verifiedCompleter = nil // An incomplete runner must never advertise or write this capability.
 	snapshot := func() string {
 		mem := store.(*MemStorage)
 		mem.lock.RLock()

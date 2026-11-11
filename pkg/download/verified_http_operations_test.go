@@ -35,13 +35,13 @@ func TestVerifiedHTTPOperationReusesS2IntentAndHistory(t *testing.T) {
 			item.Req.Extra = map[string]any{"opaque": json.Number("9007199254740993")}
 			item.Opts.Extra = map[string]any{"connections": 1, "autoTorrent": false, "autoExtract": false, "opaque": json.Number("9007199254740993")}
 			request := VerifiedHTTPRequest{Version: 1, OperationID: "typed-op", Request: item, Integrity: VerifiedHTTPIntegrityIntent{1, verifiedHTTPCapability, "sha256", hex.EncodeToString(sum[:])}}
-			result, err := d.createVerifiedOperation(context.Background(), scopedDatasetA, request)
+			result, err := d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, request)
 			if err != nil || len(result.Operation.TaskIDs) != 1 {
 				t.Fatal(err, result)
 			}
 			id := result.Operation.TaskIDs[0]
 			waitStatus(t, d, id, base.DownloadStatusDone, 4*time.Second)
-			result, err = d.queryVerifiedOperation(scopedDatasetA, request.OperationID)
+			result, err = d.QueryVerifiedHTTPOperationForDataset(scopedDatasetA, request.OperationID)
 			if err != nil || len(result.CompletionViews) != 1 || !result.CompletionViews[0].Available || result.CompletionViews[0].Phase != "committed" {
 				t.Fatal("typed query lost authoritative view", result, err)
 			}
@@ -50,7 +50,7 @@ func TestVerifiedHTTPOperationReusesS2IntentAndHistory(t *testing.T) {
 			d.cfg.AutoTorrent.Enable = true
 			d.cfg.Archive.AutoExtract = true
 			d.configSnapshotMu.Unlock()
-			again, err := d.createVerifiedOperation(context.Background(), scopedDatasetA, request)
+			again, err := d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, request)
 			if err != nil || len(again.Operation.TaskIDs) != 1 || again.Operation.TaskIDs[0] != id || hits.Load() != initialHits {
 				t.Fatal("same raw op changed frozen policy/task or repeated IO", err)
 			}
@@ -72,20 +72,20 @@ func TestVerifiedHTTPOperationReusesS2IntentAndHistory(t *testing.T) {
 			}
 			changed := request
 			changed.Integrity.ExpectedSHA256 = strings.Repeat("a", 64)
-			if _, err = d.createVerifiedOperation(context.Background(), scopedDatasetA, changed); !errors.Is(err, ErrOperationConflict) {
+			if _, err = d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, changed); !errors.Is(err, ErrOperationConflict) {
 				t.Fatal("same op changed digest", err)
 			}
-			if _, err = d.createVerifiedOperation(context.Background(), scopedDatasetB, request); !errors.Is(err, ErrDatasetMismatch) {
+			if _, err = d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetB, request); !errors.Is(err, ErrDatasetMismatch) {
 				t.Fatal("wrong domain created task", err)
 			}
 			if err = d.Delete(&TaskFilter{IDs: []string{id}}, false); err != nil {
 				t.Fatal(err)
 			}
-			historical, err := d.queryVerifiedOperation(scopedDatasetA, request.OperationID)
+			historical, err := d.QueryVerifiedHTTPOperationForDataset(scopedDatasetA, request.OperationID)
 			if err != nil || historical.Operation.CreatedCount != 1 || len(historical.Operation.Members) != 1 || historical.Operation.Members[0].TaskPresent == nil || *historical.Operation.Members[0].TaskPresent {
 				t.Fatal("deleted historical association lost", err, historical)
 			}
-			if _, err = d.createVerifiedOperation(context.Background(), scopedDatasetA, request); err != nil {
+			if _, err = d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, request); err != nil {
 				t.Fatal(err)
 			}
 			if len(d.GetTasks()) != 0 || hits.Load() != initialHits {
@@ -119,7 +119,7 @@ func TestVerifiedHTTPUnknownMACKAndTypedCancelRemainNonExecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := d.queryVerifiedOperation(scopedDatasetA, r.OperationID)
+	receipt, err := d.QueryVerifiedHTTPOperationForDataset(scopedDatasetA, r.OperationID)
 	if err != nil || receipt.Operation.CreatedCount != 1 {
 		t.Fatal(receipt, err)
 	}
@@ -134,7 +134,7 @@ func TestVerifiedHTTPUnknownMACKAndTypedCancelRemainNonExecuting(t *testing.T) {
 	}
 
 	request := VerifiedHTTPRequest{1, r.OperationID, items[0], *r.integrity}
-	replay, err := d.createVerifiedOperation(context.Background(), scopedDatasetA, request)
+	replay, err := d.CreateVerifiedHTTPOperationForDataset(context.Background(), scopedDatasetA, request)
 	if err != nil || replay.Operation.TaskIDs[0] != id || hits.Load() != 0 || task.getStatus() != base.DownloadStatusPause {
 		t.Fatal("replay regained IO", err)
 	}
@@ -148,7 +148,7 @@ func TestVerifiedHTTPUnknownMACKAndTypedCancelRemainNonExecuting(t *testing.T) {
 	if err = d.reserveOperationInDataset(store, pending, pendingItems, pendingHash, scopedDatasetA); err != nil {
 		t.Fatal(err)
 	}
-	canceled, err := d.cancelVerifiedOperation(scopedDatasetA, pending.OperationID)
+	canceled, err := d.CancelVerifiedHTTPOperationForDataset(scopedDatasetA, pending.OperationID)
 	if err != nil || canceled.Operation.FailedCount != 1 || canceled.Operation.Members[0].Error != "cancelled" || hits.Load() != 0 {
 		t.Fatal(canceled, err)
 	}
@@ -162,7 +162,7 @@ func TestVerifiedHTTPUnknownMACKAndTypedCancelRemainNonExecuting(t *testing.T) {
 	if err = d.reserveOperationInDataset(store, legacy, legacyItems, legacyHash, scopedDatasetA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = d.cancelVerifiedOperation(scopedDatasetA, legacy.OperationID); !errors.Is(err, ErrOperationConflict) {
+	if _, err = d.CancelVerifiedHTTPOperationForDataset(scopedDatasetA, legacy.OperationID); !errors.Is(err, ErrOperationConflict) {
 		t.Fatal("verified cancel altered legacy op", err)
 	}
 	untouched, err := d.QueryBatchOperationForDataset(scopedDatasetA, legacy.OperationID)
