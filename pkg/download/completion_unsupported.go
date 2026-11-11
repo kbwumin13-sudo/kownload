@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 )
 
-// This runner can read completion references but does not implement their
-// execution capability. Presence, including malformed/unknown values, must
-// never fall through to legacy Restore/Start. This check neither enrolls nor
-// repairs tasks and deliberately does not reinterpret a committed record.
+// Completion presence never falls through to legacy Restore/Start. Known v1
+// must pass the full R/Task/ref/record/required guard; malformed, missing or
+// unknown parts remain held. This check neither enrolls nor repairs Tasks.
 func (d *Downloader) checkUnsupportedCompletion(task *Task) error {
 	task.dataLock.RLock()
 	present := task.Completion != nil

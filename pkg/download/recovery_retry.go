@@ -128,8 +128,8 @@ func (d *Downloader) QueryRecoveryForDataset(dataset, id string) (RecoveryTaskSt
 			return transfer.ErrRecoveryHeld
 		}
 		result = RecoveryTaskState{Version: 1, TaskID: id, Status: task.Status, Management: "held", Reason: "recovery_held"}
-		// This candidate does not execute S4 state. A dedicated Retry must
-		// not bypass the same presence guard used by Continue/restore.
+		// Transport-only Retry cannot reset a completion pipeline. Its own
+		// explicit recovery semantics remain separate from episode resets.
 		if task.Completion != nil {
 			return nil
 		}
