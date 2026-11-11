@@ -26,6 +26,8 @@ import 'package:gopeed/macos/mac_shell.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/util/package_info.dart';
 
+import 'support/onboarding_check_fixture.dart';
+
 class _App extends AppController {
   @override
   void onReady() {}
@@ -1011,6 +1013,8 @@ void main() {
       'reopened guide synchronizes its saved directory back to settings',
       (tester) async {
     if (!Platform.isMacOS) return;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
+    addTearDown(() => MacOnboarding.checksOverride = null);
     final app = await _mountSettings(tester, 'general');
     await Database.instance.box.put(MacOnboarding.completedKey, true);
     await _reveal(tester, '重新打开…');
@@ -1019,6 +1023,7 @@ void main() {
     expect(find.text('下载新手教程'), findsOneWidget);
     await tester.enterText(
         find.byKey(const ValueKey('onboarding-directory')), '/guide-downloads');
+    await checkOnboardingDirectory(tester);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     expect(find.text('下载新手教程'), findsNothing);

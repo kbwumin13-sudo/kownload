@@ -25,6 +25,8 @@ import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
 
+import 'support/onboarding_check_fixture.dart';
+
 class _App extends AppController {
   final browserResults = <Map<String, dynamic>>[];
   bool browserCompleted = false;
@@ -622,6 +624,8 @@ void main() {
       'successful capture clears authentication for the next site and advanced errors stay visible',
       (tester) async {
     if (!Platform.isMacOS) return;
+    MacOnboarding.checksOverride = FixtureOnboardingChecks();
+    addTearDown(() => MacOnboarding.checksOverride = null);
     final requests = <Map<String, dynamic>>[];
     var reject = false;
     Future<String> submitTask(CreateTask request) async {
@@ -692,6 +696,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.enterText(find.byKey(const ValueKey('onboarding-directory')),
         '/tmp/first-download');
+    await checkOnboardingDirectory(tester, settle: false);
     await tester.tap(find.text('完成并继续'));
     await tester.pumpAndSettle();
     MacPanel.cancelAutoHide();
