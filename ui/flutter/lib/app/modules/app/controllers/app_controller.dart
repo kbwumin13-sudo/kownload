@@ -962,11 +962,17 @@ class AppController extends GetxController with WindowListener, TrayListener {
     }
   }
 
-  Future<void> saveConfig() async {
-    Database.instance.saveStartConfig(StartConfigEntity(
+  /// Save only next-launch API settings. Keep the current engine options and
+  /// object identity; this does not submit DownloaderConfig or restart the core.
+  Future<void> saveStartConfig() async {
+    await Database.instance.saveStartConfig(StartConfigEntity(
         network: startConfig.value.network,
         address: startConfig.value.address,
         apiToken: startConfig.value.apiToken));
+  }
+
+  Future<void> saveConfig() async {
+    await saveStartConfig();
     await putConfig(downloaderConfig.value);
   }
 
