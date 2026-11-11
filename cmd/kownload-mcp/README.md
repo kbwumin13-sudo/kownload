@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 始终 null，stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码，同源隔离 App 联调及部署仍待验证。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码，同源隔离 App 联调及部署仍待验证。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -43,6 +43,7 @@ Task：`{id,protocol,status,createdAt,updatedAt,progress}`。
 Progress：`{downloadedBytes,speedBytesPerSecond,uploadedBytes,uploadSpeedBytesPerSecond,totalBytes,phase}`。
 
 - 数值为非负且不大于 JS 安全整数上限 `9007199254740991`；totalBytes 未知时为 null，不能用零冒充未知。
+- `totalBytes` 仅当同一次 `dataLock` 快照的状态为 done、已有 Progress 且所有标量合法时，取记录的最终 `Progress.Downloaded`，合法0保留为0。活动、暂停、错误等非done状态保持null；缺Progress或非法标量沿用 snapshot unavailable，不生成补值DTO。该数值不代表磁盘、资源大小或摘要复验，不读取Meta.Res/文件/配置/日志，也不调用fetcher。
 - phase：`unknown | queued | resolving | downloading | merging | verifying | publishing | done`，仅映射已有内存快照；未观测到的 phase 用 unknown，不为读桥引入持久阶段。
 - 读取缓存 Progress，不能触发 fetcher 恢复/调用网络。不以 downloaded==total 推断成功；最终状态依 Task.status。
 
