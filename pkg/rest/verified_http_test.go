@@ -205,7 +205,7 @@ func TestVerifiedHTTPReceiverPartialAndUntrustedDomain(t *testing.T) {
 	}
 }
 
-func TestVerifiedHTTPBuildServerUnsupportedReadOnlyAndAuth(t *testing.T) {
+func TestVerifiedHTTPBuildServerGuardedReadOnlyAndAuth(t *testing.T) {
 	for _, kind := range []model.Storage{model.StorageMem, model.StorageBolt} {
 		t.Run(string(kind), func(t *testing.T) {
 			server, endpoint, core, dir := datasetServer(t, kind, "synthetic-verified-token")
@@ -214,13 +214,18 @@ func TestVerifiedHTTPBuildServerUnsupportedReadOnlyAndAuth(t *testing.T) {
 				t.Fatal(err)
 			}
 			root := "/api/v1/datasets/" + identity.DatasetID + "/verified-http/v1"
+			capability, err := core.VerifiedHTTPCapabilityForDataset(identity.DatasetID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var hits atomic.Int32
 			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
 				_, _ = io.WriteString(w, "must-not-resolve")
 			}))
 			defer source.Close()
-			body := strings.Replace(verifiedFixtureBody(), "https://example.invalid/file", source.URL, 1)
+			validBody := strings.Replace(verifiedFixtureBody(), "https://example.invalid/file", source.URL, 1)
+			body := strings.Replace(validBody, `"algorithm":"sha256"`, `"algorithm":"SHA256"`, 1)
 			_, configBefore := datasetGET(t, endpoint+"/api/v1/config", "synthetic-verified-token")
 			catalogBefore, err := core.ListBatchOperationCatalog(download.BatchCatalogQuery{})
 			if err != nil {
@@ -244,20 +249,34 @@ func TestVerifiedHTTPBuildServerUnsupportedReadOnlyAndAuth(t *testing.T) {
 						t.Fatal("auth bypass", status)
 					}
 				}
+				// Valid cancellation is a write transaction even when its ID is
+				// absent. Check it separately from byte-for-byte read-only state.
+				if strings.HasSuffix(action.path, "/cancel") {
+					continue
+				}
 				status, reply := verifiedHandlerCall(t, server.Handler, action.method, action.path, action.body, "synthetic-verified-token")
 				if strings.HasSuffix(action.path, "/capability") {
 					var cap verifiedCapabilityResult
-					if err := json.Unmarshal(reply.Data, &cap); err != nil || status != 200 || cap.Supported || cap.Capability != verifiedHTTPCapability || cap.DatasetID != identity.DatasetID {
-						t.Fatalf("unsupported capability: %d %s", status, reply.Data)
+					if err := json.Unmarshal(reply.Data, &cap); err != nil || status != 200 || cap.Supported != capability.Supported || cap.Capability != verifiedHTTPCapability || cap.DatasetID != identity.DatasetID {
+						t.Fatalf("Core capability: %d %s", status, reply.Data)
 					}
-				} else if status != 501 || reply.Msg != "verified_http_unsupported" || string(reply.Data) != "null" {
-					t.Fatalf("unsupported path: %d %+v", status, reply)
+				} else if action.method == http.MethodPost {
+					if status != 400 || reply.Msg != "invalid_operation_request" || string(reply.Data) != "null" {
+						t.Fatalf("invalid request was not rejected by receiver: %d %+v", status, reply)
+					}
+				} else if capability.Supported {
+					var result verifiedOperationReply
+					if err := json.Unmarshal(reply.Data, &result); err != nil || status != 200 || reply.Code != 0 || result.Operation.State != "unknown" || len(result.Operation.TaskIDs) != 0 {
+						t.Fatalf("unknown query created history: %d %s", status, reply.Data)
+					}
+				} else if status != 501 || reply.Msg != "verified_http_unsupported" {
+					t.Fatalf("unsupported runner: %d %+v", status, reply)
 				}
 				wrong := strings.Repeat("0", 32)
 				if wrong == identity.DatasetID {
 					wrong = strings.Repeat("1", 32)
 				}
-				status, reply = verifiedHandlerCall(t, server.Handler, action.method, strings.Replace(action.path, identity.DatasetID, wrong, 1), action.body, "synthetic-verified-token")
+				status, reply = verifiedHandlerCall(t, server.Handler, action.method, strings.Replace(action.path, identity.DatasetID, wrong, 1), validBody, "synthetic-verified-token")
 				if status != 409 || reply.Msg != "dataset_mismatch" || string(reply.Data) != "null" {
 					t.Fatalf("mismatch: %d %+v", status, reply)
 				}
@@ -276,13 +295,25 @@ func TestVerifiedHTTPBuildServerUnsupportedReadOnlyAndAuth(t *testing.T) {
 			_, configAfter := datasetGET(t, endpoint+"/api/v1/config", "synthetic-verified-token")
 			catalogAfter, err := core.ListBatchOperationCatalog(download.BatchCatalogQuery{})
 			if err != nil || !reflect.DeepEqual(catalogBefore, catalogAfter) || !bytes.Equal(configBefore.Data, configAfter.Data) || len(core.GetTasks()) != 0 || hits.Load() != 0 {
-				t.Fatal("unsupported receiver mutated state or performed IO", err)
+				t.Fatal("guarded reads/rejected requests mutated state or performed IO", err)
 			}
 			if kind == model.StorageBolt {
 				after, err := os.ReadFile(filepath.Join(dir, "gopeed.db"))
 				if err != nil || !bytes.Equal(before, after) {
 					t.Fatal("receiver wrote Bolt", err)
 				}
+			}
+			status, reply := verifiedHandlerCall(t, server.Handler, http.MethodPost, root+"/operations/example-op/cancel", "", "synthetic-verified-token")
+			if capability.Supported {
+				if status != 200 || reply.Code != 0 || len(core.GetTasks()) != 0 {
+					t.Fatalf("unknown cancellation: %d %+v", status, reply)
+				}
+			} else if status != 501 {
+				t.Fatal("unsupported cancellation", status)
+			}
+			catalogAfter, err = core.ListBatchOperationCatalog(download.BatchCatalogQuery{})
+			if err != nil || !reflect.DeepEqual(catalogBefore, catalogAfter) || hits.Load() != 0 {
+				t.Fatal("unknown cancellation created an operation or IO", err)
 			}
 		})
 	}

@@ -192,7 +192,7 @@ func TestTaskCompletionReadDoesNotBlessMismatchedProjection(t *testing.T) {
 	}
 }
 
-func TestTaskCompletionReadBuildServerAuthOwnerAndInactiveRoutes(t *testing.T) {
+func TestTaskCompletionReadBuildServerAuthOwnerAndCapabilityPreserved(t *testing.T) {
 	server, endpoint, core, _ := datasetServer(t, model.StorageBolt, "synthetic-read-token")
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("owned legacy sample")) }))
 	defer source.Close()
@@ -208,6 +208,10 @@ func TestTaskCompletionReadBuildServerAuthOwnerAndInactiveRoutes(t *testing.T) {
 		t.Fatal("own legacy sample did not finish")
 	}
 	identity, err := core.DatasetIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := core.VerifiedHTTPCapabilityForDataset(identity.DatasetID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,12 +254,9 @@ func TestTaskCompletionReadBuildServerAuthOwnerAndInactiveRoutes(t *testing.T) {
 	}
 	root := "/api/v1/datasets/" + identity.DatasetID + "/verified-http/v1"
 	status, reply := datasetGET(t, endpoint+root+"/capability", "synthetic-read-token")
-	if status != 200 || !bytes.Contains(reply.Data, []byte(`"supported":false`)) {
-		t.Fatal("projection activated capability")
-	}
-	status, reply = datasetGET(t, endpoint+root+"/completion-events", "synthetic-read-token")
-	if status != 501 || reply.Msg != "verified_http_unsupported" {
-		t.Fatal("projection activated stream")
+	var advertised verifiedCapabilityResult
+	if err := json.Unmarshal(reply.Data, &advertised); err != nil || status != 200 || advertised.Supported != capability.Supported {
+		t.Fatal("task reads changed Core capability", err)
 	}
 }
 

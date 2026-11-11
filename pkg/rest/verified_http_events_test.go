@@ -380,11 +380,15 @@ func TestCompletionEventsIdleClearsWriteDeadline(t *testing.T) {
 	}
 }
 
-func TestCompletionEventsBuildServerUnsupportedAuthAndNoWrites(t *testing.T) {
+func TestCompletionEventsBuildServerAuthIdleStreamAndNoWrites(t *testing.T) {
 	for _, kind := range []model.Storage{model.StorageMem, model.StorageBolt} {
 		t.Run(string(kind), func(t *testing.T) {
 			server, endpoint, core, dir := datasetServer(t, kind, "synthetic-events-token")
 			identity, err := core.DatasetIdentity()
+			if err != nil {
+				t.Fatal(err)
+			}
+			capability, err := core.VerifiedHTTPCapabilityForDataset(identity.DatasetID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -396,26 +400,52 @@ func TestCompletionEventsBuildServerUnsupportedAuthAndNoWrites(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for _, token := range []string{"", "wrong-token", "synthetic-events-token"} {
+			for _, token := range []string{"", "wrong-token"} {
 				request := httptest.NewRequest(http.MethodGet, eventRoute(identity.DatasetID), nil)
 				if token != "" {
 					request.Header.Set("X-Api-Token", token)
 				}
 				w := httptest.NewRecorder()
 				server.Handler.ServeHTTP(w, request)
-				want := 401
-				if token == "synthetic-events-token" {
-					want = 501
+				if w.Code != 401 || w.Header().Get("Content-Type") == "text/event-stream" {
+					t.Fatal("auth", w.Code, w.Body.String())
 				}
-				if w.Code != want || w.Header().Get("Content-Type") == "text/event-stream" {
-					t.Fatal("auth/unsupported", w.Code, w.Body.String())
+			}
+			// Use a real HTTP writer and cancel an idle successful stream; JSON
+			// decoding or waiting for a first event would hang a live-only route.
+			finished := make(chan struct{}, 1)
+			transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer func() { finished <- struct{}{} }()
+				server.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(transport.Close)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			request, _ := http.NewRequestWithContext(ctx, http.MethodGet, transport.URL+eventRoute(identity.DatasetID), nil)
+			request.Header.Set("X-Api-Token", "synthetic-events-token")
+			response, err := transport.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if capability.Supported {
+				if response.StatusCode != 200 || response.Header.Get("Content-Type") != "text/event-stream" || response.Header.Get("Cache-Control") != "no-store" {
+					t.Fatal("ready Core did not expose an idle SSE stream", response.StatusCode)
 				}
+			} else if response.StatusCode != 501 || response.Header.Get("Content-Type") == "text/event-stream" {
+				t.Fatal("unsupported platform opened a stream", response.StatusCode)
+			}
+			cancel()
+			_ = response.Body.Close()
+			select {
+			case <-finished:
+			case <-time.After(time.Second):
+				t.Fatal("idle subscriber did not release on cancellation")
 			}
 			wrong := strings.Repeat("0", 32)
 			if wrong == identity.DatasetID {
 				wrong = strings.Repeat("1", 32)
 			}
-			request := httptest.NewRequest(http.MethodGet, eventRoute(wrong), nil)
+			request = httptest.NewRequest(http.MethodGet, eventRoute(wrong), nil)
 			request.Header.Set("X-Api-Token", "synthetic-events-token")
 			w := httptest.NewRecorder()
 			server.Handler.ServeHTTP(w, request)
@@ -425,7 +455,7 @@ func TestCompletionEventsBuildServerUnsupportedAuthAndNoWrites(t *testing.T) {
 			_, afterConfig := datasetGET(t, endpoint+"/api/v1/config", "synthetic-events-token")
 			page, err := core.ListBatchOperationCatalog(download.BatchCatalogQuery{})
 			if err != nil || len(core.GetTasks()) != 0 || len(page.Items) != 0 || !bytes.Equal(beforeConfig.Data, afterConfig.Data) {
-				t.Fatal("unsupported subscription changed state", err)
+				t.Fatal("subscription changed Task/config/catalog", err)
 			}
 			if kind == model.StorageBolt {
 				after, err := os.ReadFile(filepath.Join(dir, "gopeed.db"))
