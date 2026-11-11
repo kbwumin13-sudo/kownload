@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../api/model/downloader_config.dart';
+import '../../../../core/common/start_config.dart';
 import '../../../routes/app_pages.dart';
 import '../../../../i18n/message.dart';
 import '../../../../identity/browser_connection.dart';
@@ -24,8 +25,8 @@ import '../controllers/setting_controller.dart';
 /// downloader configuration used by the other platforms and download engine.
 class MacSettingsView extends StatefulWidget {
   final Widget hotKeyEditor;
-  final Widget Function(String section, Rx<DownloaderConfig> draft)
-      editorBuilder;
+  final Widget Function(String section, Rx<DownloaderConfig> draft,
+      Rx<StartConfig> startDraft) editorBuilder;
 
   const MacSettingsView(
       {super.key, required this.hotKeyEditor, required this.editorBuilder});
@@ -43,6 +44,8 @@ class _MacSettingsViewState extends State<MacSettingsView> {
   bool _saving = false;
   bool _saveRequested = false;
   bool _saved = false;
+  bool _updatingTrackers = false;
+  String? _trackerNotice;
   Map<String, ManifestRoute?>? _routes;
   bool _connecting = false;
   String? _browserNotice;
@@ -574,7 +577,13 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         DownloaderConfig.fromJson(_app.downloaderConfig.value.toJson()).obs;
     var saving = false;
     String? error;
-    final editor = widget.editorBuilder(section, draft);
+    final start = _app.startConfig.value;
+    final startDraft = (StartConfig()
+          ..network = start.network
+          ..address = start.address
+          ..apiToken = start.apiToken)
+        .obs;
+    final editor = widget.editorBuilder(section, draft, startDraft);
     await MacPanel.transient(() => showDialog<void>(
         context: context,
         builder: (dialogContext) => StatefulBuilder(builder: (context, update) {
@@ -612,10 +621,14 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                                   error = null;
                                 });
                                 final config = _app.downloaderConfig.value;
-                                final restore =
-                                    _applySection(config, draft.value, section);
+                                final restore = _applySection(config,
+                                    draft.value, section, startDraft.value);
                                 try {
-                                  await _app.saveConfig();
+                                  if (section == 'api') {
+                                    await _app.saveStartConfig();
+                                  } else {
+                                    await _app.saveConfig();
+                                  }
                                   _app.downloaderConfig.refresh();
                                   if (dialogContext.mounted) {
                                     Navigator.of(dialogContext).pop();
@@ -626,7 +639,9 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                                   if (dialogContext.mounted) {
                                     update(() {
                                       saving = false;
-                                      error = '更改尚未保存，请检查下载服务后重试。';
+                                      error = section == 'api'
+                                          ? '启动设置保存未完成，请重试。'
+                                          : '更改尚未保存，请检查下载服务后重试。';
                                     });
                                   }
                                 }
@@ -641,8 +656,8 @@ class _MacSettingsViewState extends State<MacSettingsView> {
 
   // Replace only the edited section. Unknown protocol fields and unrelated
   // settings stay on the live configuration; a failed save restores the section.
-  VoidCallback _applySection(
-      DownloaderConfig config, DownloaderConfig draft, String section) {
+  VoidCallback _applySection(DownloaderConfig config, DownloaderConfig draft,
+      String section, StartConfig startDraft) {
     switch (section) {
       case 'media':
         final previous = config.protocolConfig.media;
@@ -669,8 +684,66 @@ class _MacSettingsViewState extends State<MacSettingsView> {
         final previous = config.proxy;
         config.proxy = draft.proxy;
         return () => config.proxy = previous;
+      case 'api':
+        final current = _app.startConfig.value;
+        final network = current.network,
+            address = current.address,
+            token = current.apiToken;
+        current.network = startDraft.network;
+        current.address = startDraft.address;
+        current.apiToken = startDraft.apiToken;
+        return () {
+          current.network = network;
+          current.address = address;
+          current.apiToken = token;
+        };
+      case 'webhook':
+        final current = config.webhook;
+        final enable = current.enable, urls = current.urls;
+        current.enable = draft.webhook.enable;
+        current.urls = List.of(draft.webhook.urls);
+        return () {
+          current.enable = enable;
+          current.urls = urls;
+        };
+      case 'script':
+        final current = config.script;
+        final enable = current.enable, paths = current.paths;
+        current.enable = draft.script.enable;
+        current.paths = List.of(draft.script.paths);
+        return () {
+          current.enable = enable;
+          current.paths = paths;
+        };
+      case 'mirrors':
+        final current = config.extra.githubMirror;
+        final enabled = current.enabled, mirrors = current.mirrors;
+        current.enabled = draft.extra.githubMirror.enabled;
+        current.mirrors = List.of(draft.extra.githubMirror.mirrors);
+        return () {
+          current.enabled = enabled;
+          current.mirrors = mirrors;
+        };
       default:
         throw StateError('Unknown settings section: $section');
+    }
+  }
+
+  Future<void> _updateTrackers() async {
+    if (_updatingTrackers || _saving) return;
+    setState(() {
+      _updatingTrackers = true;
+      _trackerNotice = null;
+    });
+    try {
+      await _app.trackerUpdate();
+      if (mounted) {
+        setState(() => _trackerNotice = '更新操作已结束，可在 BitTorrent 设置中查看更新时间。');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _trackerNotice = '未能更新 Tracker，请检查网络后重试。');
+    } finally {
+      if (mounted) setState(() => _updatingTrackers = false);
     }
   }
 
@@ -733,6 +806,10 @@ class _MacSettingsViewState extends State<MacSettingsView> {
               'bt': 'BitTorrent',
               'ed2k': 'ED2K',
               'proxy': '代理',
+              'api': 'API',
+              'webhook': 'Webhook',
+              'script': '完成脚本',
+              'mirrors': 'GitHub 镜像',
             }.entries)
               _row(context, entry.value,
                   control: MacButton(
@@ -741,6 +818,13 @@ class _MacSettingsViewState extends State<MacSettingsView> {
                           ? null
                           : () => _editSection(entry.key, entry.value),
                       child: const Text('编辑…'))),
+            _row(context, 'BT Tracker',
+                detail: _trackerNotice ?? '使用已保存的订阅，点击后才连接网络更新。',
+                control: MacButton(
+                    key: const ValueKey('settings-tracker-update'),
+                    onPressed:
+                        _updatingTrackers || _saving ? null : _updateTrackers,
+                    child: Text(_updatingTrackers ? '正在更新…' : '立即更新'))),
             _row(context, '下载扩展',
                 control: MacButton(
                     key: const ValueKey('settings-extensions'),

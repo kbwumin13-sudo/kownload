@@ -17,6 +17,7 @@ import 'package:gopeed/macos/mac_panel.dart';
 
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/downloader_config.dart';
+import '../../../../core/common/start_config.dart';
 import '../../../../i18n/message.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/locale_manager.dart';
@@ -41,9 +42,13 @@ final _divider = const Divider().paddingOnly(left: 10, right: 10);
 class SettingView extends GetView<SettingController> {
   final String? section;
   final Rx<DownloaderConfig>? draft;
+  final Rx<StartConfig>? startDraft;
+  final Future<void> Function(String)? webhookTest;
 
-  const SettingView({Key? key, this.section, this.draft})
+  const SettingView(
+      {Key? key, this.section, this.draft, this.startDraft, this.webhookTest})
       : assert((section == null) == (draft == null)),
+        assert(section != 'api' || startDraft != null),
         super(key: key);
 
   // Helper function to get display name for a category
@@ -59,12 +64,15 @@ class SettingView extends GetView<SettingController> {
     if (Util.isMacos() && section == null) {
       return MacSettingsView(
           hotKeyEditor: const MacHotKeyEditor(),
-          editorBuilder: (section, draft) =>
-              SettingView(section: section, draft: draft));
+          editorBuilder: (section, draft, startDraft) => SettingView(
+              section: section,
+              draft: draft,
+              startDraft: startDraft,
+              webhookTest: webhookTest));
     }
     final appController = Get.find<AppController>();
     final downloaderCfg = draft ?? appController.downloaderConfig;
-    final startCfg = appController.startConfig;
+    final startCfg = startDraft ?? appController.startConfig;
 
     Timer? timer;
     Future<bool> debounceSave(
@@ -1138,7 +1146,7 @@ class SettingView extends GetView<SettingController> {
           width: 150,
           child: DropdownButtonFormField<String>(
             isExpanded: true,
-            value: const ['http', 'socks5'].contains(proxy.scheme)
+            value: const ['http', 'https', 'socks5'].contains(proxy.scheme)
                 ? proxy.scheme
                 : null,
             hint: Text(proxy.scheme.isEmpty ? 'scheme'.tr : proxy.scheme),
@@ -1413,6 +1421,7 @@ class SettingView extends GetView<SettingController> {
           SizedBox(
             width: 80,
             child: DropdownButtonFormField<String>(
+              isExpanded: true,
               value: startCfg.value.network,
               onChanged: Util.isDesktop() || Util.isAndroid()
                   ? (value) async {
@@ -1797,6 +1806,16 @@ class SettingView extends GetView<SettingController> {
               buildEd2kNodesDat()
             ],
           'proxy' => [buildProxy()],
+          'api' => [
+              buildApiProtocol(),
+              if (startCfg.value.network == 'tcp') buildApiToken(),
+              const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text('保存后下次启动生效，不会自动重启服务。'))
+            ],
+          'webhook' => [buildWebhook()],
+          'script' => [buildScript()],
+          'mirrors' => [buildGithubMirror()],
           _ => throw StateError('Unknown settings section: $section'),
         };
         return Column(mainAxisSize: MainAxisSize.min, children: rows);
@@ -1981,121 +2000,147 @@ class SettingView extends GetView<SettingController> {
     });
   }
 
+  Future<void> _saveNestedSettings(AppController appController) async {
+    if (draft != null) {
+      draft!.refresh();
+    } else {
+      await appController.saveConfig();
+    }
+  }
+
   void _showWebhookDialog({int? index, String? initialUrl}) {
     final urlController = TextEditingController(text: initialUrl ?? '');
     final testController = OutlinedButtonLoadingController();
     final saveController = TextButtonLoadingController();
     final appController = Get.find<AppController>();
-    final downloaderCfg = appController.downloaderConfig;
+    final downloaderCfg = draft ?? appController.downloaderConfig;
     final isEdit = index != null;
     final formKey = GlobalKey<FormState>();
+    String? testMessage;
 
     showDialog(
       context: Get.context!,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(isEdit ? 'edit'.tr : 'add'.tr),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: urlController,
-                decoration: InputDecoration(
-                  hintText: 'webhookUrlHint'.tr,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: Text(isEdit ? 'edit'.tr : 'add'.tr),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: urlController,
+                  decoration: InputDecoration(
+                    hintText: 'webhookUrlHint'.tr,
+                  ),
+                  keyboardType: TextInputType.url,
+                  validator: (value) {
+                    if (value == null || value.trim().isEmpty) {
+                      return 'required'.tr;
+                    }
+                    final url = value.trim().toLowerCase();
+                    if (!url.startsWith('http://') &&
+                        !url.startsWith('https://')) {
+                      return 'urlInvalid'.tr;
+                    }
+                    try {
+                      Uri.parse(value.trim());
+                    } catch (e) {
+                      return 'urlInvalid'.tr;
+                    }
+                    return null;
+                  },
                 ),
-                keyboardType: TextInputType.url,
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'required'.tr;
-                  }
-                  final url = value.trim().toLowerCase();
-                  if (!url.startsWith('http://') &&
-                      !url.startsWith('https://')) {
-                    return 'urlInvalid'.tr;
-                  }
-                  try {
-                    Uri.parse(value.trim());
-                  } catch (e) {
-                    return 'urlInvalid'.tr;
-                  }
-                  return null;
-                },
-              ),
-            ],
-          ),
-        ),
-        actionsAlignment: MainAxisAlignment.spaceBetween,
-        actions: [
-          // Test button on the left
-          Padding(
-            padding: const EdgeInsets.only(left: 16.0),
-            child: OutlinedButtonLoading(
-              controller: testController,
-              onPressed: () async {
-                if (!formKey.currentState!.validate()) {
-                  return;
-                }
-                final url = urlController.text.trim();
-                if (url.isEmpty) return;
-                testController.start();
-                try {
-                  await api.testWebhook(url);
-                  showMessage('tip'.tr, 'webhookTestSuccess'.tr);
-                } catch (e) {
-                  showErrorMessage('webhookTestFail'.tr);
-                } finally {
-                  testController.stop();
-                }
-              },
-              child: Text('webhookTest'.tr),
+                if (testMessage != null)
+                  Text(testMessage!,
+                      key: const ValueKey('webhook-test-result')),
+              ],
             ),
           ),
-          // Cancel and Confirm on the right
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: Text('cancel'.tr),
-              ),
-              TextButtonLoading(
-                controller: saveController,
+          actionsAlignment: MainAxisAlignment.spaceBetween,
+          actions: [
+            // Test button on the left
+            Padding(
+              padding: const EdgeInsets.only(left: 16.0),
+              child: OutlinedButtonLoading(
+                controller: testController,
                 onPressed: () async {
                   if (!formKey.currentState!.validate()) {
                     return;
                   }
                   final url = urlController.text.trim();
                   if (url.isEmpty) return;
-
-                  saveController.start();
+                  testController.start();
                   try {
-                    // Create new list to avoid unmodifiable list error
-                    final urls =
-                        List<String>.from(downloaderCfg.value.webhook.urls);
-                    if (isEdit) {
-                      urls[index] = url;
+                    await (webhookTest ?? api.testWebhook)(url);
+                    if (draft != null) {
+                      if (dialogContext.mounted) {
+                        update(() => testMessage = 'webhookTestSuccess'.tr);
+                      }
                     } else {
-                      urls.add(url);
-                    }
-                    downloaderCfg.update((val) {
-                      val!.webhook.urls = urls;
-                    });
-                    await appController.saveConfig();
-                    if (dialogContext.mounted) {
-                      Navigator.of(dialogContext).pop();
+                      showMessage('tip'.tr, 'webhookTestSuccess'.tr);
                     }
                   } catch (e) {
-                    showErrorMessage(e);
+                    if (draft != null) {
+                      if (dialogContext.mounted) {
+                        update(() => testMessage = 'webhookTestFail'.tr);
+                      }
+                    } else {
+                      showErrorMessage('webhookTestFail'.tr);
+                    }
                   } finally {
-                    saveController.stop();
+                    testController.stop();
                   }
                 },
-                child: Text('confirm'.tr),
+                child: Text('webhookTest'.tr),
               ),
-            ],
-          ),
-        ],
+            ),
+            // Cancel and Confirm on the right
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: Text('cancel'.tr),
+                ),
+                TextButtonLoading(
+                  controller: saveController,
+                  onPressed: () async {
+                    if (!formKey.currentState!.validate()) {
+                      return;
+                    }
+                    final url = urlController.text.trim();
+                    if (url.isEmpty) return;
+
+                    saveController.start();
+                    try {
+                      // Create new list to avoid unmodifiable list error
+                      final urls =
+                          List<String>.from(downloaderCfg.value.webhook.urls);
+                      if (isEdit) {
+                        urls[index] = url;
+                      } else {
+                        urls.add(url);
+                      }
+                      downloaderCfg.update((val) {
+                        val!.webhook.urls = urls;
+                      });
+                      await _saveNestedSettings(appController);
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
+                      }
+                    } catch (e) {
+                      showErrorMessage(e);
+                    } finally {
+                      saveController.stop();
+                    }
+                  },
+                  child: Text('confirm'.tr),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2104,7 +2149,7 @@ class SettingView extends GetView<SettingController> {
     final pathController = TextEditingController(text: initialPath ?? '');
     final saveController = TextButtonLoadingController();
     final appController = Get.find<AppController>();
-    final downloaderCfg = appController.downloaderConfig;
+    final downloaderCfg = draft ?? appController.downloaderConfig;
     final isEdit = index != null;
     final formKey = GlobalKey<FormState>();
 
@@ -2139,11 +2184,19 @@ class SettingView extends GetView<SettingController> {
                       child: IconButton(
                         icon: const Icon(Icons.folder_open),
                         onPressed: () async {
-                          final result = await FilePicker.platform.pickFiles();
-                          if (result != null && result.files.isNotEmpty) {
-                            final filePath = result.files.first.path;
-                            if (filePath != null) {
-                              pathController.text = filePath;
+                          if (Util.isMacos()) {
+                            final paths = await MacPanel.chooseFiles();
+                            if (paths != null && paths.isNotEmpty) {
+                              pathController.text = paths.first;
+                            }
+                          } else {
+                            final result =
+                                await FilePicker.platform.pickFiles();
+                            if (result != null && result.files.isNotEmpty) {
+                              final filePath = result.files.first.path;
+                              if (filePath != null) {
+                                pathController.text = filePath;
+                              }
                             }
                           }
                         },
@@ -2181,7 +2234,7 @@ class SettingView extends GetView<SettingController> {
                 downloaderCfg.update((val) {
                   val!.script.paths = paths;
                 });
-                await appController.saveConfig();
+                await _saveNestedSettings(appController);
                 if (dialogContext.mounted) {
                   Navigator.of(dialogContext).pop();
                 }
@@ -2205,7 +2258,7 @@ class SettingView extends GetView<SettingController> {
     final urlController = TextEditingController(text: initialMirror?.url ?? '');
     final saveController = TextButtonLoadingController();
     final appController = Get.find<AppController>();
-    final downloaderCfg = appController.downloaderConfig;
+    final downloaderCfg = draft ?? appController.downloaderConfig;
     final formKey = GlobalKey<FormState>();
 
     showDialog(
@@ -2299,7 +2352,7 @@ class SettingView extends GetView<SettingController> {
                   downloaderCfg.update((val) {
                     val!.extra.githubMirror.mirrors = mirrors;
                   });
-                  await appController.saveConfig();
+                  await _saveNestedSettings(appController);
                   if (dialogContext.mounted) {
                     Navigator.of(dialogContext).pop();
                   }
