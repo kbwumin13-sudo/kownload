@@ -206,29 +206,11 @@ func DeleteTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetTask(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	taskId := vars["id"]
-	if taskId == "" {
-		WriteJson(w, model.NewErrorResult("param invalid: id", model.CodeInvalidParam))
-		return
-	}
-	task := Downloader.GetTask(taskId)
-	if task == nil {
-		WriteJson(w, model.NewErrorResult("task not found", model.CodeTaskNotFound))
-		return
-	}
-	WriteJson(w, model.NewOkResult(task))
+	taskCompletionReader{core: Downloader}.get(w, r)
 }
 
 func GetTasks(w http.ResponseWriter, r *http.Request) {
-	filter, errResult := parseFilter(r)
-	if errResult != nil {
-		WriteJson(w, errResult)
-		return
-	}
-
-	tasks := Downloader.GetTasksByFilter(filter)
-	WriteJson(w, model.NewOkResult(tasks))
+	taskCompletionReader{core: Downloader}.list(w, r)
 }
 
 func GetConfig(w http.ResponseWriter, r *http.Request) {

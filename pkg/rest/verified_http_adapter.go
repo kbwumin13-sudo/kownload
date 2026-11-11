@@ -58,15 +58,19 @@ func adaptVerifiedHTTPResult(domain string, result download.VerifiedHTTPOperatio
 	// projection association/version fields to make an invalid view look valid.
 	out := verifiedHTTPResult{DatasetID: domain, Operation: result.Operation}
 	for _, view := range result.CompletionViews {
-		var recordedMatch *bool
-		if view.RecordedMatch != nil {
-			owned := *view.RecordedMatch
-			recordedMatch = &owned
-		}
-		out.Views = append(out.Views, completionView{Version: view.Version, ScopeVersion: view.ScopeVersion,
-			DatasetID: view.DatasetID, TaskID: view.TaskID, CompletionID: optionalCompletionString(view.CompletionID),
-			Available: view.Available, Phase: optionalCompletionString(view.Phase), RecordedMatch: recordedMatch,
-			ErrorCategory: optionalCompletionString(view.ErrorCategory)})
+		out.Views = append(out.Views, adaptCompletionView(view))
 	}
 	return out
+}
+
+func adaptCompletionView(view download.TaskCompletionView) completionView {
+	var recordedMatch *bool
+	if view.RecordedMatch != nil {
+		owned := *view.RecordedMatch
+		recordedMatch = &owned
+	}
+	return completionView{Version: view.Version, ScopeVersion: view.ScopeVersion,
+		DatasetID: view.DatasetID, TaskID: view.TaskID, CompletionID: optionalCompletionString(view.CompletionID),
+		Available: view.Available, Phase: optionalCompletionString(view.Phase), RecordedMatch: recordedMatch,
+		ErrorCategory: optionalCompletionString(view.ErrorCategory)}
 }

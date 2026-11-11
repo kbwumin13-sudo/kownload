@@ -162,6 +162,12 @@ API、不会把无校验Task当校验任务。正例注入仅位于测试。真�
 published snapshot未接通时，不启用能力，也不装饰普通Task/list的phase；该部分须待同源
 Core×API×UI/MCP交集验证。此增量不修改build40已交包。
 
+独立读取增量使用Core的`TaskCompletionSnapshotsForDataset`成对返回Task与可选投影，
+路由捕获本服务Core；既有列表只提供ID选择和顺序，不以live对象覆盖权威pair。
+Core确认三方全缺失的legacy才在View外提供owned live进度；有任一状态则只消费
+同域View，C尚未API可见时整读503/completion_state_unavailable且data:null。
+缺失ID省略，未知错误只返回固定白名单分类，投影不会启动受理能力或SSE。
+
 adapter将outer version/requiredCapability填入typed Integrity，不塞Extra或重算raw/options；
 未知Core能力版本/名称fail closed。nullable projection按字段保留版本/关联，空string为null，
 RecordedMatch保nil且不共享指针；公开formatter再核shape，不给坏view补成可信数据。
