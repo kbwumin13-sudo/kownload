@@ -2013,7 +2013,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.dataLock.RLock()
 		needCreate = !task.IsCreated
 		task.dataLock.RUnlock()
-		invalidateTaskRecovery(task)
+		// Starting an acknowledged explicit retry consumes its private permit
+		// in begin; cancellation/patch/delete still clear it via invalidate.
+		if owner := task.recoveryOwner.Load(); owner != nil {
+			owner.active.Store(false)
+		}
 		task.runGeneration = d.recoveryGenerationBase(task) + 1
 		task.dataLock.Lock()
 		task.clearReadPublishedLocked()
