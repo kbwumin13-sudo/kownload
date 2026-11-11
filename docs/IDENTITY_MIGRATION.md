@@ -92,6 +92,21 @@ operation/校验/副作用等新字段可能被旧 core 忽略；JSON 可读不�
 链接 `[path,"link",target]`；算法见脚本 `tree_digest`。清单必须在停写后生成，
 脚本不能事后证明冷快照采集时点或来源真实性，不将匹配摘要当作执行授权。
 
+目录摘要只覆盖内容、mode 和链接，不覆盖通用扩展属性。若数据中含固定
+`bin/kownload-mcp`，另要求普通、当前 UID、单链接、mode700，以及
+`io.github.kbwumin13-sudo.kownload.mcp-install` 这个安装 marker：≤2048 字节的冻结
+JSON v1，七字段严格白名单，readApiVersion=1、arm64、版本/sourceCommit 对应且
+sha256 与二进制字节相同。缺失、未知、损坏或读取失败时，dry-run/apply 都拒绝承诺。
+不能因文件存在而自动认领或补造 marker。
+
+离线复制逐级以不跟随链接的目录描述符打开固定文件，并持有已验证 inode 的文件描述符，
+通过 Darwin 的 fd 属性接口复制这个 marker 的原始字节；不会在检查后重新解析完整路径
+来写属性。再复读源与副本并比对 binary SHA256/mode/marker；末级或父目录替换、写入、
+比较失败或源变化，不发布完成计划，也不向链接指向的外部文件写属性。新增逻辑不枚举
+其他属性、不读取/删除 quarantine、不改变 Apple 信任或安装到活动稳定入口。
+旧工具曾在受控 macOS fixture 中复制字节成功却丢该 marker、仍返回 pairVerified；
+此负例保留，当前修复补的是固定安装状态保全，不是通用 xattr 归档或实际生产回退验收。
+
 ```sh
 python3 scripts/rollback-identity.py --snapshot-manifest '<冷备份>/snapshot.json' \
   --output '<不存在的离线副本目录>'

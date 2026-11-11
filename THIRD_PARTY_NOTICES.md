@@ -1,13 +1,15 @@
 # Third-party notices
 
-kownload contains modified code from the following projects. Original copyright notices, license texts and Git history are retained.
+kownload contains modified code from the following projects. The notices below identify confirmed source adaptations, available upstream copyright notices and remaining attribution gaps. Original license texts and Git history are retained.
 
 | Project | Use | License |
 | --- | --- | --- |
 | [GopeedLab/gopeed](https://github.com/GopeedLab/gopeed), v1.9.3 | Download core and Flutter application foundation, modified for kownload | GPL-3.0, see [LICENSE](LICENSE) |
-| [LinkSwift](https://github.com/hmjz100/LinkSwift) | Cloud-drive file selection reference | AGPL-3.0, see [notice](third_party/linkswift/NOTICE.md) and [license](third_party/linkswift/LICENSE) |
-| [OpenList](https://github.com/OpenListTeam/OpenList) | Cloud-drive adapter reference | AGPL-3.0, see [notice](third_party/openlist/NOTICE.md) and [license](third_party/openlist/LICENSE) |
+| [LinkSwift](https://github.com/hmjz100/LinkSwift) | Adapted cloud-drive selection models and protocol references; see the pinned fragment map | AGPL-3.0, see [notice](third_party/linkswift/NOTICE.md) and [license](third_party/linkswift/LICENSE) |
+| [OpenList](https://github.com/OpenListTeam/OpenList) | Cloud-drive protocol references and adapted Baidu digest decoding; see the pinned fragment map | AGPL-3.0, see [notice](third_party/openlist/NOTICE.md) and [license](third_party/openlist/LICENSE) |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp), [FFmpeg](https://ffmpeg.org), Node.js | External media tools invoked at runtime | Their respective licenses |
+
+Confirmed LinkSwift/OpenList fragments and kownload modification commits are recorded in the notices linked above (checked 2026-11-11). These mappings do not establish complete authorship history or a legal conclusion about combined distribution; unresolved fragment attribution and license scope remain subject to review. No license text or grant is replaced by this index.
 
 Compatibility identifiers, including `com.gopeed.gopeed`, `gopeed:` and internal module/package names, remain unchanged so existing data and browser integration continue to work. These are technical identifiers; the application is displayed as kownload.
 
