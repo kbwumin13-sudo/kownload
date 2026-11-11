@@ -17,6 +17,7 @@ import 'package:gopeed/app/modules/create/views/create_view.dart';
 import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
 import 'package:gopeed/app/modules/task/views/task_view.dart';
 import 'package:gopeed/app/modules/task/views/task_batch_groups.dart';
+import 'package:gopeed/app/modules/task/views/http_task_retry_button.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/database/task_batch_journal_store.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
@@ -90,6 +91,62 @@ void main() {
         .setMockMethodCallHandler(MacPanel.channel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
+  });
+  testWidgets('HTTP error retry is reachable in full list and compact panel',
+      (t) async {
+    f.override = (request) async {
+      if (request.uri.path.endsWith('/stats')) {
+        await f.respond(request, {'lastError': 'fixture failure'});
+      } else {
+        await f.handle(request);
+      }
+    };
+    final task = Task(
+        id: '_retry-task',
+        name: 'retry.bin',
+        meta: Meta(
+            req: Request(url: 'https://fixture.invalid/file'), opts: Options()),
+        status: Status.error,
+        uploading: false,
+        progress: Progress(
+            used: 0, speed: 0, downloaded: 0, uploadSpeed: 0, uploaded: 0),
+        createdAt: DateTime.utc(2026),
+        updatedAt: DateTime.utc(2026))
+      ..protocol = Protocol.http;
+    Get.find<MacTaskListController>().tasks.assignAll([task]);
+    final page = ValueNotifier<Widget>(const TaskView());
+    await t.binding.setSurfaceSize(const Size(1000, 850));
+    addTearDown(() async {
+      await t.pumpWidget(const SizedBox());
+      page.dispose();
+      await t.binding.setSurfaceSize(null);
+    });
+    await t.pumpWidget(
+        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+      GetPage(
+          name: '/',
+          page: () => ValueListenableBuilder<Widget>(
+              valueListenable: page, builder: (_, view, __) => view))
+    ]));
+    await t.pumpAndSettle();
+    await spin(
+        t, () => find.textContaining('fixture failure').evaluate().isNotEmpty);
+    await spin(t, () {
+      final refresh = find.byKey(const ValueKey('task-batch-refresh'));
+      return refresh.evaluate().isNotEmpty &&
+          t.widget<TextButton>(refresh).onPressed != null &&
+          f.inFlight == 0;
+    });
+    expect(find.byType(HttpTaskRetryButton), findsOneWidget);
+    expect(find.byTooltip('重试'), findsOneWidget);
+    page.value = const CreateView();
+    await t.pumpAndSettle();
+    await spin(
+        t, () => find.textContaining('fixture failure').evaluate().isNotEmpty);
+    expect(find.byType(HttpTaskRetryButton), findsOneWidget);
+    expect(find.byTooltip('重试'), findsOneWidget);
+    expect(f.posts, 0);
+    expect(box.get(TaskBatchJournalStore.storageKey), isNull);
   });
   for (final kind in [
     'missing',
