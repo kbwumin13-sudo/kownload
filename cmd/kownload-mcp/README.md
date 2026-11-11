@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；stats/errors 已有可选内存发布接口的读取适配，但当前 Task 尚未接入 publisher，仍为 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -49,11 +49,13 @@ Progress：`{downloadedBytes,speedBytesPerSecond,uploadedBytes,uploadSpeedBytesP
 
 Stats：`{available:false}`，或 `{available:true,activeStreams?:int,targetStreams?:int,peers?:int}`。字段采用相同非负安全整数范围。App 必须提供无恢复快照；未加载/没有快照时 unavailable，不能调用现有恢复式 `Downloader.Stats`。available=false 时不得同时带计数；available=true 的缺字段表示该协议未提供，不能补零冒充观测。
 
+读取适配器只在 `Task.dataLock` 下复制可选 `mcpReadPublishedSnapshotLocked()` 的纯值结果，锁外验证并构造 DTO。没有接口实现或没有观测时返回 `available:false`，不查询 fetcher、存储或日志。每个统计字段独立记录是否已知；合法 0 不丢失，任一已知计数越界返回 snapshot unavailable，未知字段不补值。
+
 LastError：`{available:false}`，或 `{available:true,category,retryable,occurredAt}`。
 
 - category：`network | authentication | integrity | storage | cancelled | unknown`；由 App 明确分类，不传错误原文。
-- retryable 为 bool，occurredAt 为有效 RFC3339。
-- App 可在原错误路径维护有界内存快照；缺历史返回 unavailable，不抓日志/私密数据库，不把 unavailable 等同于没有错误。
+- retryable 原样复制生产侧接受的 typed 策略，不按任务状态推测。occurredAt 由真实事件的 Unix 毫秒转换为 UTC RFC3339；已知事件的毫秒范围为 1…253402300799999，越界或未知分类返回 snapshot unavailable。
+- producer 负责当前 run/sourceRevision 守卫，以及新 run、换 source、暂停失效和成功时清空；迟到旧事件不得发布。读取侧不映射原始错误、不发明重试策略、不重建历史。生产薄点尚未接入，纯值/锁行为测试不算真实传输、错误或恢复的端到端验收。
 
 读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / app_authentication_failed / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。只有以上五个注册工具；annotations 是提示，不承担权限控制。
 
