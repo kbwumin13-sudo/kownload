@@ -18,13 +18,15 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | `Task.creationOperation` v1，namespace=`task-batch.create/v1`，operationId/index | S2 本地 `3c69231`；原 Task 六状态不变 | 39 可能忽略或保存丢字段，不等可执行 | 新端须与 manifest/member/逆索引一致；无 ref 且无逆索引的旧 Task 兼容 | 受启动 policy 和原任务守卫；未识别/不一致拒绝 | 活动库裸回退不支持；配对快照。以下三个 S2 行的实证来自其独立 plain/race/子进程断点交付，本分支只登记合同，不冒称已合入 |
 | bucket `task_operations_v1`，record.version=1 | S2 同提交；固定 namespace、稳定 members，pending 无 Task | 旧 core 不理解持久 operation | pending 只保留意图清单，不启动、不自动重造；created 保留删除历史 | 不 TTL 淘汰；重放不得自动继续暂停任务；调用者须显式提供相同完整意图 | 旧版不维护操作幂等，不能裸回灌；凭据/意图变化不得冒充同 op 或重建 created 前缀 |
 | bucket `operation_tasks_v1`，TaskID→ref | S2 同提交；与 Task/member 同一 M 事务持久写入 | 旧 core 不维护逆索引 | 启动核对；丢 ref/错配/未来版本隔离，不能把有逆索引的任务当 legacy | 索引/任务/manifest 不一致拒绝，不靠自动修复重造 | 新 reader 丢字段/未知 manifest 和索引已有隔离测试；不证明旧 core 执行安全，默认配对快照 |
+| `config` bucket 单 key `dataset_identity_v1`，`{version:1,datasetId:32位小写hex}`（S5b v1，隔离验证通过） | REST 启动在 Downloader.Setup 前单事务首次生成；GET 不生成 | 旧 core 忽略该附加 key，不能回答数据域协议；不改变原 Task 可执行范围 | 逻辑 ID 不授予任务执行或认证能力；坏/未知记录保留并拒绝新端启动 | ID 不证明数据未回退，原 Task/S0/S2 守卫仍必需 | 新库首次启用生成一次，重启保留；复制/配对快照保逻辑 ID，不证明内容新鲜。缺 ID 的旧快照再次启用会获新 ID，旧 journal 不得换域重造请求；真实 Bolt/Mem、重开/复制/换库、坏值/写失败、REST 初始化与只读零写定向/race 已验，生产尚未启用 |
+| Hive 单 key `task_batch_journal_v1`，JSON String `{journalVersion:1,refs:[{route:{product,identityProtocol,routeScope},datasetId,namespace,operationId,state:query_required}]}`（S5b 手动 HTTP(S) 成套候选，未生产启用） | 16 d4b2bba journal/store 经成套手动多行 HTTP(S) 与只读组入口接线；绑定实际 boot API 的不可变 snapshot，正式 App 隔离验收仍待；route 固定 kownload/1/既有64hex，dataset 必须来自 persistent:true 的 Core 身份 | 旧 App 可忽略此 Hive 键，不等于旧 core 可以安全执行 S2 状态；仍沿 S2 的不兼容执行边界 | 只有新用户意图、当前 UI 代次、仍匹配的活动 API/ref/scope 与新 ref 真实 put ACK 可消费一次首发；preflight unknown 只验能力；重开/重复永远 queryOnly，错误或超时不可发送；不保存 req/opts/auth/hash/回执副本 | 未决不淘汰，无自动删除/GC；坏/未知 journal 整体隔离且保原值，不换 route/dataset 认领；Mem 域拒恢复型预写 | 多 store 同 Box 串行 fence 保持至真实 put settle，超时后迟到成功不升级原返回或覆盖后续 refs；引用不是认证或数据未回退证明，配对快照不允许重造未知 op |
 | `Task.recovery` ref，`version=1`（本地候选已实现，未发布/安装） | S3 独立候选 `e045641`；直接 HTTP enroll/IO 已接同事务许可 | 39/旧 core 可能忽略或保存丢 ref，不能当普通任务执行 | 新端必须核对 ref、ledger、required 哨兵三方；缺失/未知/错配时连显式 Continue 也拒绝 | 只执行受支持的 episode/generation/sourceRevision；迟到结果不能跨代生效，仍受 S0 启动政策 | 与以下两行同事务 enroll；配对 App/数据/偏好快照，禁止裸活动库回灌旧 core |
 | bucket `task_recovery_v1`，record.version=1（本地候选已实现，未发布/安装） | S3 同候选，首能力仅 `http-transport-recovery/v1` 可冻结的 direct/manual/static/env 上下文 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、必需 executionDefaultsHash、initialAttempt、计数与有界 actions；缺坏默认摘要 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保 episode、issued 证据、余额/actions/notBefore；只读不 enroll、删除不重造 | 三方必须同事务；当前仅 transport action，总16且 transport6；refreshUsed/deferralUsed 仅0、notBefore 仅空值受支持，其他值拒绝而不清空 |
 | bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |
 | 路径 provenance / 规则版本 / 已冻结目标 | 后续计划，尚未写入 | 旧 core 可能忽略来源/重新分流 | 只用持久已冻结目标；未知来源政策不重算路径 | 未知拒绝，首次写入前先持久化 | App/数据快照不能回滚文件内容；须核真实输出位置/字节，不能删除新版文件来凑一致 |
 | MCP 任务持久副作用策略 | S7 写端计划；当前五读桥不新增任务状态 | 旧 core 可能忽略禁用脚本/自动打开/Webhook 等限制 | 未知策略版本拒绝；模型参数不能授予权限 | 默认高风险副作用为零，显式可信配置另授权 | 旧端忽略策略会扩大副作用，因此不支持裸活动库回退；写端启用前补行为证据 |
-| MCP 稳定 bin 的同 inode 安装 xattr（planned，键名/JSON 格式由 11 部署实现定稿） | 尚无 install-helper 实现；不属于 Task/数据库格式，不新增 receipt 库 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知/缺失/摘要不符拒绝升级，不自动认领 | 配对备份恢复 App/桥及稳定二进制 inode 的 xattr；快照丢 xattr 后 fail-closed。xattr 不支持/写失败须在原子发布前失败并保留旧入口；不清除 quarantine 或改变系统信任 |
+| MCP 稳定 bin 的安装 xattr v1：`io.github.kbwumin13-sudo.kownload.mcp-install`，JSON 白名单 `recordVersion/product/sourceCommit/version/readApiVersion/architecture/sha256` | CLI 独立候选已在私有 HOME 首装/升级；recordVersion=1、product=kownload-mcp、40小写hex源码、release+同SHA、readApiVersion=1、arm64、64小写hex摘要；不属于 Task/数据库格式，不新增 receipt 库。旧离线副本已实证丢标记，本增量补固定标记保全 | 旧桥忽略标记；旧 CLI 不支持 install-helper，不得据此自动认领/覆盖 | App/桥需配对；标记仅同 UID 信任范围内的归属/冲突记录，不是安全认证 | 不涉及下载自动续跑；未知字段/版本、缺失或摘要不符拒绝升级，不自动认领 | CLI 同私有 staging inode 发布前写入并读回；不支持/失败保旧入口。离线保全仅对 data/bin/kownload-mcp 普通单链接文件验证 mode700、冻结 v1/七字段/≤2048B/二进制 SHA256 绑定；固定 marker 原字节复制后复读源与副本，不保全则不发布 restore-plan/pairVerified。目录摘要仍 content-only，标记单独核验，不推广为其他 attrs 或 quarantine 的备份证明 |
 
 S3 上述三行登记独立本地候选
 `e04564142fb372fca98402d23a1707a36403f393`（tree
@@ -103,6 +105,12 @@ S0 验证仅在临时 fixture 执行，不安装或运行生产 App，也不启�
 - `python3 scripts/test-rollback-identity.py`：旧裸 apply 的拒绝用例在旧码失败，
   新工具验证缺件/版本/摘要/路径冲突与配对副本，取快照而非活动库，偏好仅离线保存；
   系统 Python 和内部 framework 相对链接也覆盖。
+- MCP 受控旧负例：二进制和 mode700 保留，但原工具 exit0/pairVerified 后副本丢安装
+  xattr。修复只显式复制固定产品 marker；真实 macOS roundtrip、缺失/未知/坏/超长拒绝、
+  写入/复读失败及源变化不发布计划均由 fixture 覆盖。属性读写绑定到逐级无链接打开并
+  持有的已验证 inode；末级文件/父目录换成链接的回归验证外部 marker 与源字节不变，
+  不把事后拒绝计划当成阻止外部写入的替代。旧负例不改写为“从未支持”，也不
+  把丢标记称为 Task 损坏；生产恢复和旧 App 标准根升级仍未验。
 - `go test ./internal/identitymigration` 与相关 `-race`：新空根 normal、导入 review、
   旧 marker 保持 review、未知政策写前拒绝，旧数据和目标 marker 不被重写为兼容。
 - Flutter 定向测试验证导入后的政策读取、旧 Hive 字节保留、暂态 StartConfig 序列化、

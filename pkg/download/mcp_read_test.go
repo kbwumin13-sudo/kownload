@@ -84,6 +84,88 @@ func TestMCPReadNoProtocolStorageOrPrivateMetadata(t *testing.T) {
 		}
 	}
 }
+func TestMCPReadRecordedFinalTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      base.Status
+		downloaded  int64
+		missing     bool
+		badSpeed    bool
+		unavailable bool
+	}{
+		{name: "done", status: base.DownloadStatusDone, downloaded: 42},
+		{name: "done_zero", status: base.DownloadStatusDone},
+		{name: "done_max_safe", status: base.DownloadStatusDone, downloaded: mcpReadMaxInteger},
+		{name: "done_missing", status: base.DownloadStatusDone, missing: true, unavailable: true},
+		{name: "done_negative", status: base.DownloadStatusDone, downloaded: -1, unavailable: true},
+		{name: "done_unsafe", status: base.DownloadStatusDone, downloaded: mcpReadMaxInteger + 1, unavailable: true},
+		{name: "done_other_invalid_scalar", status: base.DownloadStatusDone, badSpeed: true, unavailable: true},
+		{name: "ready", status: base.DownloadStatusReady, downloaded: 42},
+		{name: "wait", status: base.DownloadStatusWait, downloaded: 42},
+		{name: "running", status: base.DownloadStatusRunning, downloaded: 42},
+		{name: "pause", status: base.DownloadStatusPause, downloaded: 42},
+		{name: "error", status: base.DownloadStatusError, downloaded: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := mcpReadFixture("task_1")
+			task := d.tasks[0]
+			task.Status = tc.status
+			task.Progress.Downloaded = tc.downloaded
+			if tc.missing {
+				task.Progress = nil
+			} else if tc.badSpeed {
+				task.Progress.Speed = -1
+			}
+			// Any call to the embedded nil fetcher/storage/manager panics.
+			// Resource size deliberately disagrees; the total must not use it.
+			task.fetcher = mcpReadForbiddenFetcher{}
+			task.Meta.Res.Size = -99
+			ctx := context.Background()
+			got, getErr := d.MCPReadGetTask(ctx, task.ID)
+			progress, progressErr := d.MCPReadGetProgress(ctx, task.ID)
+			page, listErr := d.MCPReadList(ctx, 1, "")
+			if tc.unavailable {
+				for _, err := range []error{getErr, progressErr, listErr} {
+					if !errors.Is(err, ErrMCPReadUnavailable) {
+						t.Fatalf("invalid snapshot: %v", err)
+					}
+				}
+				if got.Progress.TotalBytes != nil || progress.TotalBytes != nil || len(page.Tasks) != 0 {
+					t.Fatal("unavailable snapshot supplied data")
+				}
+				return
+			}
+			if getErr != nil || progressErr != nil || listErr != nil || len(page.Tasks) != 1 {
+				t.Fatalf("read errors: %v %v %v", getErr, progressErr, listErr)
+			}
+			for _, p := range []MCPReadProgress{got.Progress, progress, page.Tasks[0].Progress} {
+				if tc.status == base.DownloadStatusDone {
+					if p.TotalBytes == nil || *p.TotalBytes != tc.downloaded {
+						t.Fatalf("recorded total: %+v", p)
+					}
+				} else if p.TotalBytes != nil {
+					t.Fatal("non-done snapshot supplied a total")
+				}
+			}
+			stats, statsErr := d.MCPReadGetStats(ctx, task.ID)
+			last, errorsErr := d.MCPReadGetErrors(ctx, task.ID)
+			if statsErr != nil || errorsErr != nil || stats.Available || last.Available {
+				t.Fatal("stats/errors availability changed")
+			}
+			data, err := json.Marshal([]any{got, progress, page, stats, last})
+			if err != nil || strings.Contains(string(data), "PRIVATE_SENTINEL") {
+				t.Fatal("private metadata escaped", err)
+			}
+			if got.Progress.TotalBytes != nil {
+				*got.Progress.TotalBytes = 123 // Returned pointer must not alias Task or other reads.
+				if task.Progress.Downloaded != tc.downloaded || *progress.TotalBytes != tc.downloaded || got.Progress.DownloadedBytes != tc.downloaded {
+					t.Fatal("returned total aliases another scalar")
+				}
+			}
+		})
+	}
+}
+
 func TestMCPReadStableKeysetPagination(t *testing.T) {
 	ctx := context.Background()
 	d := mcpReadFixture("c", "a", "b")
@@ -215,6 +297,10 @@ func TestMCPReadConcurrentCachedSnapshots(t *testing.T) {
 		for i := int64(0); i < 1000; i++ {
 			task.dataLock.Lock()
 			task.Progress.Downloaded = i
+			task.Status = base.DownloadStatusRunning
+			if i%2 == 0 {
+				task.Status = base.DownloadStatusDone
+			}
 			task.Progress.Speed = i
 			task.UpdatedAt = task.CreatedAt.Add(time.Duration(i) * time.Second)
 			task.dataLock.Unlock()
@@ -232,8 +318,17 @@ func TestMCPReadConcurrentCachedSnapshots(t *testing.T) {
 		}
 		if err == nil {
 			for _, item := range page.Tasks {
-				if item.ID == "task_1" && item.Progress.DownloadedBytes != item.Progress.SpeedBytesPerSecond {
-					t.Fatal("torn snapshot")
+				if item.ID == "task_1" {
+					if item.Progress.DownloadedBytes != item.Progress.SpeedBytesPerSecond {
+						t.Fatal("torn snapshot")
+					}
+					if item.Status == "done" {
+						if item.Progress.TotalBytes == nil || *item.Progress.TotalBytes != item.Progress.DownloadedBytes || item.Progress.DownloadedBytes%2 != 0 {
+							t.Fatal("torn final total")
+						}
+					} else if item.Progress.TotalBytes != nil {
+						t.Fatal("non-done total under concurrent writes")
+					}
 				}
 			}
 		}

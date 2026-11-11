@@ -100,6 +100,12 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	} else {
 		downloadCfg.Storage = download.NewMemStorage()
 	}
+	// Validate/persist the logical domain before Setup can implicitly restore
+	// tasks. Only this newly opened, unpublished storage is closed on failure.
+	if err := download.InitializeDatasetIdentity(downloadCfg.Storage); err != nil {
+		_ = downloadCfg.Storage.Close()
+		return nil, nil, err
+	}
 	downloadCfg.StorageDir = startCfg.StorageDir
 	downloadCfg.Init()
 	Downloader = download.NewDownloader(downloadCfg)
@@ -125,6 +131,8 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 
 	var r = mux.NewRouter()
 	r.Methods(http.MethodGet).Path("/api/v1/info").HandlerFunc(Info)
+	registerDatasetCatalogRoutes(r, Downloader)
+	registerScopedBatchOperationRoutes(r, Downloader)
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
 	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(BrowserHandoff)

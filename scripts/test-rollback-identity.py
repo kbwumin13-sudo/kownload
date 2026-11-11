@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline fixtures only: python3 scripts/test-rollback-identity.py."""
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -10,10 +11,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).with_name('rollback-identity.py')
 COMMIT = '1' * 40
 BUNDLE = 'io.github.kbwumin13-sudo.kownload'
+MCP_MARKER = 'io.github.kbwumin13-sudo.kownload.mcp-install'
 
 
 def write(path, data):
@@ -210,6 +213,213 @@ class SnapshotPair(Rollback):
     def test_system_python_pair_support(self):
         p = self.run_pair('--apply', python='/usr/bin/python3')
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def mcp_fixture(self):
+        entry = self.data / 'bin/kownload-mcp'
+        write(entry, b'controlled MCP helper fixture, never executed')
+        entry.chmod(0o700)
+        self.meta['data']['sha256'] = fixture_digest(self.data)
+        self.save_manifest()
+        value = {'recordVersion': 1, 'product': 'kownload-mcp',
+                 'sourceCommit': COMMIT, 'version': 'fixture.39+' + COMMIT,
+                 'readApiVersion': 1, 'architecture': 'arm64',
+                 'sha256': hashlib.sha256(entry.read_bytes()).hexdigest()}
+        return entry, value
+
+    def marker_write(self, entry, raw):
+        subprocess.run(['/usr/bin/xattr', '-wx', MCP_MARKER, raw.hex(), str(entry)],
+                       check=True, capture_output=True)
+
+    def marker_read(self, entry):
+        return bytes.fromhex(subprocess.check_output(
+            ['/usr/bin/xattr', '-px', MCP_MARKER, str(entry)], text=True))
+
+    def rollback_module(self):
+        spec = importlib.util.spec_from_file_location('rollback_marker_test', SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_marker_real_roundtrip_preserves_exact_bytes(self):
+        entry, value = self.mcp_fixture()
+        raw = b' \n' + json.dumps(value).encode() + b'\n'
+        self.marker_write(entry, raw)
+        original = tree(self.snapshot)
+        p = self.run_pair('--apply')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        copied = self.output / 'data/bin/kownload-mcp'
+        self.assertEqual(self.marker_read(copied), raw)
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertEqual(copied.read_bytes(), entry.read_bytes())
+        self.assertEqual(copied.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(tree(self.snapshot), original)
+        self.assertTrue(json.loads(p.stdout)['pairVerified'])
+        verify = subprocess.run([sys.executable, str(SCRIPT), '--snapshot-manifest',
+                                 str(self.output / 'snapshot.json'), '--output',
+                                 str(self.dir / 'second-offline-copy'), '--fixture'],
+                                capture_output=True, text=True)
+        self.assertEqual(verify.returncode, 0, verify.stderr)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_missing_unknown_bad_marker_refuses_before_output(self):
+        entry, good = self.mcp_fixture()
+        for args in [[], ['--apply']]:
+            p = self.run_pair(*args)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertFalse(self.output.exists())
+        bad = [b'{', b'null', b' ' * 2049,
+               b'{"recordVersion":2,"recordVersion":1}',
+               *[json.dumps({**good, **patch}).encode() for patch in [
+                   {'recordVersion': 2}, {'recordVersion': True},
+                   {'readApiVersion': 2}, {'readApiVersion': True},
+                   {'architecture': 'x86_64'}, {'product': 'other'},
+                   {'sourceCommit': 'BAD'}, {'version': 'unmatched-source'},
+                   {'sha256': '0' * 64}, {'unknown': 'preserve'}]]]
+        for index, raw in enumerate(bad):
+            with self.subTest(index=index):
+                self.marker_write(entry, raw)
+                p = self.run_pair('--apply')
+                self.assertNotEqual(p.returncode, 0)
+                self.assertFalse(self.output.exists())
+                self.assertEqual(self.marker_read(entry), raw)
+                self.assertNotIn(raw.hex(), p.stderr)
+        self.marker_write(entry, json.dumps(good).encode())
+        entry.chmod(0o755)
+        self.meta['data']['sha256'] = fixture_digest(self.data)
+        self.save_manifest()
+        self.assertNotEqual(self.run_pair('--apply').returncode, 0)
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_marker_write_failure_never_publishes_plan(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=OSError('fixture')):
+            with self.assertRaises(OSError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assert_unchanged()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_special_mode_refuses_before_output(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        entry.chmod(0o4700)
+        self.assertEqual(entry.stat().st_mode & 0o7777, 0o4700)
+        self.meta['data']['sha256'] = fixture_digest(self.data)
+        self.save_manifest()
+        p = self.run_pair('--apply')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertEqual(entry.stat().st_mode & 0o7777, 0o4700)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_destination_link_swap_never_changes_its_target(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        other = self.dir / 'outside-staging'
+        other.write_bytes(b'untouched outside staging')
+        self.marker_write(other, b'untouched marker')
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        write_marker = module.write_mcp_marker
+        def swapped_copy(fd, original):
+            path = self.output / 'data/bin/kownload-mcp'
+            path.rename(path.with_name('copied-before-swap'))
+            path.symlink_to(other)
+            write_marker(fd, original)
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=swapped_copy):
+            with self.assertRaises(ValueError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertEqual(self.marker_read(other), b'untouched marker')
+        self.assertEqual(other.read_bytes(), b'untouched outside staging')
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_parent_link_swap_never_changes_external_marker(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        source_hash = hashlib.sha256(entry.read_bytes()).hexdigest()
+        outside = self.dir / 'outside-parent'
+        outside.mkdir()
+        target = outside / 'kownload-mcp'
+        target.write_bytes(b'outside helper must remain untouched')
+        target.chmod(0o700)
+        self.marker_write(target, b'outside marker must remain untouched')
+        original_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        write_marker = module.write_mcp_marker
+        def swapped_parent(path_or_fd, original):
+            parent = self.output / 'data/bin'
+            parent.rename(parent.with_name('bin-before-swap'))
+            parent.symlink_to(outside, target_is_directory=True)
+            write_marker(path_or_fd, original)
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=swapped_parent):
+            with self.assertRaises((ValueError, OSError)):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertEqual(self.marker_read(target), b'outside marker must remain untouched')
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), original_hash)
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertEqual(hashlib.sha256(entry.read_bytes()).hexdigest(), source_hash)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_marker_read_failure_refuses_before_copy(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        with mock.patch.object(module, 'read_mcp_marker', side_effect=OSError('fixture')):
+            with self.assertRaises(OSError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.marker_read(entry), raw)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_marker_postwrite_mismatch_never_publishes_plan(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        write_marker = module.write_mcp_marker
+        def changed_copy(path, original):
+            write_marker(path, original + b' ')
+        with mock.patch.object(module, 'write_mcp_marker', side_effect=changed_copy):
+            with self.assertRaises(ValueError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
+        self.assertEqual(self.marker_read(entry), raw)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_source_marker_changed_during_copy_refuses_plan(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        module = self.rollback_module()
+        pair = module.verify_pair(self.manifest)
+        copy = module.shutil.copytree
+        def concurrent_source(source, destination, *args, **kwargs):
+            result = copy(source, destination, *args, **kwargs)
+            if source == self.data:
+                self.marker_write(entry, raw + b' ')
+            return result
+        with mock.patch.object(module.shutil, 'copytree', side_effect=concurrent_source):
+            with self.assertRaises(ValueError):
+                module.prepare_copy(self.manifest, self.output, pair)
+        self.assertFalse((self.output / 'restore-plan.json').exists())
 
 
 if __name__ == '__main__':

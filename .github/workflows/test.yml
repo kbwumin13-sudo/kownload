@@ -39,6 +39,7 @@ jobs:
         working-directory: ui/flutter
         run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
       - name: Build isolated macOS candidate
+        id: build_candidate
         env:
           FLUTTER_BIN: ${{ env.FLUTTER_ROOT }}/bin/flutter
         run: scripts/macos-frontend-build.sh --preview --output "$RUNNER_TEMP/kownload-dist"
@@ -46,3 +47,164 @@ jobs:
         with:
           name: kownload-macos-preview
           path: ${{ runner.temp }}/kownload-dist/
+      - name: Collect failed DMG evidence
+        id: failed_dmg_capture
+        if: ${{ failure() && steps.build_candidate.outcome == 'failure' }}
+        env:
+          CAPTURE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import contextlib
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import selectors
+          import stat
+          import subprocess
+          import tempfile
+          import time
+
+          MAX_IMAGE = 1 << 30
+          MAX_INFO = 64 << 10
+          EXPECTED = re.compile(r"kownload-v[0-9][0-9A-Za-z.+-]{0,95}-macos-arm64-preview\.dmg")
+
+          class Rejected(Exception):
+              pass
+
+          def snapshot(value):
+              return {key: getattr(value, key) for key in (
+                  "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+
+          def imageinfo(image, output):
+              # Bound this new diagnostic only; never retry or change the build's timeout.
+              process = subprocess.Popen(["/usr/bin/hdiutil", "imageinfo", str(image)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              data = bytearray()
+              stop = None
+              deadline = time.monotonic() + 20
+              try:
+                  with selectors.DefaultSelector() as selector:
+                      selector.register(process.stdout, selectors.EVENT_READ)
+                      while selector.get_map():
+                          remaining = deadline - time.monotonic()
+                          if remaining <= 0:
+                              stop = "diagnostic_time_limit"
+                              break
+                          for key, _ in selector.select(min(remaining, 0.2)):
+                              part = os.read(key.fd, min(8192, MAX_INFO + 1 - len(data)))
+                              if not part:
+                                  selector.unregister(key.fileobj)
+                              else:
+                                  data.extend(part)
+                          if len(data) > MAX_INFO:
+                              stop = "diagnostic_output_limit"
+                              break
+                  if stop:
+                      process.terminate()
+                  try:
+                      code = process.wait(timeout=2)
+                  except subprocess.TimeoutExpired:
+                      stop = stop or "diagnostic_exit_limit"
+                      process.kill()  # Only the hdiutil child created immediately above.
+                      code = process.wait()
+              finally:
+                  if process.poll() is None:
+                      process.kill()
+                      process.wait()
+                  process.stdout.close()
+              output.write_bytes(data[:MAX_INFO])
+              return {"exit_code": code, "stopped": stop, "output_bytes": min(len(data), MAX_INFO)}
+
+          runner = Path(os.environ["RUNNER_TEMP"])
+          out = Path(tempfile.mkdtemp(prefix="kownload-failed-dmg-", dir=runner))
+          image = out / "failed-candidate.dmg"
+          metadata = {
+              "kind": "failed-build-evidence-not-an-installable-candidate",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "head_sha": os.environ["CAPTURE_HEAD_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "status": "missing",
+              "imageinfo": {"status": "not_run"},
+          }
+          stage = "source_directory"
+          try:
+              with contextlib.ExitStack() as stack:
+                  root = os.open(runner, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                  stack.callback(os.close, root)
+                  directory = os.open("kownload-dist", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+                  stack.callback(os.close, directory)
+                  names = []
+                  with os.scandir(directory) as entries:
+                      for index, entry in enumerate(entries):
+                          if index == 512:
+                              raise Rejected("directory_entry_limit")
+                          if EXPECTED.fullmatch(entry.name):
+                              names.append(entry.name)
+                              if len(names) == 2:
+                                  raise Rejected("ambiguous_expected_dmg")
+                  if not names:
+                      raise Rejected("missing_expected_dmg")
+                  name = names[0]
+                  metadata["filename"] = name
+                  stage = "candidate"
+                  before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                  metadata["stat"] = snapshot(before)
+                  if stat.S_ISLNK(before.st_mode):
+                      raise Rejected("symlink")
+                  if not stat.S_ISREG(before.st_mode):
+                      raise Rejected("not_regular")
+                  if before.st_nlink != 1:
+                      raise Rejected("hardlink")
+                  if before.st_size > MAX_IMAGE:
+                      raise Rejected("over_1_gib")
+                  fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                  source = stack.enter_context(os.fdopen(fd, "rb"))
+                  if snapshot(os.fstat(fd)) != snapshot(before):
+                      raise Rejected("changed_before_copy")
+                  digest = hashlib.sha256()
+                  copied = 0
+                  with image.open("xb") as target:
+                      while True:
+                          block = source.read(min(1 << 20, MAX_IMAGE - copied + 1))
+                          if not block:
+                              break
+                          copied += len(block)
+                          if copied > MAX_IMAGE or copied > before.st_size:
+                              raise Rejected("changed_or_oversized_during_copy")
+                          target.write(block)
+                          digest.update(block)
+                  after = os.fstat(fd)
+                  metadata["stat_after"] = snapshot(after)
+                  if copied != before.st_size or snapshot(after) != snapshot(before):
+                      raise Rejected("changed_during_copy")
+                  metadata.update(status="captured", bytes=copied, sha256=digest.hexdigest())
+          except Rejected as error:
+              metadata["status"] = error.args[0]
+          except FileNotFoundError:
+              metadata.update(status="missing", stage=stage)
+          except OSError as error:
+              metadata.update(status="io_error", stage=stage, errno=error.errno)
+          except Exception as error:
+              metadata.update(status="collector_error", stage=stage, error_type=type(error).__name__)
+          if metadata["status"] != "captured":
+              image.unlink(missing_ok=True)
+          else:
+              try:
+                  metadata["imageinfo"] = imageinfo(image, out / "imageinfo.txt")
+              except Exception as error:
+                  metadata["imageinfo"] = {"status": "error", "error_type": type(error).__name__}
+          (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as outputs:
+              outputs.write(f"artifact_dir={out}\n")
+          PY
+      - name: Upload failed DMG evidence (3 days)
+        if: ${{ failure() && steps.build_candidate.outcome == 'failure' && steps.failed_dmg_capture.outputs.artifact_dir != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-dmg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.failed_dmg_capture.outputs.artifact_dir }}/
+          retention-days: 3
+          if-no-files-found: error

@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 始终 null，stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码，同源隔离 App 联调及部署仍待验证。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -43,6 +43,7 @@ Task：`{id,protocol,status,createdAt,updatedAt,progress}`。
 Progress：`{downloadedBytes,speedBytesPerSecond,uploadedBytes,uploadSpeedBytesPerSecond,totalBytes,phase}`。
 
 - 数值为非负且不大于 JS 安全整数上限 `9007199254740991`；totalBytes 未知时为 null，不能用零冒充未知。
+- `totalBytes` 仅当同一次 `dataLock` 快照的状态为 done、已有 Progress 且所有标量合法时，取记录的最终 `Progress.Downloaded`，合法0保留为0。活动、暂停、错误等非done状态保持null；缺Progress或非法标量沿用 snapshot unavailable，不生成补值DTO。该数值不代表磁盘、资源大小或摘要复验，不读取Meta.Res/文件/配置/日志，也不调用fetcher。
 - phase：`unknown | queued | resolving | downloading | merging | verifying | publishing | done`，仅映射已有内存快照；未观测到的 phase 用 unknown，不为读桥引入持久阶段。
 - 读取缓存 Progress，不能触发 fetcher 恢复/调用网络。不以 downloaded==total 推断成功；最终状态依 Task.status。
 
@@ -74,17 +75,46 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 
 客户端配置只可包含显式文件路径，不内嵌 token。mcporter `list --json` 的外层 `transport` 会展示其本地启动参数；它属于客户端配置元数据，与 MCP `tools` schema、工具结果和错误输出分开核验。桥工具 schema/结果不含 token 文件路径或内容。
 
-stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最多 256 KiB，慢读端写入最多等待 5 秒后结束桥。stdout 仅协议帧（显式 `--version` 除外），SDK 日志丢弃，stderr 只给固定结束信息。消息/返回上限不等于下载总字节配额：不拒绝正常未知 Content-Length/chunked 资源，不承诺内核下载硬限额。
+stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最多 256 KiB，慢读端写入最多等待 5 秒后结束桥。stdout 仅协议帧（显式 `--version` / `install-helper` CLI 除外），SDK 日志丢弃，stderr 只给固定结束信息。消息/返回上限不等于下载总字节配额：不拒绝正常未知 Content-Length/chunked 资源，不承诺内核下载硬限额。
 
 退出只结束桥；查询取消仅取消自身 UDS 请求，绝不暂停/删除 App 任务。没有 App 时返回 unavailable；无自动启动/重试创建路径。
 
-## 二进制部署与配置方案（仅设计，未安装）
+## 显式安装与升级 Helper（macOS arm64）
 
-1. 后续候选包放 `Kownload.app/Contents/Helpers/kownload-mcp`；构建 manifest 固定 App source SHA、桥 version/source SHA、read-api=1、MCP 支持版本和二进制摘要。桥与主 App 使用一致的已批准签名策略，先签 Helper 再封主包；不能把开发 ad-hoc 验证当作发行身份验证。
-2. 用户稳定入口为新数据根 `bin/kownload-mcp` **普通文件**；客户端 command 固定为其绝对路径（不依赖 cwd、PATH、App 移动位置或版本目录）。用户配置只需一次明确授权录入，更新不改配置、不触碰其他服务器条目。
-3. 后续获准部署时：从可信 App Helpers 复制到同目录临时文件，核摘要、manifest 配对、签名与 `--version`，保持当前 UID/0700，fsync 后同卷 rename 原子替换稳定入口。只更新将来的新进程，旧 stdio 会话继续使用旧 inode；不擅自杀客户端。候选失败保留旧入口，版本不匹配明确失败而不回退旧任务 API。部署器不在本增量实现。
-4. 回退使用匹配 App/桥组合。只读桥没有自己的任务存储/迁移字段；若读 API 不兼容则拒绝。新版活动数据库的回退仍遵守 S0，不能由桥可启动证明 core 能安全执行旧数据。
-5. 本模块受控测试在 /tmp 模拟 Helpers→稳定 bin、签名检查、原子替换两版真实二进制，比较原客户端配置字节并通过同一路径复跑五读。它不证明候选 App 打包、真实部署器或生产路径升级已经通过。
+独立 CLI 子命令由用户选择可信 App；它不是 MCP 工具，也不会启动 App、监听端口、设置自启或读写客户端全局配置：
+
+```sh
+/ABSOLUTE/TRUSTED/Kownload.app/Contents/Helpers/kownload-mcp install-helper \
+  --bundle /ABSOLUTE/TRUSTED/Kownload.app \
+  --data-root "$HOME/Library/Application Support/io.github.kbwumin13-sudo.kownload"
+```
+
+所有参数是可信启动配置，不能由模型工具参数传入。`--data-root` 必须严格等于当前 HOME 的默认受管根，而且已存在、属当前 UID、没有 group/world 写权限；不接受任意绝对目录。路径逐层拒绝符号链接；既有 `bin` 必须属于当前 UID 且为 0700，缺失时只在已验证根中创建这个目录，不修复既有权限。普通入口固定为 `bin/kownload-mcp`、当前 UID、0700、无硬链接。
+
+只接受固定 `Contents/Resources/build-manifest.json` 和 `Contents/Helpers/kownload-mcp`：
+验证 App/Helper strict 签名、arm64 Mach-O、40 位源码 SHA、顶层与 MCP 版本配对、read-api=1、SDK v1.7.0、最终 Helper SHA256，
+再复制到同目录私有 staging。manifest 最大 64 KiB、Helper 最大 128 MiB；这些是安装文件限额，不是下载任务配额。
+临时 inode 写入安装 xattr 并读回、fsync 后，核暂存 Helper 的签名与精确 `--version`，再复核摘要/身份并原子 rename。
+不执行未知旧入口来判断身份。发布前任何校验或写入失败均保留旧入口；rename 后目录 fsync 失败会明确报告“已发布、持久性未确认”，不会谎称回滚。
+
+目录锁串行化合作的安装进程，首次发布用排他 rename，升级前重新核旧 inode 与内容。
+新进程使用新版本，活动 stdio 进程继续持有旧 inode，不被终止。
+客户端 command 固定为稳定入口绝对路径，args 和配置字节无需随升级变化；本 CLI 不读取或重写它们。
+回退也须显式选择与 App 配对的旧版本；桥安装成功不证明 Core 数据可以回退。
+
+安装记录 xattr 固定为 `io.github.kbwumin13-sudo.kownload.mcp-install`，最多 2048 字节，严格拒绝未知字段、重复字段与未知版本：
+
+```json
+{"recordVersion":1,"product":"kownload-mcp","sourceCommit":"<40位小写hex>","version":"<releaseVersion>+<同SHA>","readApiVersion":1,"architecture":"arm64","sha256":"<已安装字节的64位小写hex>"}
+```
+
+升级要求旧入口的有效记录与实际摘要一致；未知文件、外来 UID、链接、缺失/不符记录均拒绝，不自动认领。xattr 不可用或写失败时不发布无标记入口。
+**xattr 是意外冲突和版本归属记录，不是安全认证；同 UID 进程在信任范围内，可伪造记录。** 包签名和摘要证明选择的包内一致性，ad-hoc 签名或自报产品名不证明发布者身份；所选 bundle 的信任由用户明确决定。
+源 Helper 或 bundle 的 `com.apple.quarantine` 会保留，旧入口的标记不会被清除；不兼容的隔离标记拒绝升级，不改 Gatekeeper。受系统信任策略阻止执行时失败关闭，不绕过。
+
+S0：旧桥忽略该 xattr，旧 CLI 不支持此命令；App 与桥须按 manifest 配对。备份/恢复应同时保留字节和 xattr，丢标记后升级拒绝。当前备份工具是否保留此新属性须独立验证；不能仅凭普通文件还原宣称兼容。
+
+本模块 `tests/install_helper_smoke.py /ABSOLUTE/GO` 在私有 HOME 下构建两版真实桥、签名已知合成 bundle，再通过真实 CLI 首装/升级；实际 mcporter 执行五读，另保留旧 stdio 进程跨升级继续读取。夹具的两个 source ID 只是测试标签，不冒充发行源码；签名测试不是发布者认证。正式同源 App/桥配对部署须另与构建负责人协调，生产部署未执行。
 
 隔离 mcporter 配置模板（不写入全局 MCP 配置；正式路径须由用户确认）：
 
@@ -106,4 +136,4 @@ stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最�
 
 远端工作流新增本独立模块的 `go mod verify` 与 `go test -race ./...`；根模块 `./...` 本身不覆盖此模块。真实 mcporter 集成仍须显式设置测试二进制，不能从 CI 单测通过推断已完成 App 联调。
 
-尚待：S3 安全统计/错误发布快照与有效总量、候选 App 五读完整联调、真实签名/包内集成、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。
+尚待：S3 安全统计/错误发布快照与有效总量、普通 App 非空 token 联调、包含本安装 CLI 的正式同源包配对部署、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。

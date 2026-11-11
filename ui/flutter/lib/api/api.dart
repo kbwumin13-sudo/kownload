@@ -7,6 +7,7 @@ import 'package:get/get.dart' as getx;
 
 import '../app/routes/app_pages.dart';
 import '../database/database.dart';
+import '../database/task_batch_journal.dart';
 import '../util/util.dart';
 import 'model/create_task.dart';
 import 'model/create_task_batch.dart';
@@ -27,12 +28,17 @@ class _Client {
   static _Client? _instance;
 
   late Dio dio;
+  late final String network, address;
+  late final String _initialToken;
 
   _Client._internal();
 
   factory _Client(String network, String address, String apiToken) {
     if (_instance == null) {
-      _instance = _Client._internal();
+      _instance = _Client._internal()
+        ..network = network
+        ..address = address
+        .._initialToken = apiToken;
       var dio = Dio();
       final isUnixSocket = network == 'unix';
       var baseUrl = 'http://127.0.0.1/';
@@ -108,8 +114,89 @@ class ConnectionException implements Exception {
 
 late _Client _client;
 
-void init(String network, String address, String apiToken) {
+/// Immutable reference to the actual initialized transport. Contains no token.
+class ActiveApiSnapshot {
+  final String network, address;
+  final JournalRouteRef? taskBatchRoute;
+  final _Client _transport;
+  const ActiveApiSnapshot._(
+      this.network, this.address, this.taskBatchRoute, this._transport);
+  bool get isCurrent => identical(_activeApiSnapshot, this);
+}
+
+ActiveApiSnapshot? _activeApiSnapshot;
+ActiveApiSnapshot? get activeApiSnapshot => _activeApiSnapshot;
+
+void init(String network, String address, String apiToken,
+    {JournalRouteRef? taskBatchRoute}) {
   _client = _Client(network, address, apiToken);
+  // Legacy init keeps its singleton semantics. Never relabel that live client
+  // with a later configuration that it did not actually adopt.
+  final matches = _client.network == network &&
+      _client.address == address &&
+      _client._initialToken == apiToken;
+  _activeApiSnapshot = ActiveApiSnapshot._(
+      _client.network,
+      _client.address,
+      matches && taskBatchRoute?.supported == true ? taskBatchRoute : null,
+      _client);
+}
+
+/// Only the frozen read endpoints and dataset-scoped three actions. No redirect
+/// replay, arbitrary URL, legacy POST fallback or global parser changes.
+Future<Response<dynamic>> scopedTaskBatchRequest(
+    ActiveApiSnapshot snapshot, String method, String path,
+    {Map<String, dynamic>? data, Map<String, dynamic>? queryParameters}) async {
+  var allowed = false;
+  if (method == 'GET' && data == null) {
+    if (path == '/api/v1/dataset/identity' && queryParameters == null) {
+      allowed = true;
+    } else if (path == '/api/v1/task-batches/operations') {
+      final q = queryParameters ?? const <String, dynamic>{};
+      allowed = q.keys.every(const {'filter', 'limit', 'cursor'}.contains) &&
+          (q['filter'] == null ||
+              const ['all', 'pending'].contains(q['filter'])) &&
+          (q['limit'] == null ||
+              (q['limit'] is int && q['limit'] >= 1 && q['limit'] <= 100)) &&
+          (q['cursor'] == null ||
+              (q['cursor'] is String &&
+                  q['cursor'].isNotEmpty &&
+                  q['cursor'].length <= 65536));
+    }
+  }
+  final match = RegExp(
+          r'^/api/v1/datasets/([0-9a-f]{32})/task-batches/v1/operations(?:/([^/]+)(/cancel)?)?$')
+      .firstMatch(path);
+  if (match != null && match[0] == path && queryParameters == null) {
+    if (match[2] == null) {
+      allowed = method == 'POST' && data != null;
+    } else if (data == null) {
+      try {
+        final id = Uri.decodeComponent(match[2]!);
+        allowed =
+            RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$').stringMatch(id) ==
+                    id &&
+                Uri.encodeComponent(id) == match[2] &&
+                ((method == 'GET' && match[3] == null) ||
+                    (method == 'POST' && match[3] == '/cancel'));
+      } on FormatException {
+        allowed = false;
+      }
+    }
+  }
+  if (!allowed) throw ArgumentError('invalid_scoped_batch_endpoint');
+  if (!snapshot.isCurrent || snapshot.taskBatchRoute?.supported != true) {
+    throw StateError('task_batch_route_changed');
+  }
+  try {
+    return await snapshot._transport.dio.request(path,
+        data: data,
+        queryParameters: queryParameters,
+        options: Options(method: method, followRedirects: false));
+  } on DioException catch (error) {
+    if (error.response != null) return error.response!;
+    rethrow;
+  }
 }
 
 /// S2-only raw envelope transport, sharing authentication and Unix routing.

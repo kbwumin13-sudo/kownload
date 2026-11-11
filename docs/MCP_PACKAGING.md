@@ -42,6 +42,16 @@ App 签名不使用递归 `--deep --force`；签完严格验证 App，重新核 
 并与实际二进制中的版本和 checksum 对照；不向根锁文件补写 nested 依赖或跳过校验。
 完整来源与许可判断仍须 S8 分发审查。
 
+隔离联调默认仍编译 `work/preview-data`。需要验证部署 CLI 的标准受管根时，
+构建可显式传 `--preview --preview-home <已存在的短 /private/tmp 私有HOME>`，
+数据根编译为该 HOME 下的 `Library/Application Support/io.github.kbwumin13-sudo.kownload`。
+构建前验证当前 UID、逐层普通目录、无链接和不可 group/world 写，并按 UTF-8 字节
+拒绝超过 103 字节的 API/host socket 路径；失败时不创建 output/work 目录。
+这不创建或更改 HOME/受管根。启动候选和显式部署 CLI 时使用同一个
+`HOME`（App 另需相同的 `CFFIXED_USER_HOME`），再核实际 PID、identity 与 socket。
+没有该参数时原 CI 行为不变；预览 bundle、禁协议导入和自动剪贴板守卫继续生效，
+该参数不提供运行时鉴权或测试数据注入。
+
 后续可信部署 CLI 显式选择 App 与受管 data root，验证上述配对、签名、摘要和版本后，
 才可安装为稳定 `dataRoot/bin/kownload-mcp` 普通文件。部署不属于 MCP 工具能力。
-安装 xattr 仍为 planned，键/格式由部署实现另定；不得把包内 metadata 当作已部署回执。
+安装 xattr 由独立部署实现定义；包内 metadata 不表示稳定入口已部署，也不证明快照保留了 xattr。

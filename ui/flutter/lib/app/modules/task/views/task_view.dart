@@ -22,6 +22,7 @@ import '../controllers/task_controller.dart';
 import '../controllers/task_downloaded_controller.dart';
 import '../controllers/task_downloading_controller.dart';
 import 'task_downloaded_view.dart';
+import 'task_batch_groups.dart';
 import 'task_downloading_view.dart';
 
 class TaskView extends GetView<TaskController> {
@@ -329,6 +330,7 @@ class _MacTaskViewState extends State<_MacTaskView> {
             _syncInspectorState(
                 inspectorOpen && canShowInspector, selected != null);
             return Column(children: [
+              TaskBatchGroups(tasks: all),
               Expanded(
                   child: Row(
                 children: [
