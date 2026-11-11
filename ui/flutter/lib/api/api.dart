@@ -125,6 +125,12 @@ class ActiveApiSnapshot {
   const ActiveApiSnapshot._(
       this.network, this.address, this.taskBatchRoute, this._transport);
   bool get isCurrent => identical(_activeApiSnapshot, this);
+
+  /// RAM association with the actual initialized client, including transports
+  /// with no Mac host route. Not authentication or proof of dataset identity.
+  /// Reinit keeps this key if the legacy singleton keeps the same client;
+  /// isCurrent still gates every request and the dataset is read separately.
+  Object get httpRecoveryScope => _transport;
 }
 
 ActiveApiSnapshot? _activeApiSnapshot;
@@ -306,7 +312,7 @@ Future<Response<dynamic>> httpRecoveryRequest(
     }
   }
   if (!allowed) throw ArgumentError('invalid_http_recovery_endpoint');
-  if (!snapshot.isCurrent || snapshot.taskBatchRoute?.supported != true) {
+  if (!snapshot.isCurrent) {
     throw StateError('http_recovery_route_changed');
   }
   try {

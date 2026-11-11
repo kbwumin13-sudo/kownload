@@ -1,5 +1,4 @@
 import 'dart:math';
-import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import '../../../../api/api.dart' as api;
@@ -37,25 +36,19 @@ class _Attempt {
 }
 
 /// Application-session RAM only. Widget disposal never removes an action.
-/// Keep the original client epoch as well as route/dataset/task association;
+/// Keep the original client epoch as well as transport/dataset/task association;
 /// neither a new button nor an API reinit grants another POST for that entry.
 class HttpRetrySession extends ChangeNotifier {
-  final _attempts = <String, _Attempt>{};
-  final _latest = <String, _Attempt>{};
+  final _attempts = <_Attempt>{};
+  final _latest = <(Object, String, String), _Attempt>{};
   static const _capacity = 2048;
-  String? _route(api.ActiveApiSnapshot? snapshot) {
-    final route = snapshot?.taskBatchRoute;
-    if (route?.supported != true) return null;
-    return jsonEncode(
-        [route!.product, route.identityProtocol, route.routeScope]);
-  }
 
   _Attempt? _forTask(api.ActiveApiSnapshot? snapshot, String taskId) {
-    final route = _route(snapshot);
-    if (route == null) return null;
+    if (snapshot == null) return null;
     for (final attempt in _latest.values) {
       if (attempt.api.taskId == taskId &&
-          _route(attempt.api.snapshot) == route) {
+          identical(attempt.api.snapshot.httpRecoveryScope,
+              snapshot.httpRecoveryScope)) {
         // Also retain a different dataset's reference. The caller must hold it,
         // never reinterpret it as permission to send in the new dataset.
         return attempt;
@@ -69,7 +62,7 @@ class HttpRetrySession extends ChangeNotifier {
     if (receipt == null ||
         !const ['accepted', 'replayed'].contains(receipt.state) ||
         receipt.newEpisode == attempt.action.expectedEpisode ||
-        !_attempts.containsValue(attempt)) {
+        !_attempts.contains(attempt)) {
       return;
     }
     if (!attempt.acknowledged) {
@@ -91,12 +84,12 @@ class HttpRetrySession extends ChangeNotifier {
       throw StateError('retry_state_changed');
     }
     if (_attempts.length >= _capacity) throw StateError('retry_session_full');
-    final key = jsonEncode([
-      _route(candidate.api.snapshot),
+    final key = (
+      candidate.api.snapshot.httpRecoveryScope,
       candidate.api.identity.datasetId,
       candidate.api.taskId
-    ]);
-    _attempts[jsonEncode([key, candidate.action.toQuery()])] = candidate;
+    );
+    _attempts.add(candidate);
     _latest[key] = candidate;
     notifyListeners();
     return candidate;
@@ -204,7 +197,7 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
       return;
     }
     final snapshot = api.activeApiSnapshot;
-    if (snapshot == null || snapshot.taskBatchRoute?.supported != true) {
+    if (snapshot == null) {
       widget.notice('当前连接尚不能确认可安全重试。');
       return;
     }
