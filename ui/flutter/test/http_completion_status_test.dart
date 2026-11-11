@@ -95,6 +95,28 @@ void main() {
     expect(phase('verifying').labelFor(Status.pause), '校验任务已暂停');
     expect(phase('verified').labelFor(Status.error), '校验任务失败');
   });
+  test(
+      'group receipt dataset cannot adopt another dataset completion projection',
+      () {
+    final task = sample('http', Protocol.http)..status = Status.done;
+    task.completionView = HttpCompletionProjection.fromJson({
+      'version': 1,
+      'scopeVersion': 1,
+      'datasetId': 'a' * 32,
+      'taskId': 'http',
+      'completionId': 'completion',
+      'available': true,
+      'phase': 'committed',
+      'recordedMatch': true,
+      'errorCategory': null
+    }, taskId: 'http')
+      ..bindToDataset('a' * 32, isCurrent: () => true);
+    expect(HttpCompletionView.forTask(task)!.labelFor(task.status), '校验并保存完成');
+    final isolated =
+        HttpCompletionView.forTask(task, expectedDataset: 'b' * 32)!;
+    expect(isolated.labelFor(task.status), '校验完成状态未确认');
+    expect(isolated.isConfirmedDoneFor(task.status), false);
+  });
   testWidgets(
       'normal TaskView consumes bound response projection and keeps unknown completion visible',
       (tester) async {

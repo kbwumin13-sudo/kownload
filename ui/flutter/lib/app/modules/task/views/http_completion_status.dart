@@ -52,6 +52,22 @@ class HttpCompletionView {
         errorCategory: projection.trustedErrorCategory);
   }
 
+  /// All Task surfaces use this response-only, current-scope gate. A group
+  /// additionally knows the dataset of its own receipt and must match it.
+  static HttpCompletionView? forTask(Task task, {String? expectedDataset}) {
+    final projection = task.completionView;
+    if (task.protocol != Protocol.http || projection == null) return null;
+    if (expectedDataset != null && projection.datasetId != expectedDataset) {
+      return const HttpCompletionView(HttpCompletionPhase.unknown);
+    }
+    return HttpCompletionView.fromTaskProjection(projection);
+  }
+
+  bool isConfirmedDoneFor(Status status) =>
+      status == Status.done &&
+      phase == HttpCompletionPhase.committed &&
+      errorCategory == null;
+
   String labelFor(Status status) {
     if (errorCategory != null) {
       if (status == Status.done) return '校验完成状态未确认';

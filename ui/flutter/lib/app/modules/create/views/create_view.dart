@@ -42,6 +42,7 @@ import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_onboarding.dart';
 import '../../task/controllers/task_controller.dart';
 import '../../task/views/task_batch_groups.dart';
+import '../../task/views/http_completion_status.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
@@ -2314,6 +2315,7 @@ class _CreateViewState extends State<CreateView> {
     final running = task.status == Status.running;
     final failed = task.status == Status.error;
     final done = task.status == Status.done;
+    final completion = HttpCompletionView.forTask(task);
     final total = task.meta.res?.size ?? 0;
     final progress =
         total > 0 ? (task.progress.downloaded / total).clamp(0.0, 1.0) : 0.0;
@@ -2343,7 +2345,7 @@ class _CreateViewState extends State<CreateView> {
                         fontWeight: FontWeight.w400,
                         color: c.text)),
                 const SizedBox(height: 3),
-                if (failed)
+                if (failed && completion == null)
                   MacTaskFailure(
                       key: ValueKey('failure-${task.id}'),
                       taskId: task.id,
@@ -2353,20 +2355,22 @@ class _CreateViewState extends State<CreateView> {
                   Text(
                       task.handoff?.blocked == true
                           ? task.handoff!.label
-                          : failed
-                              ? '下载失败 · 查看详情'
-                              : done
-                                  ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                                  : task.fetchingTorrentInfo
-                                      ? '正在获取种子信息'
-                                      : running
-                                          ? (total > 0
-                                              ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
-                                              : Util.fmtByte(
-                                                  task.progress.downloaded))
-                                          : task.status == Status.pause
-                                              ? '已暂停'
-                                              : '等待下载',
+                          : completion != null
+                              ? completion.labelFor(task.status)
+                              : failed
+                                  ? '下载失败 · 查看详情'
+                                  : done
+                                      ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                                      : task.fetchingTorrentInfo
+                                          ? '正在获取种子信息'
+                                          : running
+                                              ? (total > 0
+                                                  ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
+                                                  : Util.fmtByte(
+                                                      task.progress.downloaded))
+                                              : task.status == Status.pause
+                                                  ? '已暂停'
+                                                  : '等待下载',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -2429,8 +2433,13 @@ class _CreateViewState extends State<CreateView> {
                     }
                   })
                 else if (done)
-                  Icon(CupertinoIcons.checkmark_circle,
-                      size: 17, color: c.secondary)
+                  Icon(
+                      completion == null ||
+                              completion.isConfirmedDoneFor(task.status)
+                          ? CupertinoIcons.checkmark_circle
+                          : CupertinoIcons.question_circle,
+                      size: 17,
+                      color: c.secondary)
                 else
                   _panelIcon(
                       c,
