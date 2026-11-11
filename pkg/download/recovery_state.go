@@ -163,15 +163,16 @@ func hasRecoveryMember(m []string, w string) bool {
 // This owner never takes Downloader/task locks from a protocol callback. Core
 // invalidates the atomic run fence before Pause/Delete/Close waits on protocol IO.
 type taskRecoveryOwner struct {
-	mu         sync.Mutex
-	store      AtomicStorage
-	taskID     string
-	record     recoveryRecord
-	active     atomic.Bool
-	closed     *atomic.Bool
-	token      transfer.RecoveryToken
-	runContext context.Context // guarded by mu; runtime lease is tied to preparation cancellation
-	permits    map[uint64]map[string]*transfer.RecoveryPermit
+	mu               sync.Mutex
+	store            AtomicStorage
+	taskID           string
+	record           recoveryRecord
+	active           atomic.Bool
+	closed           *atomic.Bool
+	token            transfer.RecoveryToken
+	runContext       context.Context // guarded by mu; runtime lease is tied to preparation cancellation
+	permits          map[uint64]map[string]*transfer.RecoveryPermit
+	verificationOnly bool // mu; verifier tokens cannot authorize transport work
 }
 
 type recoveryReader interface {
@@ -318,8 +319,11 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 	o.runContext = nil
 	var committed recoveryRecord
 	err := o.store.UpdateAtomic(func(tx StorageTransaction) error {
-		_, r, e := readRecovery(tx, o.taskID)
+		task, r, e := readRecovery(tx, o.taskID)
 		if e != nil {
+			return e
+		}
+		if e = guardCompletionTransport(tx, &task); e != nil {
 			return e
 		}
 		if r.Episode != o.record.Episode || r.Generation != o.record.Generation || r.SourceRevision != o.record.SourceRevision || generation <= r.Generation {
@@ -352,6 +356,7 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 		o.observeUnknownWrite()
 		return nil, recoveryStorageError(err)
 	}
+	o.verificationOnly = false
 	o.record = committed
 	o.token = transfer.RecoveryToken{TaskID: o.taskID, Episode: committed.Episode, Generation: generation, SourceRevision: committed.SourceRevision}
 	o.permits = map[uint64]map[string]*transfer.RecoveryPermit{}
@@ -389,6 +394,9 @@ func (o *taskRecoveryOwner) RetryRecovery(ctx context.Context, token transfer.Re
 	if !o.active.Load() || token != o.token || (o.runContext != nil && o.runContext.Err() != nil) || (o.closed != nil && o.closed.Load()) {
 		return nil, transfer.ErrRecoveryStale
 	}
+	if o.verificationOnly {
+		return nil, transfer.ErrRecoveryWork
+	}
 	// A wave existing in this process can serve each frozen member exactly once.
 	if seen < o.record.NextAction {
 		permits := o.permits[o.record.NextAction]
@@ -410,8 +418,11 @@ func (o *taskRecoveryOwner) RetryRecovery(ctx context.Context, token transfer.Re
 	}
 	var committed recoveryRecord
 	err = o.store.UpdateAtomic(func(tx StorageTransaction) error {
-		_, r, e := readRecovery(tx, o.taskID)
+		task, r, e := readRecovery(tx, o.taskID)
 		if e != nil {
+			return e
+		}
+		if e = guardCompletionTransport(tx, &task); e != nil {
 			return e
 		}
 		if r.Episode != token.Episode || r.Generation != token.Generation || r.SourceRevision != token.SourceRevision || r.NextAction != seen {

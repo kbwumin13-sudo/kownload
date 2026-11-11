@@ -320,12 +320,14 @@ type Fetcher struct {
 	// Target file. Streams write disjoint ranges with WriteAt (pwrite), which
 	// is safe concurrently, so they share fileMu; replacing or closing the
 	// file takes it exclusively.
-	file             *os.File
-	fileMu           sync.RWMutex
-	redirectURL      string
-	redirectMethod   string // In-memory final-method override; original request remains the fallback.
-	redirectDropBody bool
-	redirectLock     sync.Mutex
+	file                 *os.File
+	verifiedOutput       *os.File // fileMu; owned staging fd, never a final pathname
+	verifiedOutputPolicy atomic.Bool
+	fileMu               sync.RWMutex
+	redirectURL          string
+	redirectMethod       string // In-memory final-method override; original request remains the fallback.
+	redirectDropBody     bool
+	redirectLock         sync.Mutex
 
 	// Lifecycle control
 	ctx    context.Context
@@ -1018,15 +1020,24 @@ func (f *Fetcher) doStart() error {
 	name := f.meta.SingleFilepath()
 	var err error
 	var file *os.File
-	_, err = os.Stat(name)
-	if err != nil {
-		if os.IsNotExist(err) {
-			file, err = f.ctl.Touch(name, f.meta.Res.Size)
+	f.fileMu.Lock()
+	file = f.verifiedOutput
+	f.verifiedOutput = nil
+	f.fileMu.Unlock()
+	if f.verifiedOutputPolicy.Load() && file == nil {
+		return fmt.Errorf("%w: verified output not bound", ErrUnsafeResume)
+	}
+	if file == nil {
+		_, err = os.Stat(name)
+		if err != nil {
+			if os.IsNotExist(err) {
+				file, err = f.ctl.Touch(name, f.meta.Res.Size)
+			} else {
+				return err
+			}
 		} else {
-			return err
+			file, err = os.OpenFile(name, os.O_RDWR, os.ModeAppend)
 		}
-	} else {
-		file, err = os.OpenFile(name, os.O_RDWR, os.ModeAppend)
 	}
 	if err != nil {
 		return err
@@ -1128,7 +1139,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 		}
 
 		// Update file last modified time before closing
-		if f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
+		if !f.verifiedOutputPolicy.Load() && f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
 			setft.SetFileTime(f.meta.SingleFilepath(), time.Now(), *f.meta.Res.Files[0].Ctime, *f.meta.Res.Files[0].Ctime)
 		}
 
@@ -2694,6 +2705,7 @@ func (f *Fetcher) PatchWithContext(req *base.Request, opts *base.Options, mode t
 }
 
 func (f *Fetcher) Pause() error {
+	defer f.ReleaseVerifiedOutput()
 	if f.cancel != nil {
 		f.cancel()
 	}

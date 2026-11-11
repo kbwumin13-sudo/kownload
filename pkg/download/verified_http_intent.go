@@ -51,6 +51,8 @@ func (d *Downloader) freezeVerifiedOptions(input *base.Options) (*base.Options, 
 	}
 	d.configSnapshotMu.RLock()
 	torrent, extract := false, false
+	serverTime := false
+	var timeErr error
 	if cfg := d.cfg.DownloaderStoreConfig; cfg != nil {
 		if cfg.AutoTorrent != nil {
 			torrent = cfg.AutoTorrent.Enable
@@ -58,8 +60,26 @@ func (d *Downloader) freezeVerifiedOptions(input *base.Options) (*base.Options, 
 		if cfg.Archive != nil {
 			extract = cfg.Archive.AutoExtract
 		}
+		if value := cfg.ProtocolConfig["http"]; value != nil {
+			raw, err := json.Marshal(value)
+			var protocol struct {
+				UseServerCtime bool `json:"useServerCtime"`
+			}
+			if err != nil {
+				timeErr = err
+			} else if err = json.Unmarshal(raw, &protocol); err != nil {
+				timeErr = err
+			} else {
+				serverTime = protocol.UseServerCtime
+			}
+		}
+
 	}
 	d.configSnapshotMu.RUnlock()
+	if timeErr != nil {
+		return nil, ErrVerifiedHTTPUnsupportedOption
+	}
+	extra["verifiedUseServerCtime"] = serverTime
 	for _, item := range []struct {
 		key       string
 		inherited bool

@@ -10,6 +10,8 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+var errTransactionBucketMissing = errors.New("missing transaction bucket")
+
 // AtomicStorage is optional: old custom Storage implementations remain valid,
 // but durable operations never fall back to a sequence of independent Puts.
 type AtomicStorage interface {
@@ -42,7 +44,7 @@ type boltStorageTransaction struct{ tx *bbolt.Tx }
 func (t boltStorageTransaction) Get(bucket, key string, v any) (bool, error) {
 	b := t.tx.Bucket([]byte(bucket))
 	if b == nil {
-		return false, errors.New("missing transaction bucket")
+		return false, errTransactionBucketMissing
 	}
 	raw := b.Get([]byte(key))
 	if raw == nil {
@@ -53,7 +55,7 @@ func (t boltStorageTransaction) Get(bucket, key string, v any) (bool, error) {
 func (t boltStorageTransaction) Put(bucket, key string, v any) error {
 	b := t.tx.Bucket([]byte(bucket))
 	if b == nil {
-		return errors.New("missing transaction bucket")
+		return errTransactionBucketMissing
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -70,7 +72,7 @@ type memStorageTransaction struct{ data map[string]map[string]any }
 func (t memStorageTransaction) Get(bucket, key string, v any) (bool, error) {
 	b, ok := t.data[bucket]
 	if !ok {
-		return false, errors.New("missing transaction bucket")
+		return false, errTransactionBucketMissing
 	}
 	value, ok := b[key]
 	if !ok {
@@ -85,7 +87,7 @@ func (t memStorageTransaction) Get(bucket, key string, v any) (bool, error) {
 func (t memStorageTransaction) Put(bucket, key string, v any) error {
 	b, ok := t.data[bucket]
 	if !ok {
-		return errors.New("missing transaction bucket")
+		return errTransactionBucketMissing
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
