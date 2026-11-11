@@ -117,6 +117,7 @@ type Downloader struct {
 	errorPersistenceLocks sync.Map // *Task -> *sync.Mutex
 	listenerLock          sync.RWMutex
 	listener              Listener
+	verifiedDone          *verifiedHTTPDoneBroker
 
 	lock               *sync.Mutex
 	fetcherMapLock     *sync.RWMutex
@@ -159,10 +160,11 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 		fetcherMapLock:     &sync.RWMutex{},
 		checkDuplicateLock: &sync.Mutex{},
 
-		extensions:  make([]*Extension, 0),
-		transports:  transfer.NewTransportPool(),
-		budget:      transfer.NewBudget(),
-		queueSignal: make(chan struct{}),
+		extensions:   make([]*Extension, 0),
+		transports:   transfer.NewTransportPool(),
+		budget:       transfer.NewBudget(),
+		queueSignal:  make(chan struct{}),
+		verifiedDone: newVerifiedHTTPDoneBroker(),
 	}
 
 	loggerSetupOnce.Do(func() { zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack })
@@ -1162,6 +1164,7 @@ func (d *Downloader) Close() error {
 	d.closed.Store(true)
 	d.operationMu.Unlock()
 	d.handoffMu.Unlock()
+	d.verifiedDone.close()
 
 	closeArr := []func() error{
 		d.pauseAll,
