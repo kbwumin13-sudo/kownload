@@ -24,7 +24,15 @@ type ResolveResult struct {
 	Res *base.Resource `json:"res"`
 }
 
+// TaskCompletionRef declares required completion state. It carries no phase,
+// digest result or execution permission; those require the atomic three-way
+// state guard before this optional reference can be acted on.
+type TaskCompletionRef struct {
+	Version int `json:"version"`
+}
+
 type Task struct {
+	Completion        *TaskCompletionRef   `json:"completion,omitempty"`
 	Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 	Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 	CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
@@ -145,8 +153,9 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
 		CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
 		Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
+		Completion        *TaskCompletionRef   `json:"completion,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery, t.Completion})
 }
 
 func (t *Task) getStatus() base.Status {
