@@ -13,6 +13,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | --- | --- | --- | --- | --- | --- |
 | 原 Task 六种 status、task/save/protocol_state/config/extension/extension_storage、Hive database | 39 及开发基线 | 原字段按旧契约；具体更早版本仍需匹配 | 当前支持协议沿原行为 | 原用户偏好、netdisk 重新授权与协议恢复约束仍生效 | 配套 App/数据/偏好快照；输出文件另核对，不能只比数据库字节 |
 | `Task.handoff.version=1`，`prepared/committed/aborted` | 39；`browser_handoff.go` | 不识别 Handoff 的旧 core 可能忽略字段；不等于兼容 | 39 只执行 committed；prepared/aborted/未知版本保持 held | 只有受支持 committed 才可能继续；旧 core 未证明安全 | 禁止活动库裸回灌旧 core；39 故障/重启历史证据见身份审查报告，S0 不冒称重测 |
+| 助手 pending 的 `bridgeBinding.version=1`：hostName/routeScope | S1 计划，首写 Native 请求前须持久化 | 旧助手可能忽略绑定或仍选择旧 host，不能判安全 | 实际宿主转发前校验 expected scope；不匹配零转发；遗留未绑定 pending 仅保持未知 | worker 重启只原 binding 同 op 查询；无 ACK 不换 host 重放；存储失败零写请求 | App 数据快照不等浏览器 pending 已回退；先收口或保留未知，不能清空后重造。S1 写前失败/不同宿主进程/worker 重启矩阵通过后才启用 |
 | task-batch operation bucket v1、Task 可选 `CreationOperation` | S2 计划；字段以核准的 S2 合同为准 | 旧 core 可能读 ordinary Task 并丢失反向关联，不理解 operation | 新端须核版本及成员/Task 双向一致；旧端未知 | pending 不创建/不启动；created 仍受启动政策；未知引用拒绝 | 旧 core 不支持该活动库；默认成套快照。S2 原子提交/重启/删除后不重造测试交付前不标通过 |
 | 共享恢复 budget / execution generation | S3 计划，尚未写入 | 未知 | 未知，拒绝；迟到执行不得跨代生效 | 未知，拒绝；换连接/URL/队列不能清零预算 | 先冻结暂停/重试/重启政策及故障用例，补版本与旧端兼容证据 |
 | 校验/发布 SHA phase 与完成门禁 | S4 计划，尚未写入 | 旧 status 能读也可能跳过校验 | 未知版本不得执行或写 done | 未决/校验失败/发布未持久不得当完成续跑 | 旧 core 无完整完成门禁，禁止裸活动库回退；校验/发布/副作用故障测试必需 |

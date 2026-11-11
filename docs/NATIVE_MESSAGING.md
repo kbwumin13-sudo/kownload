@@ -6,6 +6,34 @@
 
 ## 请求
 
+### 身份握手与绑定（identityProtocol 1）
+
+`hostInfo` 接受 `params:{version:1,reportedBrowser:"chrome"|"edge",clientId}`，不唤醒
+App、不转发业务请求。返回 `version/product/nativeProtocol/identityProtocol/build`、
+`supportedHostNames/callerOrigin/routeScope` 和分层 App/Core 状态。callerOrigin 来自
+主程序实际匹配的浏览器 argv，不能由 params 覆写。reportedBrowser 只是客户端自报。
+routeScope 是实际 host.sock 规范路径的 SHA-256，一致性线索而非秘密或发布者认证。
+构建 SHA/版本由同一次构建输入注入；缺失/格式未知返回 `unknown`。
+
+当前 Native 首段仅用只读 socket 探测填 `app.reachable`；`app.identity`、
+`core.reachable`、`core.handoffVersion` 为 null，表示未检测，而非 Core 不存在或完整连接
+已通过。App 身份和 Core 能力需要后续只读接线；不能用 ping 或 host 自报版本推断。
+
+新客户端在首次修改请求**之前**持久保存
+`bridgeBinding:{version:1,hostName,routeScope}`，每个业务请求附顶层
+`identityProtocol:1` 和该 binding。存储失败不得发送写请求。Native 实际写入进程在
+唤醒和转发前重新核路由，不信任另一个 sendNativeMessage 进程的旧握手；唤醒后再次核对。
+未知协议、缺绑定、路由变化分别返回 `identity_unsupported/binding_required/route_mismatch`，
+不转发。原 origin/manifest 校验仍必需。hostName 只校验属于支持集合；浏览器选择的
+manifest 名由调用端记录，host 无法凭 argv 认证所选名称。
+
+旧客户端无这两个顶层字段时保持既有 wire 兼容，不具有新路由保证。发出写请求后无 ACK
+不切 host 重放；重启只能沿原绑定、同 operationId 先查权威结果。旧未绑定 pending
+保持未知，不自动迁移、清空或重造。此段 Native 实现尚未启用助手持久绑定，后续助手
+回归要分别验证存储失败零写、worker 重启和跨路由拒绝。
+
+### 既有业务请求
+
 ```json
 {"method":"create","operationId":"550e8400-e29b-41d4-a716-446655440000","meta":{"silent":false},"params":{"req":{"url":"https://example.org/file"}}}
 ```
