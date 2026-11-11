@@ -1,7 +1,8 @@
-# 直接 HTTP 单文件校验完成 v1（planned，未激活）
+# 直接 HTTP 单文件校验完成 v1（本地候选，待成套验收）
 
-能力为 `http-sha256-completion/v1`。本合同不属于 build40；transfer 模块通过不等于
-Core/REST/UI 已闭合。首切片只接受新建普通单 URL HTTP(S)、一个成品与用户明确 SHA256；
+能力为 `http-sha256-completion/v1`。本地完整 Core/REST 候选已接线，待成套审查与验收，
+未发布或安装，正常 build40/41 不含；模块或后端通过不等于 UI/实际 App 已闭合。
+首切片只接受新建普通单 URL HTTP(S)、一个成品与用户明确 SHA256；
 无 checksum 沿原入口和原语义，多行不得广播同一摘要，rid/media/netdisk/多产物拒绝。
 
 ## 专用受理与同域操作
@@ -50,6 +51,8 @@ namespace:"task-batch.create/v1",capability:"http-sha256-completion/v1",operatio
 同域partial为HTTP503/code1000/operation_unavailable_query_same_id，只有权威同View取得的
 原完整历史可带入，taskPresent未读成则省略。错域HTTP409/code1000/dataset_mismatch/
 data:null；域/版本/一致视图未知也不返回另一域ID。创建回执从不代表verification。
+同域同op不同意图仍为HTTP409/code1000/operation_conflict失败；可附权威旧R的历史
+operation/completionViews，不能据此认作本次不同摘要成功、补首次资格或清除新草稿。
 
 ### 最小响应样例
 
@@ -108,7 +111,7 @@ unavailable，不从原始error字符串猜测，不回显URL/headers/路径/设
 不改全局配置。受理/恢复/成功出口消费同一冻结的有效选项；不能后来套新全局值扩副作用。
 普通无SHA路径全部保持。Core若尚不能证明这一语义，应cap不支持，不先假装接受。
 
-### 服务器文件时间（planned）
+### 服务器文件时间（本地候选已接线）
 
 UseServerCtime保留原有效true/false语义，不永久静默降为false。首次R从实际HTTP有效config
 捕获内部bool `verifiedUseServerCtime`，保存在原member.Options.Extra的server-frozen执行map，
@@ -122,8 +125,8 @@ runtime须从同View的R owned map读取，并保持原UseNumber。
 不直接设置creation；但本机APFS可随更早mtime自动下调birthtime，fd与legacy Chtimes真实
 对照相同，不能承诺birthtime不变或因选项名把它称为独立设置macOS创建时间。writer join后/hash前按同run/
 固定inode的fd adapter应用等价时间语义，禁止SHA模式downloadLoop对最终pathname的原
-SetFileTime副作用或任何路径fallback。fd adapter/Run Fence/实际流水线仍待相应owner验证；
-本段只冻结planned表达，不激活cap、不更改无SHA路径或build40产物。
+SetFileTime副作用或任何路径fallback。fd adapter/Run Fence 已接入本地候选；无SHA路径不改，
+该实现不属于正常 build40/41，也不代表其它产物的时间语义已验。
 
 ## 三方持久状态与提交
 
@@ -132,7 +135,7 @@ Task.completion={version:1,completionId:string}；ID必须非空且等于原R冻
 task_completion_v1按TaskID保存record；
 task_completion_required_v1={version:1,capability:"http-sha256-completion/v1"}。Task/record/
 required同一M事务确认后才有后续准备资格；见任一则三方缺坏/未知、completionId空或错配
-均held，显式Continue亦然。此为未激活v1的planned精确定义，不增加v2/迁移或新ledger。
+均held，显式Continue亦然。此为本地候选已实现的v1，不增加v2/迁移或新ledger。
 旧39/Core忽略新状态不安全，禁止裸活动库回退；配对快照也不证明输出/自动续跑安全。
 
 record v1 JSON为version/completionId/phase/directoryIdentity{device,inode}/
@@ -147,20 +150,28 @@ verified保存确认后才同卷anchored no-replace发布，保stage锚点；C�
 同inode已final可续阶段，外来同hash不能认领。hash/Wait/join锁外，短发布/保存由同Task票据
 Fence准入；HTTP结束应释放网络槽，但保同run token直到C/失败，不能新造generation。
 
+当前删除限制：force=true 的选择中，只要 Task completion ref、record、required 任一存在，
+整次返回 unsupported_option，先于修改 Task/队列/记录/文件；坏状态同样不能绕过。
+force=false 支持仅删 Task、保留输出。安全移除 owned 产物尚未实现，不能据此称完整 D5 已完成。
+
 分工：15拥有model字段slot/全部现有共享文件、Task/typedR/HTTP/Fence与API线性化；12拥有
 transfer模块及新completion_state.go三方存储内核/测试；11拥有新published_read.go纯值locked
 publish/clear/access及测试。12/11不写model/watch/HTTP/batch。14新REST薄文件/server注册及
 既有GetTask/GetTasks仅响应装饰，16纯transient DTO/原轮询UI。三方借接点各自
-明确后实施；本文件与S0行是planned契约，不是已部署能力。
+明确后实施；本文件与S0行登记本地候选，不是已部署能力。
 
-## REST 首增量的验证边界
+## 本地接线与验证边界
 
-专用receiver和公开projection formatter可先在独立候选验证；真实BuildServer已薄接所绑定
-Core的四个typed ForDataset方法，当前Core只读核dataset并返回supported:false，
-create/query/cancel均明确unsupported，不回退旧
-API、不会把无校验Task当校验任务。正例注入仅位于测试。真实Core typedR/三方guard/Fence/C/
-published snapshot未接通时，不启用能力，也不装饰普通Task/list的phase；该部分须待同源
-Core×API×UI/MCP交集验证。此增量不修改build40已交包。
+真实BuildServer薄接所绑定Core的四个typed ForDataset方法。当前本地候选在同域 owned View、
+原子存储、已Setup配置、内置直接HTTP manager、completer/broker及Darwin/Linux adapter齐备时
+报告supported:true，create/query/cancel消费原S2 typed R/M及权威快照；cap读取不执行
+Build/Restore或文件系统探测。缺接点或未知能力仍unsupported，不回退旧API，也不会把
+无校验Task当校验任务。
+
+同源真实BuildServer/UDS测试已覆盖fresh C ACK→API paired done→四字段SSE、完整文件、
+摘要不匹配拒发布、409旧意图/CID保全与Bolt重开零补发，plain/race均通过。
+注入测试仍只证明局部传输；Dart消费者、系统通知、实际App及其它产物仍需各自验收。
+此候选不修改正常build40/41产物。
 
 独立读取增量使用Core的`TaskCompletionSnapshotsForDataset`成对返回Task与可选投影，
 路由捕获本服务Core；既有列表只提供ID选择和顺序，不以live对象覆盖权威pair。

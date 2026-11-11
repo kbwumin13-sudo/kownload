@@ -1,6 +1,7 @@
-# 校验完成通知的实时载体 v1（候选，未激活）
+# 校验完成通知的实时载体 v1（本地候选，待成套验收）
 
-仅用于解决通知服务以状态轮询补发历史成功的旁路；首包40不含此能力。普通任务仍沿原
+仅用于解决通知服务以状态轮询补发历史成功的旁路；正常build40/41不含此能力。本地完整
+Core/REST候选已接线，待审/未发布或安装。普通任务仍沿原
 通知语义。Task/ref/完成record和completionView不加Fresh、时间、nonce或事件持久字段。
 形状合法不等于具备fresh许可，只有Core真实C ACK及API done线性化后的唯一winner能发布。
 
@@ -15,8 +16,10 @@
 REST adapter先调用同Core的`VerifiedHTTPCapabilityForDataset(D)`，严格核version=1、
 capability=http-sha256-completion/v1及supported=true；否则501 JSON且零订阅。
 通过后才以原请求ctx/原D调用真实Subscribe，后者再次守域；订阅错误仍在SSE头之前处理。
-本地读取接线底座82a54的能力仍false。注入事件的HTTP测试只证明传输，不替代最终
-Core fresh C ACK→API线性化→事件及恢复零补发的同源验证；不修改首包40/5e6候选。
+本地完整候选已按完整runner条件报告能力；缺接点/未知能力仍保持unsupported。
+真实BuildServer/UDS已通过Core fresh C ACK→API线性化→四字段事件及Bolt重开零补发的
+同源plain/race测试；注入事件HTTP测试仍只证明传输。Dart消费者/系统通知/实际App待成套
+验证，不修改正常build40/41或5e6实际预览证据。
 
 事件只有四字段：`{version:1,datasetId:<32lowerhex>,taskId:<ID>,completionId:<R冻结CID>}`。
 新事件的Task/CID为非空有效UTF-8，各不超过128 UTF-8字节；这只是传输边界，不改Task格式。
