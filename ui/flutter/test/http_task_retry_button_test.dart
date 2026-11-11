@@ -14,6 +14,7 @@ void main() {
   final f = HttpRecoveryFixture();
   final messages = <String>[];
   var legacy = 0, refresh = 0;
+  late HttpRetrySession session;
   final cleanup = <void Function()>[];
   Task sample() => Task(
       id: f.taskId,
@@ -32,6 +33,7 @@ void main() {
           home: Scaffold(
               body: HttpTaskRetryButton(
                   task: task ?? sample(),
+                  session: session,
                   legacyContinue: () async {
                     legacy++;
                   },
@@ -55,6 +57,7 @@ void main() {
         await t.pumpWidget(const SizedBox());
         await t.pump();
         await spin(t, () => f.inFlight == 0);
+        session.dispose();
       }
     });
   }
@@ -70,6 +73,7 @@ void main() {
     refresh = 0;
     messages.clear();
     cleanup.clear();
+    session = HttpRetrySession();
   });
   tearDownAll(f.close);
   widgetTest('explicit error click sends once then only queries original tuple',
@@ -89,6 +93,193 @@ void main() {
     final q = (f.requests.last['uri'] as Uri).queryParameters;
     expect(q['actionId'], body['actionId']);
     expect(q['expectedEpisode'], 'ep-a');
+  });
+  widgetTest('remount after lost ACK queries original action instead of POST',
+      (t) async {
+    f.override = (request) async {
+      if (request.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(request);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    final original = (f.requests
+        .singleWhere((r) => r['method'] == 'POST')['body'] as Map)['actionId'];
+    await t.pumpWidget(const SizedBox());
+    f.override = null;
+    f.replyMode = 'not_recorded';
+    await mount(t);
+    await t.tap(find.byType(IconButton));
+    await t.pump();
+    await spin(t, () => refresh == 2);
+    expect(f.posts, 1);
+    expect(
+        (f.requests.last['uri'] as Uri).queryParameters['actionId'], original);
+  });
+  widgetTest('two mounted entry points share a pending first POST action',
+      (t) async {
+    final gate = Completer<void>();
+    cleanup.add(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    f.override = (request) async {
+      if (request.method == 'POST') await gate.future;
+      await f.handle(request);
+    };
+    Widget button(String id) => HttpTaskRetryButton(
+        key: ValueKey(id),
+        task: sample(),
+        legacyContinue: () async {
+          legacy++;
+        },
+        refresh: () async {
+          refresh++;
+        },
+        notice: messages.add);
+    await t.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: Row(children: [button('full-list'), button('compact')]))));
+    Future<void> press(String id) async {
+      await t.tap(find.descendant(
+          of: find.byKey(ValueKey(id)), matching: find.byType(IconButton)));
+      await t.pump();
+    }
+
+    await press('full-list');
+    await spin(t, () => f.posts == 1);
+    final original = (f.requests
+        .singleWhere((r) => r['method'] == 'POST')['body'] as Map)['actionId'];
+    await press('compact');
+    await spin(t, () => refresh == 1 || f.posts == 2);
+    expect(gate.isCompleted, false);
+    expect(f.posts, 1);
+    expect(
+        (f.requests.last['uri'] as Uri).queryParameters['actionId'], original);
+    expect(legacy, 0);
+  });
+  widgetTest('remount while original POST stays pending only queries its tuple',
+      (t) async {
+    final gate = Completer<void>();
+    cleanup.add(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    f.replyMode = 'not_recorded';
+    f.override = (request) async {
+      if (request.method == 'POST') await gate.future;
+      await f.handle(request);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => f.posts == 1);
+    final original = (f.requests
+        .singleWhere((r) => r['method'] == 'POST')['body'] as Map)['actionId'];
+    await t.pumpWidget(const SizedBox());
+    await mount(t);
+    await click(t, '查询原重试');
+    await spin(t, () => refresh == 1);
+    expect(gate.isCompleted, false);
+    expect(f.posts, 1);
+    expect(
+        (f.requests.last['uri'] as Uri).queryParameters['actionId'], original);
+  });
+  widgetTest('concurrent successful preflights consume only one shared POST',
+      (t) async {
+    final gate = Completer<void>();
+    cleanup.add(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    var preflights = 0;
+    f.override = (request) async {
+      if (request.uri.path.endsWith('/recovery/v1') &&
+          request.uri.queryParameters.isEmpty) {
+        preflights++;
+        await gate.future;
+      }
+      if (request.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(request);
+    };
+    Widget button(String id) => HttpTaskRetryButton(
+        key: ValueKey(id),
+        session: session,
+        task: sample(),
+        legacyContinue: () async {
+          legacy++;
+        },
+        refresh: () async {
+          refresh++;
+        },
+        notice: messages.add);
+    await t.pumpWidget(MaterialApp(
+        home: Scaffold(body: Row(children: [button('a'), button('b')]))));
+    for (final id in ['a', 'b']) {
+      await t.tap(find.descendant(
+          of: find.byKey(ValueKey(id)), matching: find.byType(IconButton)));
+      await t.pump();
+    }
+    await spin(t, () => preflights == 2);
+    gate.complete();
+    await spin(t, () => refresh == 2);
+    expect(f.posts, 1);
+    expect(legacy, 0);
+    final original = (f.requests
+        .singleWhere((r) => r['method'] == 'POST')['body'] as Map)['actionId'];
+    final originalQueries = f.requests.where(
+        (r) => (r['uri'] as Uri).queryParameters.containsKey('actionId'));
+    expect(originalQueries.length, 1);
+    expect((originalQueries.single['uri'] as Uri).queryParameters['actionId'],
+        original);
+  });
+  for (final change in ['dataset', 'epoch']) {
+    widgetTest('shared reference survives remount and isolates changed $change',
+        (t) async {
+      f.override = (request) async {
+        if (request.method == 'POST') f.replyMode = 'lostAck';
+        await f.handle(request);
+      };
+      await mount(t);
+      await click(t, '重试');
+      await spin(t, () => refresh == 1);
+      await t.pumpWidget(const SizedBox());
+      f.override = null;
+      f.replyMode = 'managed';
+      if (change == 'dataset') {
+        f.dataset = 'c' * 32;
+      } else {
+        f.init();
+      }
+      final queries = f.scopedGets;
+      await mount(t);
+      await click(t, '查询原重试');
+      await spin(t, () => messages.length == 2);
+      expect(f.posts, 1);
+      expect(f.scopedGets, queries);
+      expect(legacy, 0);
+    });
+  }
+  widgetTest('different task retains its own explicit action independently',
+      (t) async {
+    f.override = (request) async {
+      if (request.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(request);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    final originalId = f.taskId;
+    f.taskId = 'other-task';
+    try {
+      await mount(t);
+      await click(t, '重试');
+      await spin(t, () => refresh == 2);
+      expect(f.posts, 2);
+      final actions = f.requests
+          .where((r) => r['method'] == 'POST')
+          .map((r) => (r['body'] as Map)['actionId'])
+          .toSet();
+      expect(actions.length, 2);
+    } finally {
+      f.taskId = originalId;
+    }
   });
   for (final mode in ['lostAck', '409', '503', 'redirect', 'html']) {
     widgetTest('POST $mode retains action and subsequent click is only GET',
