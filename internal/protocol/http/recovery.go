@@ -112,6 +112,22 @@ func (f *Fetcher) SetRecoveryLease(lease *transfer.RecoveryLease) {
 	if f.downloadLoopDone != nil {
 		<-f.downloadLoopDone
 	}
+	// No old worker can still consume/finish these connection-local values.
+	// Persistent debits belong to the owner; only obsolete run permits go away.
+	f.wg.Wait()
+	f.connMu.Lock()
+	clear := func(conn *connection) {
+		if conn != nil {
+			conn.recoveryPermit = nil
+			conn.recoveryRound = 0
+			conn.recoveryInitialized = false
+		}
+	}
+	for _, conn := range f.connections {
+		clear(conn)
+	}
+	clear(f.resolveConn)
+	f.connMu.Unlock()
 	f.doneCh = make(chan error, 1)
 	f.recovery.Store(&httpRecoveryRun{lease: lease, round: lease.Round, base: lease.Round})
 }
@@ -122,6 +138,7 @@ func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 	f.doneCh = make(chan error, 1)
 	result := f.doneCh
 	f.boundRun.Store(&httpBoundRun{ctx: ctx})
+	f.readPublished.Store(nil)
 	return func() error {
 		select {
 		case err := <-result:

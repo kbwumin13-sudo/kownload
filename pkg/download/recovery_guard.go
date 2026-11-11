@@ -5,13 +5,16 @@ import "github.com/GopeedLab/gopeed/internal/transfer"
 func (t *Task) recoveryHeld() bool {
 	t.dataLock.RLock()
 	defer t.dataLock.RUnlock()
-	return t.recoveryBlocked || (t.Recovery != nil && !supportedRecoveryVersion(t.Recovery.Version))
+	return t.recoveryBlocked || t.Completion != nil || (t.Recovery != nil && !supportedRecoveryVersion(t.Recovery.Version))
 }
 
 // Read-only capability check. Missing all three parts is a legacy task, never
 // an instruction to enroll it. A reverse requirement survives old writers
 // dropping Task.recovery. No repair, protocol restore or IO occurs here.
 func (d *Downloader) checkTaskRecovery(task *Task) error {
+	if err := d.checkUnsupportedCompletion(task); err != nil {
+		return err
+	}
 	var record recoveryRecord
 	var required recoveryRequirement
 	r, err := d.storage.Get(bucketTaskRecovery, task.ID, &record)

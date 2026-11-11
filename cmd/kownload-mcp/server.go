@@ -122,7 +122,8 @@ func safeResult(kind string, data []byte, id string, limit int) (any, error) {
 		if json.Unmarshal(data, &result) != nil {
 			return nil, bad
 		}
-		if !result.Available && (result.ActiveStreams != nil || result.TargetStreams != nil || result.Peers != nil) {
+		known := result.ActiveStreams != nil || result.TargetStreams != nil || result.Peers != nil
+		if result.Available != known {
 			return nil, bad
 		}
 		return result, nil

@@ -70,10 +70,17 @@ func (n *MemStorage) Setup(buckets []string) error {
 }
 
 func (n *MemStorage) Put(bucket string, key string, v any) error {
+	// Task callers pass snapshots/owned candidates. Detach before taking the
+	// DB lock: even an accidental live Task input may need its dataLock while
+	// serializing. Never publish the stored Task or its metadata to TaskMap.
+	owned, err := detachMemTask(v)
+	if err != nil {
+		return err
+	}
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	if bucketData, ok := n.data[bucket]; ok {
-		bucketData[key] = v
+		bucketData[key] = owned
 	}
 	return nil
 }
@@ -82,7 +89,11 @@ func (n *MemStorage) Get(bucket string, key string, v any) (bool, error) {
 	n.lock.RLock()
 	defer n.lock.RUnlock()
 	if dv, ok := n.data[bucket][key]; ok {
-		changeValue(v, dv)
+		owned, err := detachMemTask(dv)
+		if err != nil {
+			return false, err
+		}
+		changeValue(v, owned)
 		return true, nil
 	}
 	return false, nil
@@ -94,10 +105,35 @@ func (n *MemStorage) List(bucket string, v any) error {
 	data := n.data[bucket]
 	list := make([]any, 0)
 	for _, v := range data {
-		list = append(list, v)
+		owned, err := detachMemTask(v)
+		if err != nil {
+			return err
+		}
+		list = append(list, owned)
 	}
 	changeValue(v, list)
 	return nil
+}
+
+// Only Task values need this ownership boundary. Other MemStorage dynamic
+// types retain their existing Get/List contract. The original serializer and
+// exact-number decoder are reused, rather than bypassing Task locks or storing
+// RawMessage where callers expect *Task. Stored Tasks are never handed out, so
+// transaction/view serialization takes only an immutable stored object's lock.
+func detachMemTask(value any) (any, error) {
+	task, ok := value.(*Task)
+	if !ok || task == nil {
+		return value, nil
+	}
+	raw, err := json.Marshal(task)
+	if err != nil {
+		return nil, err
+	}
+	var owned Task
+	if err := decodeStoredJSON(raw, &owned); err != nil {
+		return nil, err
+	}
+	return &owned, nil
 }
 
 func (n *MemStorage) Pop(bucket string, key string, v any) error {
@@ -178,6 +214,9 @@ func (b *BoltStorage) Get(bucket string, key string, v any) (bool, error) {
 	var data []byte
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucket))
+		if b == nil {
+			return nil
+		}
 		// Operation queries decode after View returns; retain an owned snapshot,
 		// not a page slice whose read transaction has already ended.
 		data = append([]byte(nil), b.Get([]byte(key))...)

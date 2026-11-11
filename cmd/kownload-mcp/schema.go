@@ -38,7 +38,16 @@ func outputSchema(kind string) schema {
 	case "progress":
 		return progressSchema()
 	case "stats":
-		return object(schema{"available": schema{"type": "boolean"}, "activeStreams": number(), "targetStreams": number(), "peers": number()}, "available")
+		out := object(schema{"available": schema{"type": "boolean"}, "activeStreams": number(), "targetStreams": number(), "peers": number()}, "available")
+		out["anyOf"] = []any{
+			object(schema{"available": schema{"const": false}}, "available"),
+			schema{"properties": schema{"available": schema{"const": true}}, "anyOf": []any{
+				schema{"required": []string{"activeStreams"}},
+				schema{"required": []string{"targetStreams"}},
+				schema{"required": []string{"peers"}},
+			}},
+		}
+		return out
 	case "errors":
 		return object(schema{"available": schema{"type": "boolean"}, "category": enum("network", "authentication", "integrity", "storage", "cancelled", "unknown"), "retryable": schema{"type": "boolean"}, "occurredAt": timestamp()}, "available")
 	default:
