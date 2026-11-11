@@ -313,6 +313,18 @@ class _CreateViewState extends State<CreateView> {
     final epoch = ++_manualEpoch;
     final raw = jsonEncode(_manualPayload(urls, opts).toJson());
     final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
+    // Existing attempts returned through query above. A purely local rejection
+    // of a new draft must not create a journal reference or consume permission.
+    if (expectedSha256 != null) {
+      try {
+        VerifiedHttpApi.validateRequest(frozen);
+      } on ArgumentError catch (error) {
+        _manualNotice.value = error.message == 'unsupported_option'
+            ? 'SHA-256 校验不支持自动加种或自动解压（unsupported_option），请关闭相应选项后重试。'
+            : 'SHA-256 校验仅支持单个直接 HTTP(S) 成品，未提交任务。';
+        return;
+      }
+    }
     setState(() => _manualBusy = true);
     _manualNotice.value = '正在检查批次能力…';
     try {

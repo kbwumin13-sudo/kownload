@@ -50,9 +50,13 @@ class VerifiedHttpApi extends ScopedTaskBatchApi {
         methods['cancel'] == 'POST';
   }
 
-  @override
-  Future<ScopedTaskBatchReply> create(
-      TaskBatchOperationRef operation, CreateTaskBatch batch) {
+  /// Pure local restrictions. Call before recording a new reference or
+  /// consuming its first-send permission; null options still inherit in Core.
+  static void validateRequest(CreateTaskBatch batch) {
+    _validatedRequest(batch);
+  }
+
+  static Map<String, dynamic> _validatedRequest(CreateTaskBatch batch) {
     if (batch.reqs?.length != 1 || batch.opts != null) {
       throw ArgumentError('verified_http_single_request_required');
     }
@@ -78,6 +82,13 @@ class VerifiedHttpApi extends ScopedTaskBatchApi {
         (extra['autoTorrent'] == true || extra['autoExtract'] == true)) {
       throw ArgumentError('unsupported_option');
     }
+    return request;
+  }
+
+  @override
+  Future<ScopedTaskBatchReply> create(
+      TaskBatchOperationRef operation, CreateTaskBatch batch) {
+    final request = _validatedRequest(batch);
     return _send(operation, TaskBatchAction.create, 'POST', '$_root/operations',
         data: {
           'version': 1,

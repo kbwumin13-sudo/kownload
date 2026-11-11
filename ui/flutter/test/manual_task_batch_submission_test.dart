@@ -191,6 +191,78 @@ void main() {
     await t.pump();
   }
 
+  for (final option in ['autoExtract', 'autoTorrentEnable']) {
+    testWidgets(
+        'verified local $option true rejection leaves no journal; same draft false sends once',
+        (t) async {
+      f.verified = true;
+      await checksum(t);
+      final toggle = find.text(option.tr);
+      await t.ensureVisible(toggle);
+      await t.tap(toggle);
+      await t.pumpAndSettle();
+      await confirmChecksum(t);
+      await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+      expect(journalBox.puts, 0);
+      expect(f.requests, isEmpty);
+      expect(singles, 0);
+      expect(find.textContaining('unsupported_option'), findsOneWidget);
+      expect(find.byKey(const ValueKey('manual-batch-query')), findsNothing);
+      expect(input(t), 'https://fixture.invalid/single');
+      final digest = find.byKey(const ValueKey('http-expected-sha256'));
+      expect(t.widget<TextFormField>(digest).controller!.text, 'A' * 64);
+      await t.ensureVisible(toggle);
+      await t.tap(toggle);
+      await t.pumpAndSettle();
+      await confirmChecksum(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      expect(journalBox.puts, 1);
+      expect(singles, 0);
+      final body =
+          f.requests.firstWhere((r) => r['method'] == 'POST')['body'] as Map;
+      final field = option == 'autoExtract' ? 'autoExtract' : 'autoTorrent';
+      final inherited = option == 'autoExtract' ? 'autoTorrent' : 'autoExtract';
+      expect(body['request']['opts']['extra'][field], false);
+      expect(body['request']['opts']['extra'][inherited], isNull);
+      expect(body['integrity']['expectedSHA256'], 'a' * 64);
+    });
+    testWidgets(
+        'verified unknown ACK changing $option to true still queries original reference',
+        (t) async {
+      f.verified = true;
+      f.mode = 'lostAck';
+      await checksum(t);
+      await confirmChecksum(t);
+      await spin(
+          t,
+          () =>
+              f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+      final toggle = find.text(option.tr);
+      await t.ensureVisible(toggle);
+      await t.tap(toggle);
+      await t.pumpAndSettle();
+      f.mode = 'success';
+      final gets = f.scopedGets;
+      await confirmChecksum(t);
+      await spin(
+          t,
+          () =>
+              f.scopedGets > gets &&
+              !Get.find<CreateController>().isConfirming.value);
+      expect(f.posts, 1);
+      expect(journalBox.puts, 1);
+      expect(singles, 0);
+      expect(input(t), 'https://fixture.invalid/single');
+      expect(find.text('原批次已确认，当前修改后的草稿已保留。'), findsOneWidget);
+      final query = f.requests
+          .lastWhere((r) => (r['uri'] as Uri).path.contains('/operations/'));
+      expect(query['method'], 'GET');
+      expect(query['body'], isNull);
+    });
+  }
   testWidgets(
       'verified single journal ACK gates exactly one dedicated POST, no legacy resolve/create',
       (t) async {
