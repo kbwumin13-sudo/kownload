@@ -84,11 +84,16 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 		startCfg = &model.StartConfig{}
 	}
 	startCfg.Init()
+	policy := download.StartupTaskPolicy(startCfg.StartupTaskPolicy)
+	if !policy.Valid() {
+		return nil, nil, download.ErrStartupTaskPolicy
+	}
 
 	downloadCfg := &download.DownloaderConfig{
 		ProductionMode:    startCfg.ProductionMode,
 		RefreshInterval:   startCfg.RefreshInterval,
 		WhiteDownloadDirs: startCfg.WhiteDownloadDirs,
+		StartupTaskPolicy: policy,
 	}
 	if startCfg.Storage == model.StorageBolt {
 		downloadCfg.Storage = download.NewBoltStorage(startCfg.StorageDir)
