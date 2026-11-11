@@ -29,6 +29,7 @@ func (d *Downloader) acceptVerifiedCompletion(task *Task, owned *Task) error {
 	}
 	task.dataLock.Lock()
 	task.Meta, task.Progress = owned.Meta, owned.Progress
+	task.IsCreated = owned.IsCreated
 	task.Status, task.UpdatedAt = owned.Status, owned.UpdatedAt
 	task.clearReadPublishedLocked()
 	task.timer.Pause()

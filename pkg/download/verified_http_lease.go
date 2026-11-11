@@ -75,3 +75,38 @@ func (o *taskRecoveryOwner) markVerificationOnly(token transfer.RecoveryToken) e
 	o.permits = map[uint64]map[string]*transfer.RecoveryPermit{}
 	return nil
 }
+
+// Selection only: sealed verification and confirmed-C reconciliation need no
+// transport slot and must not pause another download to obtain one. No owner,
+// permit, run or write is created by this same-domain phase read.
+func (d *Downloader) verificationOnlySelection(tasks []*Task) (map[*Task]bool, int, error) {
+	result := make(map[*Task]bool)
+	networkCount := 0
+	var dataset string
+	for _, task := range tasks {
+		task.dataLock.RLock()
+		present := task.Completion != nil
+		task.dataLock.RUnlock()
+		if !present {
+			networkCount++
+			continue
+		}
+		if dataset == "" {
+			identity, err := d.DatasetIdentity()
+			if err != nil {
+				return nil, 0, err
+			}
+			dataset = identity.DatasetID
+		}
+		_, record, err := d.readVerifiedTask(dataset, task.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if record.Phase != transfer.CompletionPrepared {
+			result[task] = true
+		} else {
+			networkCount++
+		}
+	}
+	return result, networkCount, nil
+}

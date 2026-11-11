@@ -933,18 +933,24 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		return ErrTaskNotFound
 	}
 
+	verificationTasks, networkCount, selectionErr := d.verificationOnlySelection(continueTasks)
+	if selectionErr != nil {
+		return selectionErr
+	}
 	pauseTasks := make([]*Task, 0)
 	func() {
 		d.lock.Lock()
 		defer d.lock.Unlock()
 
-		continueCount := len(continueTasks)
 		remainRunningCount := d.remainRunningCount()
-		needRunningCount := int(math.Min(float64(d.cfg.MaxRunning), float64(continueCount)))
-		needPauseCount := needRunningCount - remainRunningCount
+		needRunningCount := int(math.Min(float64(d.cfg.MaxRunning), float64(networkCount)))
+		needPauseCount := 0
+		if networkCount > 0 {
+			needPauseCount = needRunningCount - remainRunningCount
+		}
 		if needPauseCount > 0 {
 			for _, task := range d.tasks {
-				if task.getStatus() == base.DownloadStatusRunning {
+				if task.getStatus() == base.DownloadStatusRunning && !task.verificationOnly.Load() {
 					pauseTasks = append(pauseTasks, task)
 				}
 				if len(pauseTasks) == needPauseCount {
@@ -974,12 +980,16 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 		defer d.lock.Unlock()
 		// A task may have been deleted or another slot claimed while Pause ran.
 		remainRunningCount := d.remainRunningCount()
+		networkAdmitted := 0
 		for _, task := range continueTasks {
 			if d.getTaskLocked(task.ID) != task || task.getStatus() == base.DownloadStatusRunning || task.getStatus() == base.DownloadStatusDone {
 				continue
 			}
-			if len(realContinueTasks) < remainRunningCount {
+			if verificationTasks[task] || networkAdmitted < remainRunningCount {
 				realContinueTasks = append(realContinueTasks, task)
+				if !verificationTasks[task] {
+					networkAdmitted++
+				}
 			} else {
 				task.updateStatus(base.DownloadStatusWait)
 				d.enqueueLocked(task)
@@ -1002,16 +1012,24 @@ func (d *Downloader) continueAll() (err error) {
 		return err
 	}
 	continuedTasks := make([]*Task, 0)
+	verificationTasks, _, selectionErr := d.verificationOnlySelection(d.taskList())
+	if selectionErr != nil {
+		return selectionErr
+	}
 
 	func() {
 		d.lock.Lock()
 		defer d.lock.Unlock()
 		// calculate how many tasks can be continued, can't exceed maxRunning
 		remainCount := d.remainRunningCount()
+		networkAdmitted := 0
 		for _, task := range d.tasks {
 			if !task.handoffHeld() && !task.creationHeld() && task.getStatus() != base.DownloadStatusRunning && task.getStatus() != base.DownloadStatusDone {
-				if len(continuedTasks) < remainCount {
+				if verificationTasks[task] || networkAdmitted < remainCount {
 					continuedTasks = append(continuedTasks, task)
+					if !verificationTasks[task] {
+						networkAdmitted++
+					}
 				} else {
 					task.updateStatus(base.DownloadStatusWait)
 					d.enqueueLocked(task)
@@ -2043,9 +2061,25 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if e != nil {
 				return true, e
 			}
-			_, record, e := d.readVerifiedTask(identity.DatasetID, task.ID)
+			owned, record, e := d.readVerifiedTask(identity.DatasetID, task.ID)
 			if e != nil {
 				return true, e
+			}
+			if record.Phase == transfer.CompletionCommitted {
+				// Pause may have won just after an unknown C ACK. Explicit
+				// Continue reconciles the SAME durable CID, without a run,
+				// write, transport restore or reconstructed fresh permission.
+				task.dataLock.RLock()
+				matching := task.Completion != nil && owned.Completion != nil && *task.Completion == *owned.Completion
+				task.dataLock.RUnlock()
+				if !matching {
+					return true, transfer.ErrRecoveryHeld
+				}
+				invalidateTaskRecovery(task)
+				if task.runCancel != nil {
+					task.runCancel()
+				}
+				return true, d.acceptVerifiedCompletion(task, owned)
 			}
 			verificationResume = record.Phase != transfer.CompletionPrepared
 		}

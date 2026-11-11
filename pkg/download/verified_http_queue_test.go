@@ -161,6 +161,7 @@ func TestVerifiedHTTPLateHashCannotPublishAfterPauseOrDelete(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("pause persistence did not finish")
 			}
+			d.cfg.MaxRunning = 0 // No network admission is available to this sealed continuation.
 			if err = d.Continue(&TaskFilter{IDs: []string{task.ID}}); err != nil {
 				t.Fatal(err)
 			}

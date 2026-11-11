@@ -24,6 +24,11 @@ func (quiescedVerifiedWriter) JoinVerifiedWriters(ctx context.Context) error { r
 
 func verifiedWrittenFixture(t *testing.T, body []byte) (*Downloader, *Task, *taskRecoveryOwner, *transfer.RecoveryLease) {
 	t.Helper()
+	return verifiedWrittenContextFixture(t, body, context.Background())
+}
+
+func verifiedWrittenContextFixture(t *testing.T, body []byte, ctx context.Context) (*Downloader, *Task, *taskRecoveryOwner, *transfer.RecoveryLease) {
+	t.Helper()
 	sum := sha256.Sum256(body)
 	d, task, owner, _ := verifiedFenceFixtureStore(t, true, hex.EncodeToString(sum[:]))
 	task.timer.Start()
@@ -37,7 +42,7 @@ func verifiedWrittenFixture(t *testing.T, body []byte) (*Downloader, *Task, *tas
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := owner.currentLease(context.Background())
+	lease, err := owner.currentLease(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
