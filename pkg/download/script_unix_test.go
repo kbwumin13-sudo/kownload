@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/pkg/base"
+	"github.com/rs/zerolog"
 )
 
 func TestScript_TriggerOnDone_MoveFile(t *testing.T) {
@@ -78,6 +79,17 @@ func TestScript_EnvironmentVariables(t *testing.T) {
 	outputFile := filepath.Join(tmpDir, "env_output.txt")
 
 	setupScriptTest(t, func(downloader *Downloader) {
+		// executeScripts emits either outcome only after cmd.Run has returned.
+		// File existence alone can expose the first of the fixture's five writes.
+		finished := make(chan bool, 1)
+		downloader.Logger.Logger = downloader.Logger.Hook(zerolog.HookFunc(func(_ *zerolog.Event, _ zerolog.Level, message string) {
+			switch message {
+			case "script: executed successfully":
+				finished <- true
+			case "script: failed to execute":
+				finished <- false
+			}
+		}))
 		cfg, _ := downloader.GetConfig()
 		cfg.Script = &base.ScriptConfig{
 			Enable: true,
@@ -91,7 +103,14 @@ func TestScript_EnvironmentVariables(t *testing.T) {
 		t.Setenv("GOPEED_TEST_OUTPUT_FILE", outputFile)
 		downloader.triggerScripts(ScriptEventDownloadDone, task, nil)
 
-		waitForFile(t, outputFile, 3*time.Second)
+		select {
+		case success := <-finished:
+			if !success {
+				t.Fatal("Environment fixture script exited unsuccessfully; see executor log")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Timeout waiting for environment fixture script to exit")
+		}
 		content, err := os.ReadFile(outputFile)
 		if err != nil {
 			t.Fatalf("Failed to read output file: %v", err)
