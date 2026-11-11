@@ -312,10 +312,12 @@ type Fetcher struct {
 	// Target file. Streams write disjoint ranges with WriteAt (pwrite), which
 	// is safe concurrently, so they share fileMu; replacing or closing the
 	// file takes it exclusively.
-	file         *os.File
-	fileMu       sync.RWMutex
-	redirectURL  string
-	redirectLock sync.Mutex
+	file             *os.File
+	fileMu           sync.RWMutex
+	redirectURL      string
+	redirectMethod   string // In-memory final-method override; original request remains the fallback.
+	redirectDropBody bool
+	redirectLock     sync.Mutex
 
 	// Lifecycle control
 	ctx    context.Context
@@ -333,7 +335,8 @@ type Fetcher struct {
 	// Source budget membership for the current run, nil without a budget.
 	member atomic.Pointer[transfer.Member]
 	// Set when a long server rate limit ends the run; reported through doneCh.
-	deferred atomic.Pointer[transfer.DeferredError]
+	deferred      atomic.Pointer[transfer.DeferredError]
+	policyFailure atomic.Pointer[credentialFailure]
 	// Consecutive deferrals without a successful response.
 	deferrals atomic.Int32
 	// Stream limit of the current run, readable while Resolve rewrites options.
@@ -607,7 +610,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	f.rememberRepresentation(resp, res.Size)
 
 	// Save redirect URL for later connections
-	f.redirectURL = resp.Request.URL.String()
+	f.updateRedirectResponse(resp.Request)
 
 	// IMPORTANT: Keep the response body open for downloading in Start phase
 	// This is crucial for one-time URLs that can only be accessed once
@@ -929,6 +932,11 @@ func (f *Fetcher) doStart() error {
 	if err := base.ParseReqExtra[fhttp.ReqExtra](f.meta.Req); err != nil {
 		return err
 	}
+	// The legacy checkpoint records only a redirect URL, not the final method
+	// or proof permitting another source POST/body. Stop before resume probes.
+	if f.restored && !originalRequestReplaySafe(f.meta.Req) {
+		return transfer.ErrScopedContext
+	}
 	// The resume checks below are this run's first requests: a public link
 	// that expired while paused may use this run's refreshes.
 	f.publicMu.Lock()
@@ -1029,6 +1037,7 @@ func (f *Fetcher) doStart() error {
 	f.downloadLoopDone = make(chan struct{})
 	f.streamExit = make(chan struct{}, 1)
 	f.deferred.Store(nil)
+	f.policyFailure.Store(nil)
 	f.diag.startRun(time.Now())
 	f.joinBudget()
 
@@ -1044,7 +1053,8 @@ func (f *Fetcher) doStart() error {
 func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 	defer func() {
 		f.leaveBudget()
-		if deferred := f.deferred.Load(); deferred != nil {
+		deferred := f.deferred.Load()
+		if deferred != nil || f.policyFailure.Load() != nil {
 			// Report a deferral only after every stream stopped, so the saved
 			// ranges and progress are final when the scheduler requeues it.
 			f.wg.Wait()
@@ -1061,6 +1071,10 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 				}
 			}
 			f.connMu.Unlock()
+			if failure := f.policyFailure.Load(); failure != nil {
+				result = failure.err
+				f.deferred.Store(nil)
+			}
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1473,6 +1487,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 		}
 		f.diag.failure(err)
 
+		if policy := credentialPolicyError(err); policy != nil {
+			f.stopForCredentialFailure(conn, policy)
+			return
+		}
 		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return
@@ -1619,12 +1637,15 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 				resp = fallbackResp
 				// Update the redirect URL from the response
 				if resp.Request != nil && resp.Request.URL != nil {
-					f.updateRedirectURL(resp.Request.URL.String())
+					f.updateRedirectResponse(resp.Request)
 				}
 			} else {
 				// Fallback also failed, return the original error
 				if fallbackResp != nil {
 					fallbackResp.Body.Close()
+				}
+				if policyErr := credentialPolicyError(fallbackErr); policyErr != nil {
+					return policyErr
 				}
 				return originalErr
 			}
@@ -1981,6 +2002,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			conn.lastErr = err
 		}
 		f.diag.failure(err)
+		if policy := credentialPolicyError(err); policy != nil {
+			f.stopForCredentialFailure(conn, policy)
+			return
+		}
 		if isLocalFileError(err) || errors.Is(err, ErrUnsafeResume) {
 			f.failSingleStream(conn, err)
 			return

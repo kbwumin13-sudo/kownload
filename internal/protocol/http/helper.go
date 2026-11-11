@@ -94,7 +94,9 @@ func (f *Fetcher) buildRequestWithOriginalURL(ctx context.Context, req *base.Req
 func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, useRedirect bool) (httpReq *http.Request, err error) {
 	var reqUrl string
 	f.redirectLock.Lock()
-	if useRedirect && f.redirectURL != "" {
+	cached := useRedirect && f.redirectURL != ""
+	redirectMethod, dropBody := f.redirectMethod, f.redirectDropBody
+	if cached {
 		reqUrl = f.redirectURL
 	} else {
 		reqUrl = req.URL
@@ -125,6 +127,14 @@ func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, us
 			body = bytes.NewBufferString(extra.Body)
 		}
 	}
+	if cached {
+		if redirectMethod != "" {
+			method = redirectMethod
+		}
+		if dropBody {
+			body = nil
+		}
+	}
 	if _, ok := headers[base.HttpHeaderUserAgent]; !ok {
 		headers.Set(base.HttpHeaderUserAgent, strings.TrimSpace(f.config.UserAgent))
 	}
@@ -149,6 +159,8 @@ func (f *Fetcher) buildRequestWithURL(ctx context.Context, req *base.Request, us
 func (f *Fetcher) updateRedirectURL(url string) {
 	f.redirectLock.Lock()
 	f.redirectURL = url
+	f.redirectMethod = ""
+	f.redirectDropBody = false
 	f.redirectLock.Unlock()
 }
 
@@ -156,7 +168,43 @@ func (f *Fetcher) updateRedirectURL(url string) {
 func (f *Fetcher) hasRedirectURL() bool {
 	f.redirectLock.Lock()
 	defer f.redirectLock.Unlock()
-	return f.redirectURL != "" && f.redirectURL != f.meta.Req.URL
+	return f.redirectURL != "" && (f.redirectURL != f.meta.Req.URL || f.redirectMethod != "" || f.redirectDropBody)
+}
+
+// originalRequestReplaySafe is deliberately narrower than HTTP idempotence:
+// a restored checkpoint contains no proof permitting another body-bearing or
+// non-GET/HEAD source request. A fresh source context must be supplied instead.
+func originalRequestReplaySafe(req *base.Request) bool {
+	method, body := originalRequestSemantics(req)
+	return !body && (method == "GET" || method == "HEAD")
+}
+
+func originalRequestSemantics(req *base.Request) (string, bool) {
+	method := http.MethodGet
+	if req != nil {
+		if extra, ok := req.Extra.(*fhttp.ReqExtra); ok && extra != nil {
+			if extra.Method != "" {
+				method = extra.Method
+			}
+			return method, extra.Body != ""
+		}
+	}
+	return method, false
+}
+
+func (f *Fetcher) updateRedirectResponse(req *http.Request) {
+	if req == nil {
+		return
+	}
+	method, hadBody := originalRequestSemantics(f.meta.Req)
+	f.redirectLock.Lock()
+	f.redirectURL = req.URL.String()
+	f.redirectMethod = ""
+	if req.Method != method {
+		f.redirectMethod = req.Method
+	}
+	f.redirectDropBody = hadBody && (req.Body == nil || req.Body == http.NoBody)
+	f.redirectLock.Unlock()
 }
 
 // isRedirectExpiredError checks if the error indicates that the redirect URL may have expired.
@@ -180,6 +228,11 @@ func isRedirectExpiredError(err error) bool {
 // tryFallbackToOriginalURL attempts to make a request using the original URL
 // when the redirect URL has expired. Returns the response if successful.
 func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Client, rangeStart, rangeEnd int64) (*http.Response, error) {
+	// A cached redirect does not authorize replaying a non-idempotent source
+	// request. Request metadata has no explicit replay proof.
+	if !originalRequestReplaySafe(f.meta.Req) {
+		return nil, transfer.ErrScopedContext
+	}
 	httpReq, err := f.buildRequestWithOriginalURL(ctx, f.meta.Req)
 	if err != nil {
 		return nil, err

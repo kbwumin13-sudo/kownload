@@ -54,3 +54,22 @@ func TestCredentialOriginsAndTargetScope(t *testing.T) {
 		t.Fatal("target context crossed origin")
 	}
 }
+
+func TestCredentialHeadersTrimThenRejectControlCharacters(t *testing.T) {
+	headers, e := CredentialHeaders(map[string]string{"Referer": "\rtest\n\t", "Authorization": "Bearer B", "authorization": " \tBearer B\r\n"})
+	if e != nil || headers.Get("Referer") != "test" || headers.Get("Authorization") != "Bearer B" || len(headers.Values("Authorization")) != 1 {
+		t.Fatal("safe legacy whitespace normalization rejected", e)
+	}
+	for _, input := range []map[string]string{
+		{"X-Value": "one\r\nX-Injected: two"},
+		{"X-Value": "one\nsecond"},
+		{"X-Value": "\x00value"},
+		{"X-Value": "value\x7f"},
+		{"X-Invalid\nName": "value"},
+		{"X-Same": " first ", "x-same": "second"},
+	} {
+		if _, e := CredentialHeaders(input); e != ErrCredentialContext {
+			t.Fatal("invalid field, control injection or conflicting values accepted")
+		}
+	}
+}

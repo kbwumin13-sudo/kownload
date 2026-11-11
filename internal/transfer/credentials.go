@@ -61,6 +61,9 @@ func CredentialOrigin(raw string) (string, error) {
 func CredentialHeaders(input map[string]string) (http.Header, error) {
 	out := http.Header{}
 	for k, v := range input {
+		// Preserve the existing request builder's boundary-whitespace cleanup.
+		// Validate afterwards so embedded control characters stay forbidden.
+		v = strings.TrimSpace(v)
 		if !httpguts.ValidHeaderFieldName(k) || !httpguts.ValidHeaderFieldValue(v) {
 			return nil, ErrCredentialContext
 		}

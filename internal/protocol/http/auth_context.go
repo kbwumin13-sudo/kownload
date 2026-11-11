@@ -125,14 +125,31 @@ func outboundCredentialGuard(root string, ctx *transfer.TargetCredentials, jar h
 
 // Client.Do wraps transport errors with the request URL. New policy refusals
 // carry a fixed category so signed URLs do not reach task errors or logs.
-func doCredentialRequest(client *http.Client, req *http.Request) (*http.Response, error) {
-	response, err := client.Do(req)
+func credentialPolicyError(err error) error {
 	for _, category := range []error{transfer.ErrScopedContext, transfer.ErrCredentialContext} {
 		if errors.Is(err, category) {
-			return response, category
+			return category
 		}
 	}
+	return nil
+}
+
+func doCredentialRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	response, err := client.Do(req)
+	if category := credentialPolicyError(err); category != nil {
+		return response, category
+	}
 	return response, err
+}
+
+type credentialFailure struct{ err error }
+
+func (f *Fetcher) stopForCredentialFailure(conn *connection, err error) {
+	f.failSingleStream(conn, err)
+	f.policyFailure.CompareAndSwap(nil, &credentialFailure{err: err})
+	if f.cancel != nil {
+		f.cancel()
+	}
 }
 func normalizedExtra(req *base.Request) (*model.ReqExtra, error) {
 	if err := base.ParseReqExtra[model.ReqExtra](req); err != nil {
