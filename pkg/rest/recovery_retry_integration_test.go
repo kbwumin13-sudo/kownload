@@ -99,8 +99,51 @@ func TestRecoveryRetryBuildServerUserActionAndReplay(t *testing.T) {
 	}
 	allow.Store(true)
 	var reply recoveryReply
-	if err := json.Unmarshal(f.control(t, "POST", path+"/retry", request), &reply); err != nil || reply.Recovery.Receipt == nil || reply.Recovery.Receipt.State != "accepted" || reply.Recovery.Episode == state.Episode {
-		t.Fatal("missing accepted receipt", err, reply)
+	type result struct {
+		status int
+		body   []byte
+	}
+	results := make(chan result, 2)
+	var clicks sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		clicks.Add(1)
+		go func() {
+			defer clicks.Done()
+			status, body := f.request(t, "POST", path+"/retry", request, false)
+			results <- result{status, body}
+		}()
+	}
+	clicks.Wait()
+	close(results)
+	accepted := 0
+	for response := range results {
+		if response.status == 409 {
+			continue
+		}
+		var envelope struct {
+			Code int           `json:"code"`
+			Data recoveryReply `json:"data"`
+		}
+		if response.status != 200 || json.Unmarshal(response.body, &envelope) != nil || envelope.Code != 0 {
+			t.Fatal("double-click response", response.status, string(response.body))
+		}
+		reply = envelope.Data
+		if reply.Recovery.Receipt == nil || reply.Recovery.Episode == state.Episode {
+			t.Fatal("missing retry receipt", reply)
+		}
+		switch reply.Recovery.Receipt.State {
+		case "accepted":
+			accepted++
+		case "replayed":
+		default:
+			t.Fatal("unexpected receipt", reply)
+		}
+	}
+	if accepted != 1 {
+		t.Fatal("double-click fresh winner count", accepted)
+	}
+	if reply.DatasetID != identity.DatasetID || reply.Recovery.TaskID != id {
+		t.Fatal("wrong scoped receipt", reply)
 	}
 	for deadline := time.Now().Add(4 * time.Second); read().Status != "done"; {
 		if time.Now().After(deadline) {
