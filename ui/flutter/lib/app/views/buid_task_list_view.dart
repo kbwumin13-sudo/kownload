@@ -11,6 +11,7 @@ import '../../api/api.dart';
 import '../../api/model/request.dart';
 import '../../api/model/resolve_task.dart';
 import '../../api/model/task.dart';
+import '../modules/task/views/http_completion_status.dart';
 import '../../api/model/task_stats.dart';
 import '../../util/message.dart';
 import '../../util/util.dart';
@@ -42,12 +43,14 @@ class BuildTaskListView extends GetView {
   final List<Task> tasks;
   final List<String> selectedTaskIds;
   final bool macos;
+  final Map<String, HttpCompletionView> httpCompletions;
 
   const BuildTaskListView({
     Key? key,
     required this.tasks,
     required this.selectedTaskIds,
     this.macos = false,
+    this.httpCompletions = const {},
   }) : super(key: key);
 
   @override
@@ -652,7 +655,9 @@ class BuildTaskListView extends GetView {
     if (macos && Util.isMacos()) {
       final colors = MacColors.of(context);
       final extraction = getExtractionStatusText();
-      final status = task.handoff?.blocked == true
+      final httpCompletion =
+          task.protocol == Protocol.http ? httpCompletions[task.id] : null;
+      var status = task.handoff?.blocked == true
           ? task.handoff!.label
           : isDone()
               ? 'downloaded'.tr
@@ -675,6 +680,9 @@ class BuildTaskListView extends GetView {
                               : (Get.locale?.languageCode == 'zh'
                                   ? '准备中'
                                   : 'Ready');
+      if (task.handoff?.blocked != true && httpCompletion != null) {
+        status = httpCompletion.labelFor(task.status);
+      }
       void selectRow({bool pointer = false}) {
         (taskListController as MacTaskListController).selectRow(
           tasks.map<String>((Task item) => item.id).toList(),
