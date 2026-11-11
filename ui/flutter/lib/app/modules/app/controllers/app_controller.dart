@@ -42,6 +42,7 @@ import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
 import '../../../services/browser_integration.dart';
+import '../../../../identity/app_identity_rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
 import '../../../../macos/mac_panel.dart';
@@ -551,7 +552,12 @@ class AppController extends GetxController with WindowListener, TrayListener {
           await MacPanel.showTaskResult(ids, error);
         },
       );
+      final identityRpc = AppIdentityRpc(
+        socket: await Util.homePathJoin(AppIdentity.hostSocket),
+        preview: Util.isIsolatedPreview,
+      );
       await startRpcServer({
+        "/identity": identityRpc.handle,
         "/create": (ctx) => browserRpc.handle(
               ctx,
               create: true,

@@ -1,6 +1,7 @@
 import {readNetdiskPage} from './netdisk-page.js';
 import {newOperationId} from './lib.js';
 import {browserClientId} from './app-identity.js';
+import {createNativeSession} from './native-session.js';
 
 const entry = (id,name,hosts,apiHosts,roots) => ({id,name,hosts,apiHosts,roots});
 export const NETDISK_PROVIDERS = [
@@ -118,22 +119,16 @@ function restData(response) {
   return response.data.data;
 }
 function taskPort(chrome,timeoutMs) {
-  const port=chrome.runtime.connectNative('com.gopeed.gopeed');
+  const session=createNativeSession(chrome,{timeoutMs});
   let pending,closed=false,closedReason='stale_page',resolveClosed;
   const done=new Promise(resolve=>{resolveClosed=resolve;});
   function close(reason='stale_page') {
     if (closed) return;
     closed=true;closedReason=reason;clearTimeout(timer);resolveClosed(reason);
     if (pending) {const p=pending;pending=null;p.reject(new Error(reason));}
-    port.disconnect();
+    session.close();
   }
   const timer=setTimeout(()=>close('timeout'),timeoutMs);
-  port.onMessage.addListener(response=>{
-    if (!pending) return;
-    const p=pending;pending=null;
-    if (response?.code!==0) p.reject(new Error('native_error')); else p.resolve(response);
-  });
-  port.onDisconnect.addListener(()=>{void chrome.runtime.lastError;close('native_error');});
   const ensureOpen=()=>{if(closed) throw new Error(closedReason);};
   return {close,ensureOpen,guard(operation) {
     ensureOpen();
@@ -141,7 +136,13 @@ function taskPort(chrome,timeoutMs) {
   },send(message) {
     if (closed) return Promise.reject(new Error(closedReason));
     if (pending) return Promise.reject(new Error('native_error'));
-    return new Promise((resolve,reject)=>{pending={resolve,reject};try {port.postMessage(message);} catch {close('native_error');}});
+    return new Promise((resolve,reject)=>{
+      pending={resolve,reject};
+      session.send(message).then(response=>{
+        if(!pending)return;const p=pending;pending=null;
+        if(response?.code!==0)p.reject(new Error('native_error'));else p.resolve(response);
+      },()=>close('native_error'));
+    });
   }};
 }
 export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdiskPage}={}) {
@@ -212,7 +213,7 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
   async function run(type,sender) {
     const context=await senderContext(sender);
     if (jobs.has(context.tabId)) return {state:'busy'};
-    const job={};jobs.set(context.tabId,job);
+    const job={operationId:newOperationId()};jobs.set(context.tabId,job);
     try {
       await live(context);
       const port=job.port=taskPort(chrome,timeoutMs);
@@ -271,7 +272,7 @@ export function installNetdiskBridge(chrome,{timeoutMs=45000,readPage=readNetdis
       if(type==='NETDISK_CLICK') {
         const source={provider:context.provider.id,url:context.url,...pick(capture.share,new Set(['shareId','password','parentId']))};
         // Use our selected snapshot, never a server-returned whole listing.
-        await port.send({method:'create',meta:{silent:false},params:{req:{url:context.url,protocol:'netdisk',extra:{provider:context.provider.id,source,sessionId:data.sessionId,files:cleanNetdiskFiles(capture.files)}},opts:{}}});
+        await port.send({method:'create',operationId:job.operationId,meta:{silent:false},params:{req:{url:context.url,protocol:'netdisk',extra:{provider:context.provider.id,source,sessionId:data.sessionId,files:cleanNetdiskFiles(capture.files)}},opts:{}}});
       }
       return {state:type==='NETDISK_CLICK'?'confirm':'synced',count:capture.files.length};
     } finally {

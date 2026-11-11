@@ -96,7 +96,11 @@ function browser({running=true,claimed=true,files=[file],error,hook,timeoutMs=20
     runtime:{id:'extension-id',onMessage:{addListener(fn){handlers.push(fn);}},connectNative:()=>{
       const callbacks=[],disconnects=[];
       const port={closed:false,disconnect(){this.closed=true;},onMessage:{addListener:fn=>callbacks.push(fn)},onDisconnect:{addListener:fn=>disconnects.push(fn)},postMessage(message){
+        if(message.method==='hostInfo') {
+          queueMicrotask(()=>{if(!this.closed)for(const callback of callbacks)callback({code:0,data:{version:1,product:'kownload',nativeProtocol:1,identityProtocol:1,build:{preview:false},supportedHostNames:['io.github.kbwumin13_sudo.kownload'],callerOrigin:'chrome-extension://extension-id/',routeScope:'a'.repeat(64),app:{reachable:running,identity:running?{version:1,product:'kownload',identityProtocol:1,routeScope:'a'.repeat(64),build:{preview:false}}:null}}});});return;
+        }
         messages.push(structuredClone(message));
+        if(message.method==='wakeup')running=true;
         if(hook?.(message.method==='forward'?message.params.path:message.method,api)==='hang') return;
         queueMicrotask(()=>{
           if(this.closed) return;
@@ -122,7 +126,7 @@ function browser({running=true,claimed=true,files=[file],error,hook,timeoutMs=20
 test('passive ping while App stopped does not wake, claim, collect secrets or leave a native port',async()=>{
   const b=browser({running:false});assert.deepEqual(await b.send(),{state:'idle'});
   assert.deepEqual(b.messages.map(m=>m.method),['ping']);assert.equal(b.reads,0);assert.equal(b.scripts.length,0);assert(b.ports.every(p=>p.closed));
-  assert.deepEqual(b.memory,{});
+  assert.deepEqual(Object.keys(b.memory).sort(),['nativeBridgeBindingV1','netdiskInstanceId']);assert(!JSON.stringify(b.memory).includes('secret'));
   const stopped=browser({error:'dial unix socket: not running'});assert.deepEqual(await stopped.send(),{state:'idle'});assert.equal(stopped.scripts.length,0);assert.equal(stopped.reads,0);
 });
 test('no pending claim does not wake or extract; claimed session is captured without native create',async()=>{
@@ -141,6 +145,7 @@ test('explicit click wakes and submits selected-only session to non-silent Flutt
   const capture=b.messages[1].params.data.capture,create=b.messages[2];
   assert.equal(capture.tokens.stoken,'token-secret');assert.equal(capture.cookies[0].value,'cookie-secret');assert.equal(capture.cookies[0].expires,2000000000);
   assert.equal(create.meta.silent,false);assert.equal(create.params.req.protocol,'netdisk');assert.equal(create.params.req.extra.sessionId,'session-a');
+  assert.match(create.operationId,/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
   assert.deepEqual(create.params.req.extra.files,[file]);assert.equal(create.params.req.url,page);assert.deepEqual(create.params.opts,{});
   assert(!JSON.stringify(create).includes('token-secret'));assert(!JSON.stringify(create).includes('cookie-secret'));
   assert(b.queries.every(q=>q.storeId==='store-a'));assert.equal(b.queries.filter(q=>q.partitionKey).length,1);

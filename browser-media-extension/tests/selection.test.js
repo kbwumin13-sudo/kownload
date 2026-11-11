@@ -1,4 +1,4 @@
-import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
+import {identityReply,contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,7 +18,8 @@ async function popup({formats,kind='video',realBackground=false,accepted=false}=
   const info={supported:true,title:'属于这个播放器的标题',duration:65,thumbnail:'https://cdn.test/poster.jpg',formats:[{id:'v',height:720,ext:'mp4',vcodec:'h264',acodec:'none'},{id:'en',ext:'m4a',vcodec:'none',acodec:'aac',language:'en'},{id:'es',ext:'m4a',vcodec:'none',acodec:'aac',language:'es'}],subtitles:[{language:'en',name:'English',automatic:false},{language:'zh-Hans',name:'中文',automatic:true}]};
   if(formats)info.formats=formats;
   const document={body:new Element(),getElementById:get,querySelectorAll:()=>[],createElement:tag=>new Element(tag)};
-  const chrome={tabs:{get:async()=>({id:1,url:'https://page.test/watch'})},storage:{local:{get:async()=>({})}},runtime:{onMessage:{addListener(){}},sendMessage:async m=>{requests.push(m);return {ok:true,data:m.type==='LIST'?[{id:'one',kind:'video',url:'https://cdn.test/opaque',mediaRequired:true}]:m.type==='INSPECT'?info:m.type==='CONFIG'?{}:m.type==='CREATE'?{taskId:'one-task'}:false};}}};
+  const local={netdiskInstanceId:'selection-profile'};
+  const chrome={tabs:{get:async()=>({id:1,url:'https://page.test/watch'})},storage:{local:{get:async()=>structuredClone(local),set:async v=>Object.assign(local,structuredClone(v))}},runtime:{id:'test',onMessage:{addListener(){}},sendMessage:async m=>{requests.push(m);return {ok:true,data:m.type==='LIST'?[{id:'one',kind:'video',url:'https://cdn.test/opaque',mediaRequired:true}]:m.type==='INSPECT'?info:m.type==='CONFIG'?{}:m.type==='CREATE'?{taskId:'one-task'}:false};}}};
   const nativeRequests=[];
   if(realBackground){
     let handler;
@@ -33,6 +34,7 @@ async function popup({formats,kind='video',realBackground=false,accepted=false}=
     chrome.runtime.onMessage={addListener(fn){handler=fn;}};
     chrome.runtime.sendMessage=async m=>{requests.push(m);return m.type==='CHANGED'?undefined:new Promise(resolve=>handler(m,{},resolve));};
     chrome.runtime.sendNativeMessage=(_,m,cb)=>{
+      const identity=identityReply(m);if(identity){cb(identity);return;}
       nativeRequests.push(m);
       if(m.method==='create'&&accepted){cb(contractReply(m,{code:0,httpStatus:202,data:{code:0,data:null,submission:{state:'accepted',taskIds:[]}}}));return;}
       const data=m.params?.path==='/api/v1/media/inspect'?info:m.params?.method==='GET'&&m.params.path.startsWith('/api/v1/tasks?')?[{id:'paused-task',status:'pause',protocol:'media',meta:{req:{extra:{sourcePage:'https://page.test/watch'}}}}]:m.params?.path==='/api/v1/config'?{}:'one-task';
