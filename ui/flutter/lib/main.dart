@@ -27,6 +27,8 @@ import 'macos/mac_panel.dart';
 import 'identity/bootstrap.dart';
 import 'identity/bootstrap_error_page.dart';
 import 'identity/app_identity.dart';
+import 'identity/startup_policy.dart';
+import 'identity/startup_review_notice.dart';
 import 'app/modules/task/controllers/task_controller.dart';
 
 class StartupArgs {
@@ -60,8 +62,9 @@ void main(List<String> arguments) async {
 
   final args = StartupArgs.parse(arguments);
 
+  late IdentityStartupPolicy policy;
   try {
-    await init(args);
+    policy = await init(args);
   } on IdentityBootstrapException catch (e) {
     runApp(
         MaterialApp(home: BootstrapErrorPage(error: e, onQuit: () => exit(0))));
@@ -74,15 +77,20 @@ void main(List<String> arguments) async {
   onStart();
 
   runApp(const AppView());
+  if (policy.requiresReview) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Get.dialog<void>(IdentityStartupReviewNotice(policy: policy));
+    });
+  }
 }
 
-Future<void> init(StartupArgs args) async {
+Future<IdentityStartupPolicy> init(StartupArgs args) async {
   // Note: WidgetsFlutterBinding.ensureInitialized() is already called in main()
   if (Util.isMobile()) {
     FlutterForegroundTask.initCommunicationPort();
   }
   await Util.initStorageDir(previewStorage: args.previewStorage);
-  await bootstrapIdentity();
+  final policy = await bootstrapIdentity();
   await Database.instance.init();
   if (Util.isDesktop()) {
     await windowManager.ensureInitialized();
@@ -139,6 +147,7 @@ Future<void> init(StartupArgs args) async {
   try {
     await controller.loadStartConfig();
     final startCfg = controller.startConfig.value;
+    startCfg.startupTaskPolicy = policy.mode;
     controller.runningPort.value = await LibgopeedBoot.instance.start(startCfg);
     api.init(startCfg.network, controller.runningAddress(), startCfg.apiToken);
   } catch (e) {
@@ -160,16 +169,23 @@ Future<void> init(StartupArgs args) async {
   }
 
   // Auto-start incomplete tasks if enabled
-  if (!Util.isIsolatedPreview &&
-      controller.downloaderConfig.value.extra.autoStartTasks) {
-    try {
-      await resumeStartupTasks(
+  try {
+    final resumed = await resumeIdentityTasks(
+      policy: policy,
+      isolated: Util.isIsolatedPreview,
+      autoStartTasks: controller.downloaderConfig.value.extra.autoStartTasks,
+      resume: () => resumeStartupTasks(
           load: () => api.getTasks(Status.values),
-          resume: (ids) => api.continueAllTasks(ids));
-      logger.i("auto-start tasks completed");
-    } catch (e) {
-      logger.w("auto-start tasks fail", e);
+          resume: (ids) => api.continueAllTasks(ids)),
+    );
+    if (resumed) {
+      logger.i('auto-start tasks completed');
     }
+    if (policy.requiresReview) {
+      logger.w('imported tasks require explicit review');
+    }
+  } catch (e) {
+    logger.w('auto-start tasks fail', e);
   }
 
   () async {
@@ -194,6 +210,7 @@ Future<void> init(StartupArgs args) async {
       // Browser manifests are switched only by an explicit installation action.
     }
   }();
+  return policy;
 }
 
 Future<void> onStart() async {

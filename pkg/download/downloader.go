@@ -96,9 +96,10 @@ type Progress struct {
 }
 
 type Downloader struct {
-	handoffMu       sync.Mutex
-	Logger          *logger.Logger
-	ExtensionLogger *logger.Logger
+	handoffMu         sync.Mutex
+	startupTaskPolicy StartupTaskPolicy
+	Logger            *logger.Logger
+	ExtensionLogger   *logger.Logger
 
 	cfg          *DownloaderConfig
 	fetcherCache map[string]fetcher.Fetcher
@@ -145,10 +146,11 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 	cfg.Init()
 
 	d := &Downloader{
-		cfg:          cfg,
-		fetcherCache: make(map[string]fetcher.Fetcher),
-		waitTasks:    make([]*Task, 0),
-		storage:      cfg.Storage,
+		startupTaskPolicy: cfg.StartupTaskPolicy,
+		cfg:               cfg,
+		fetcherCache:      make(map[string]fetcher.Fetcher),
+		waitTasks:         make([]*Task, 0),
+		storage:           cfg.Storage,
 
 		lock:               &sync.Mutex{},
 		fetcherMapLock:     &sync.RWMutex{},
@@ -170,6 +172,9 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 }
 
 func (d *Downloader) Setup() error {
+	if !d.startupTaskPolicy.Valid() {
+		return ErrStartupTaskPolicy
+	}
 	// setup storage
 	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage}); err != nil {
 		return err
@@ -246,12 +251,17 @@ func (d *Downloader) Setup() error {
 	d.extensionLock.Unlock()
 
 	// Auto-cleanup non-existing tasks on startup
-	d.cleanupNonExistingTasks()
+	if d.startupTaskPolicy != StartupTaskPolicyImportedReview {
+		d.cleanupNonExistingTasks()
+	}
 
 	// Restore uploads only from this startup's task snapshot.
 	uploadTasks := d.taskList()
 	go func() {
 		for _, task := range uploadTasks {
+			if d.startupTaskPolicy == StartupTaskPolicyImportedReview {
+				continue
+			}
 			task.lock.Lock()
 			task.statusLock.Lock()
 			if task.getStatus() == base.DownloadStatusDone && task.Uploading {
@@ -811,6 +821,9 @@ func (d *Downloader) pauseAll() (err error) {
 
 // Continue specific tasks, if continue tasks will exceed maxRunning, it needs pause some running tasks before that
 func (d *Downloader) Continue(filter *TaskFilter) (err error) {
+	if err := d.checkStartupContinue(filter); err != nil {
+		return err
+	}
 	if filter == nil || filter.IsEmpty() {
 		return d.continueAll()
 	}
@@ -890,6 +903,9 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 
 // continueAll continue all tasks but does not affect tasks already running
 func (d *Downloader) continueAll() (err error) {
+	if err := d.checkStartupContinue(nil); err != nil {
+		return err
+	}
 	continuedTasks := make([]*Task, 0)
 
 	func() {
@@ -919,6 +935,9 @@ func (d *Downloader) continueAll() (err error) {
 }
 
 func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
+	if err := d.checkStartupContinue(filter); err != nil {
+		return err
+	}
 	if filter == nil || filter.IsEmpty() {
 		return d.continueAll()
 	}

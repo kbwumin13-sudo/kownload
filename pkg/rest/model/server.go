@@ -21,6 +21,8 @@ type StartConfig struct {
 	WhiteDownloadDirs []string                    `json:"whiteDownloadDirs"`
 	ApiToken          string                      `json:"apiToken"`
 	DownloadConfig    *base.DownloaderStoreConfig `json:"downloadConfig"`
+	// Launch-scoped; never merged into the persisted download configuration.
+	StartupTaskPolicy string `json:"startupTaskPolicy,omitempty"`
 
 	ProductionMode bool
 

@@ -229,6 +229,8 @@ type DownloaderConfig struct {
 	Storage           Storage
 	StorageDir        string
 	WhiteDownloadDirs []string
+	// StartupTaskPolicy is launch-scoped, never part of DownloaderStoreConfig.
+	StartupTaskPolicy StartupTaskPolicy `json:"startupTaskPolicy,omitempty"`
 
 	ProductionMode bool
 
