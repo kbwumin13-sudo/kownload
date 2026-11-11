@@ -138,8 +138,15 @@ publish/clear/access及测试。12/11不写model/watch/HTTP/batch。14新REST薄
 
 ## REST 首增量的验证边界
 
-专用receiver和公开projection formatter可先在独立候选验证；真实BuildServer暂仅从所绑定
-Core只读核dataset并返回supported:false，create/query/cancel均明确unsupported，不回退旧
+专用receiver和公开projection formatter可先在独立候选验证；真实BuildServer已薄接所绑定
+Core的四个typed ForDataset方法，当前Core只读核dataset并返回supported:false，
+create/query/cancel均明确unsupported，不回退旧
 API、不会把无校验Task当校验任务。正例注入仅位于测试。真实Core typedR/三方guard/Fence/C/
 published snapshot未接通时，不启用能力，也不装饰普通Task/list的phase；该部分须待同源
 Core×API×UI/MCP交集验证。此增量不修改build40已交包。
+
+adapter将outer version/requiredCapability填入typed Integrity，不塞Extra或重算raw/options；
+未知Core能力版本/名称fail closed。nullable projection按字段保留版本/关联，空string为null，
+RecordedMatch保nil且不共享指针；公开formatter再核shape，不给坏view补成可信数据。
+typed invalid_verified_http_request与unsupported_option均HTTP400/code1000，完整能力未接为
+501/verified_http_unsupported；partial/错域沿前述约定，不透传module error。

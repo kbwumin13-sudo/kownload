@@ -51,40 +51,6 @@ type verifiedHTTPCore interface {
 	cancel(string, string) (verifiedHTTPResult, error)
 }
 
-// Completion storage, lifecycle fencing and published snapshots are not wired
-// yet. This captured owner can only read identity and decline the new pipeline;
-// it must never turn verified requests into legacy unverified operations.
-type unavailableVerifiedHTTP struct{ core *download.Downloader }
-
-func (b unavailableVerifiedHTTP) capability(expected string) (bool, error) {
-	identity, err := b.core.DatasetIdentity()
-	if err != nil {
-		return false, err
-	}
-	if identity.Version != 1 || !scopedDatasetPattern.MatchString(identity.DatasetID) {
-		return false, download.ErrDatasetInvalid
-	}
-	if identity.DatasetID != expected {
-		return false, download.ErrDatasetMismatch
-	}
-	return false, nil
-}
-func (b unavailableVerifiedHTTP) unsupported(expected string) (verifiedHTTPResult, error) {
-	if _, err := b.capability(expected); err != nil {
-		return verifiedHTTPResult{}, err
-	}
-	return verifiedHTTPResult{}, errVerifiedHTTPUnsupported
-}
-func (b unavailableVerifiedHTTP) create(_ context.Context, expected string, _ verifiedHTTPRequest) (verifiedHTTPResult, error) {
-	return b.unsupported(expected)
-}
-func (b unavailableVerifiedHTTP) query(expected, _ string) (verifiedHTTPResult, error) {
-	return b.unsupported(expected)
-}
-func (b unavailableVerifiedHTTP) cancel(expected, _ string) (verifiedHTTPResult, error) {
-	return b.unsupported(expected)
-}
-
 type verifiedCapabilityResult struct {
 	ScopeVersion      int               `json:"scopeVersion"`
 	DatasetID         string            `json:"datasetId"`
@@ -188,8 +154,12 @@ func writeVerifiedOperation(w http.ResponseWriter, domain, id string, result ver
 		message, domainFailed = "dataset_unavailable", true
 	case errors.Is(err, download.ErrDatasetUnsupported):
 		status, message, domainFailed = http.StatusNotImplemented, "dataset_identity_storage_unsupported", true
-	case errors.Is(err, errVerifiedHTTPUnsupported):
+	case errors.Is(err, errVerifiedHTTPUnsupported), errors.Is(err, download.ErrVerifiedHTTPUnsupported):
 		status, message, domainFailed = http.StatusNotImplemented, "verified_http_unsupported", true
+	case errors.Is(err, download.ErrVerifiedHTTPInvalid):
+		status, message = http.StatusBadRequest, "invalid_verified_http_request"
+	case errors.Is(err, download.ErrVerifiedHTTPUnsupportedOption):
+		status, message = http.StatusBadRequest, "unsupported_option"
 	case errors.Is(err, download.ErrOperationInvalid):
 		status, message = http.StatusBadRequest, "invalid_operation_request"
 	case errors.Is(err, download.ErrOperationConflict):
