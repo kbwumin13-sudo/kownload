@@ -6,6 +6,7 @@ import io
 import json
 import pathlib
 import shutil
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -21,6 +22,119 @@ def load(name, filename):
 
 build = load('kownload_build_test', 'build-macos.py')
 notices = load('kownload_notice_test', 'collect-macos-notices.py')
+
+
+class PreviewHomeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='p', dir='/private/tmp')
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.home = self.root / 'h'
+        self.home.mkdir(mode=0o700)
+        self.identity = {'bundleId': 'io.github.kbwumin13-sudo.kownload',
+                         'apiSocket': 'ipc/api.sock', 'hostSocket': 'ipc/host.sock'}
+
+    def storage(self, home=None, identity=None):
+        return build.private_preview_storage(home or self.home, identity or self.identity)
+
+    def test_standard_root_is_selected_without_creating_it(self):
+        expected = self.home / 'Library/Application Support' / self.identity['bundleId']
+        self.assertEqual(self.storage(), expected)
+        self.assertFalse((self.home / 'Library').exists())
+        self.assertEqual(self.storage(), expected)
+
+    def test_invalid_home_type_alias_or_scope_refuses(self):
+        file = self.root / 'file'
+        file.write_bytes(b'keep')
+        link = self.root / 'link'
+        link.symlink_to(self.home, target_is_directory=True)
+        for home in [pathlib.Path('relative'), pathlib.Path('/private/tmp'),
+                     pathlib.Path('/tmp') / self.root.name / 'h', file, link,
+                     self.root / 'missing', self.root / 'h/../h']:
+            with self.subTest(home=home), self.assertRaises(RuntimeError):
+                self.storage(home)
+        self.assertEqual(file.read_bytes(), b'keep')
+
+    def test_unsafe_owner_and_permissions_refuse_without_changes(self):
+        before = self.home.stat()
+        with mock.patch.object(build.os, 'getuid', return_value=before.st_uid + 1):
+            with self.assertRaisesRegex(RuntimeError, 'owner'):
+                self.storage()
+        self.home.chmod(0o770)
+        with self.assertRaisesRegex(RuntimeError, 'permissions'):
+            self.storage()
+        self.assertEqual(self.home.stat().st_mode & 0o777, 0o770)
+
+    def test_existing_standard_root_ancestors_are_validated(self):
+        library = self.home / 'Library'
+        library.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.storage()
+        library.unlink()
+        library.write_bytes(b'keep non-directory')
+        with self.assertRaises(RuntimeError):
+            self.storage()
+        self.assertEqual(library.read_bytes(), b'keep non-directory')
+        library.unlink()
+        library.mkdir(mode=0o700)
+        library.chmod(0o777)
+        with self.assertRaisesRegex(RuntimeError, 'permissions'):
+            self.storage()
+        self.assertEqual(library.stat().st_mode & 0o777, 0o777)
+
+    def test_inspection_permission_failure_propagates_without_writing(self):
+        with mock.patch.object(pathlib.Path, 'lstat', side_effect=PermissionError('fixture')):
+            with self.assertRaisesRegex(RuntimeError, 'cannot be inspected'):
+                self.storage()
+        self.assertFalse((self.home / 'Library').exists())
+
+    def test_existing_ipc_link_refuses_without_following_or_modifying_it(self):
+        storage = self.storage()
+        storage.mkdir(parents=True, mode=0o700)
+        target = self.root / 'elsewhere'
+        target.mkdir(mode=0o700)
+        (target / 'keep').write_bytes(b'unchanged')
+        (storage / 'ipc').symlink_to(target, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.storage()
+        self.assertTrue((storage / 'ipc').is_symlink())
+        self.assertEqual((target / 'keep').read_bytes(), b'unchanged')
+
+    def test_socket_limit_uses_utf8_bytes_and_rejects_unsafe_identity(self):
+        unicode_home = self.root / ('界' * 3)
+        unicode_home.mkdir(mode=0o700)
+        socket = unicode_home / 'Library/Application Support' / self.identity['bundleId'] / 'ipc/host.sock'
+        self.assertLessEqual(len(str(socket)), 103)
+        self.assertGreater(len(str(socket).encode('utf-8')), 103)
+        with self.assertRaisesRegex(RuntimeError, 'socket'):
+            self.storage(unicode_home)
+        for changes in [{'hostSocket': '../host.sock'}, {'apiSocket': '/api.sock'},
+                        {'bundleId': '../other'}, {'hostSocket': 'ipc/' + 'x' * 104}]:
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                self.storage(identity={**self.identity, **changes})
+
+    def test_main_rejects_before_creating_any_build_destination(self):
+        config = self.root / 'repo/config'
+        config.mkdir(parents=True)
+        (config / 'identity.json').write_text(json.dumps(self.identity))
+        destination = self.root / 'output'
+        work = self.root / 'work'
+        invalid = self.root / 'missing'
+        cases = [[ '--preview-home', str(self.home)],
+                 ['--preview', '--preview-home', str(invalid)]]
+        for extra in cases:
+            argv = ['build-macos.py', '--output', str(destination), '--work-dir', str(work), *extra]
+            with self.subTest(extra=extra), mock.patch.object(sys, 'argv', argv), \
+                 mock.patch.object(build, 'REPO', config.parent), \
+                 mock.patch.object(build, 'output', side_effect=['', 'a' * 40, 'a' * 40]), \
+                 mock.patch.object(build, 'run') as run, \
+                 mock.patch.object(build.subprocess, 'check_output') as subprocess_output:
+                with self.assertRaises((SystemExit, RuntimeError)):
+                    build.main()
+                run.assert_not_called()
+                subprocess_output.assert_not_called()
+                self.assertFalse(destination.exists())
+                self.assertFalse(work.exists())
 
 
 class PackageTests(unittest.TestCase):
