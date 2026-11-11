@@ -636,7 +636,7 @@ func (d *Downloader) readAfterOperationError(id string, cause error) (BatchOpera
 func (d *Downloader) CancelBatchOperation(id string) (BatchOperationResult, error) {
 	return d.cancelBatchOperationInDataset(id, "")
 }
-func (d *Downloader) cancelBatchOperationInDataset(id, dataset string) (BatchOperationResult, error) {
+func (d *Downloader) cancelBatchOperationInDataset(id, dataset string, requireIntegrity ...bool) (BatchOperationResult, error) {
 	if !operationIDPattern.MatchString(id) {
 		return BatchOperationResult{}, ErrOperationInvalid
 	}
@@ -662,6 +662,9 @@ func (d *Downloader) cancelBatchOperationInDataset(id, dataset string) (BatchOpe
 			return nil
 		}
 		if !r.valid() || r.OperationID != id {
+			return ErrOperationConflict
+		}
+		if len(requireIntegrity) > 0 && requireIntegrity[0] && (r.Integrity == nil || !r.Integrity.valid()) {
 			return ErrOperationConflict
 		}
 		for i := range r.Members {
