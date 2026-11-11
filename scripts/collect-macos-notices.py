@@ -26,6 +26,27 @@ def binary_modules(go, binary):
     return modules
 
 
+def module_source(go, repo, module):
+    name, version, checksum = module['module'], module['version'], module['sum']
+    # Nested dependencies may not occur in the root go.sum. Use the reviewed
+    # lock that owns both checksums, instead of updating the root or requiring
+    # a fresh sumdb lookup for an already locked nested module.
+    for directory in [repo, repo / 'cmd/kownload-mcp']:
+        lock = directory / 'go.sum'
+        if not lock.is_file():
+            continue
+        lines = lock.read_text().splitlines()
+        if (not checksum or f'{name} {version} {checksum}' not in lines or
+                not any(line.startswith(f'{name} {version}/go.mod h1:') for line in lines)):
+            continue
+        meta = json.loads(run(go, 'mod', 'download', '-json', name + '@' + version, cwd=directory))
+        if ('Error' in meta or meta.get('Path') != name or
+                meta.get('Version') != version or meta.get('Sum') != checksum):
+            raise RuntimeError('Go module source differs from binary: ' + name)
+        return meta
+    raise RuntimeError('Go module has no matching source lock: ' + name + '@' + version)
+
+
 def collect(repo, destination, binaries, go, flutter):
     destination.mkdir(parents=True, exist_ok=True)
     for name in ['LICENSE', 'THIRD_PARTY_NOTICES.md']:
@@ -37,9 +58,7 @@ def collect(repo, destination, binaries, go, flutter):
             modules[(module['module'], module['version'])] = module['sum']
     index = []
     for (name, version), checksum in sorted(modules.items()):
-        meta = json.loads(run(go, 'mod', 'download', '-json', name + '@' + version, cwd=repo))
-        if 'Error' in meta:
-            raise RuntimeError('Go module source unavailable: ' + name)
+        meta = module_source(go, repo, {'module': name, 'version': version, 'sum': checksum})
         root = pathlib.Path(meta['Dir'])
         legal = [p for p in root.iterdir() if p.is_file() and
                  re.match(r'(?i)(licen[sc]e|copying|notice|copyright|patents)', p.name)]

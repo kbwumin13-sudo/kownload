@@ -143,18 +143,24 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('mcp', self.manifest)
 
     def test_nested_dependencies_and_root_sources_share_complete_archive(self):
-        deps = [{'module': 'example.invalid/core', 'version': 'v1.0.0'},
-                {'module': 'github.com/modelcontextprotocol/go-sdk', 'version': 'v1.7.0'}]
+        deps = [{'module': 'example.invalid/core', 'version': 'v1.0.0', 'sum': 'h1:core'},
+                {'module': 'github.com/modelcontextprotocol/go-sdk', 'version': 'v1.7.0', 'sum': 'h1:sdk'}]
         nested = {'modulePath': 'cmd/kownload-mcp', 'modules': [deps[1]]}
         zips = {}
         for i, dep in enumerate(deps):
             z = self.root / f'module-{i}.zip'
             z.write_bytes(b'original source zip ' + dep['module'].encode())
             zips[dep['module'] + '@' + dep['version']] = str(z)
+            context = self.root if i == 0 else self.root / 'cmd/kownload-mcp'
+            context.mkdir(parents=True, exist_ok=True)
+            (context / 'go.sum').write_text(f"{dep['module']} {dep['version']} {dep['sum']}\n{dep['module']} {dep['version']}/go.mod h1:mod\n")
         def metadata(*args, **kwargs):
-            return json.dumps({'Zip': zips[args[-1]]})
+            i = 0 if args[-1].startswith('example.invalid/core@') else 1
+            dep = deps[i]
+            self.assertEqual(kwargs['cwd'], self.root if i == 0 else self.root / 'cmd/kownload-mcp')
+            return json.dumps({'Path': dep['module'], 'Version': dep['version'], 'Sum': dep['sum'], 'Zip': zips[args[-1]]})
         archive = self.root / 'source.tar.gz'
-        with tarfile.open(archive, 'w:gz') as bundle, mock.patch.object(build, 'output', metadata):
+        with tarfile.open(archive, 'w:gz') as bundle, mock.patch.object(build, 'load', return_value=notices), mock.patch.object(notices, 'run', metadata):
             original = b'original tracked source'
             entry = tarfile.TarInfo('cmd/kownload-mcp/go.mod')
             entry.size = len(original)
@@ -172,6 +178,50 @@ class PackageTests(unittest.TestCase):
         with mock.patch.object(notices, 'run', return_value=raw):
             self.assertEqual(notices.binary_modules('go', self.helper),
                              [{'module': 'github.com/modelcontextprotocol/go-sdk', 'version': 'v1.7.0', 'sum': 'h1:fixture'}])
+
+    def test_notices_use_nested_locked_checksums_without_mutating_root(self):
+        nested = self.root / 'cmd/kownload-mcp'
+        nested.mkdir(parents=True)
+        module = 'example.invalid/nested'
+        lock = f'{module} v1.0.0 h1:fixture\n{module} v1.0.0/go.mod h1:mod\n'
+        (nested / 'go.sum').write_text(lock)
+        (self.root / 'go.sum').write_text('# unchanged root lock\n')
+        (self.root / 'third_party').mkdir()
+        for name in ['LICENSE', 'THIRD_PARTY_NOTICES.md']:
+            (self.root / name).write_text(name)
+        dep = self.root / 'module'; dep.mkdir(); (dep / 'LICENSE').write_text('original license')
+        goroot = self.root / 'go'; goroot.mkdir(); (goroot / 'LICENSE').write_text('Go license')
+        flutter = self.root / 'flutter'; flutter.mkdir(); (flutter / 'LICENSE').write_text('Flutter license')
+        pods = self.root / 'ui/flutter/macos/Pods/Target Support Files/Pods-Runner/Pods-Runner-acknowledgements.plist'
+        pods.parent.mkdir(parents=True); pods.write_text('native acknowledgements')
+
+        def query(*args, **kwargs):
+            if args[1:3] == ('version', '-m'):
+                return f'binary:\n\tdep\t{module}\tv1.0.0\th1:fixture\n'
+            if args[1:4] == ('mod', 'download', '-json'):
+                self.assertEqual(kwargs['cwd'], nested)
+                return json.dumps({'Path': module, 'Version': 'v1.0.0', 'Sum': 'h1:fixture', 'Dir': str(dep)})
+            self.assertEqual(args[1:], ('env', 'GOROOT'))
+            return str(goroot)
+
+        with mock.patch.object(notices, 'run', query):
+            result = notices.collect(self.root, self.root / 'legal', [self.helper], 'go', flutter)
+        self.assertEqual(result[0]['sum'], 'h1:fixture')
+        self.assertEqual((self.root / 'go.sum').read_text(), '# unchanged root lock\n')
+        self.assertEqual((nested / 'go.sum').read_text(), lock)
+
+    def test_unknown_module_lock_and_mismatched_source_refuse(self):
+        dep = {'module': 'example.invalid/core', 'version': 'v1.0.0', 'sum': 'h1:expected'}
+        with mock.patch.object(notices, 'run') as query:
+            with self.assertRaisesRegex(RuntimeError, 'no matching source lock'):
+                notices.module_source('go', self.root, dep)
+            query.assert_not_called()
+        (self.root / 'go.sum').write_text('example.invalid/core v1.0.0 h1:expected\nexample.invalid/core v1.0.0/go.mod h1:mod\n')
+        for patch in [{'Path': 'other'}, {'Version': 'v2.0.0'}, {'Sum': 'h1:other'}, {'Error': 'unavailable'}]:
+            meta = {'Path': dep['module'], 'Version': dep['version'], 'Sum': dep['sum'], **patch}
+            with self.subTest(patch=patch), mock.patch.object(notices, 'run', return_value=json.dumps(meta)):
+                with self.assertRaisesRegex(RuntimeError, 'differs from binary'):
+                    notices.module_source('go', self.root, dep)
 
 
 if __name__ == '__main__':

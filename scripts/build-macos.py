@@ -121,8 +121,9 @@ def add_module_sources(bundle, modules, go, source, mcp_index=None):
         bundle.addfile(member, io.BytesIO(data))
     # Includes the union of dependencies actually linked by the engine, hosts
     # and nested MCP module. Exact module ZIPs are shared, not omitted/doubled.
+    notices = load('kownload_source_notices', source / 'scripts/collect-macos-notices.py')
     for module in modules:
-        meta = json.loads(output(go, 'mod', 'download', '-json', module['module'] + '@' + module['version'], cwd=source))
+        meta = notices.module_source(go, source, module)
         bundle.add(meta['Zip'], arcname='dependency-sources/go/' + pathlib.Path(meta['Zip']).name.replace('.zip', '') + '-' + hashlib.sha256(module['module'].encode()).hexdigest()[:12] + '.zip')
 
 

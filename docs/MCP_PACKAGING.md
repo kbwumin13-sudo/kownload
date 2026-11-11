@@ -27,7 +27,8 @@ stdio 桥及对应源码均来自同一已提交 Git archive。builder 必须先
 `kownload-mcp <mcp.version> read-api=1`。`sdkVersion` 是固定 Go SDK 版本，
 不冒充客户端实际协商的 MCP 协议版本；本合同不填猜测的 spec 支持列表。
 
-先 strip/sign 内层 Mach-O 和 frameworks，再计算 Helper 摘要写 manifest，最后封签 App。
+先处理内层 Mach-O 和 frameworks；MCP Helper 已由 Go `-w -s` 构建，不再执行
+Apple strip（其 cgo 间接符号可能被拒绝），仍正常签名。再计算 Helper 摘要写 manifest，最后封签 App。
 App 签名不使用递归 `--deep --force`；签完严格验证 App，重新核 Helper 摘要和版本。
 最终 DMG 只读挂载后再次核嵌入 manifest 与 Helper 字节摘要。ad-hoc 只证明本次包的
 一致性，不是发布者认证、Apple 公证或系统信任授权。
@@ -37,6 +38,8 @@ App 签名不使用递归 `--deep --force`；签完严格验证 App，重新核 
 `legal/mcp-module-licenses/` 原字节保留该模块许可及 SDK 迁移说明。
 对应源码包保留原 Git 源码（含 nested 模块、go.mod/go.sum/licenses）、根依赖索引及 ZIP，
 并追加 MCP 索引与实际 nested 依赖 ZIP；相同模块归档可共用，不遗漏或升级依赖。
+下载许可和源码 ZIP 时使用包含该依赖固定 checksum 的根或 nested `go.sum` 上下文，
+并与实际二进制中的版本和 checksum 对照；不向根锁文件补写 nested 依赖或跳过校验。
 完整来源与许可判断仍须 S8 分发审查。
 
 后续可信部署 CLI 显式选择 App 与受管 data root，验证上述配对、签名、摘要和版本后，
