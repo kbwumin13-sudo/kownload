@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,11 @@ import (
 	"github.com/GopeedLab/gopeed/pkg/base"
 	gojaerror "github.com/GopeedLab/gopeed/pkg/download/engine/inject/error"
 	"github.com/dop251/goja"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
+	gitfile "github.com/go-git/go-git/v5/plumbing/transport/file"
 )
 
 func TestDownloader_InstallExtensionByFolder(t *testing.T) {
@@ -52,54 +58,93 @@ func TestDownloader_InstallExtensionByFolderDevMode(t *testing.T) {
 }
 
 func TestDownloader_InstallExtensionByGit(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByGit("https://github.com/GopeedLab/gopeed-extension-samples#github-release-sample"); err != nil {
-			t.Fatal(err)
-		}
-		rr, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/GopeedLab/gopeed/releases",
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rr.Res.Files) == 1 {
-			t.Fatal("resolve error")
-		}
-	})
+	testInstallExtensionByGit(t, "https://fixture.invalid/extensions#basic")
 }
 
 func TestDownloader_InstallExtensionByGitSimple(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByGit("github.com/GopeedLab/gopeed-extension-samples#github-release-sample"); err != nil {
-			t.Fatal(err)
-		}
-		rr, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/GopeedLab/gopeed/releases",
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rr.Res.Files) == 1 {
-			t.Fatal("resolve error")
-		}
-	})
+	testInstallExtensionByGit(t, "fixture.invalid/extensions#basic")
 }
 
 func TestDownloader_InstallExtensionByGitFull(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByGit("https://github.com/GopeedLab/gopeed-extension-samples.git#github-release-sample"); err != nil {
-			t.Fatal(err)
-		}
-		rr, err := downloader.Resolve(&base.Request{
-			URL: "https://github.com/GopeedLab/gopeed/releases",
-		}, nil)
+	testInstallExtensionByGit(t, "https://fixture.invalid/extensions.git#basic")
+}
+
+// These tests verify URL normalization, cloning a subdirectory, installation,
+// and script execution without fetching a changing upstream or its release API.
+// Do not run them in parallel: go-git's transport registry is process-global.
+func testInstallExtensionByGit(t *testing.T, installURL string) {
+	t.Helper()
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repoDir, "basic"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"manifest.json", "index.js"} {
+		data, err := os.ReadFile(filepath.Join("testdata", "extensions", "basic", name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(rr.Res.Files) == 1 {
-			t.Fatal("resolve error")
+		if err := os.WriteFile(filepath.Join(repoDir, "basic", name), data, 0600); err != nil {
+			t.Fatal(err)
 		}
-	})
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("basic"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Commit("extension test fixture", &git.CommitOptions{
+		Author: &object.Signature{Name: "Fixture", Email: "fixture@example.invalid", When: time.Unix(1, 0)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := gitclient.Protocols["https"]
+	gitclient.InstallProtocol("https", extensionGitFixtureTransport{Transport: gitfile.DefaultClient, repoDir: repoDir})
+	t.Cleanup(func() { gitclient.InstallProtocol("https", previous) })
+
+	downloader := extensionTestDownloader(t)
+	ext, err := downloader.InstallExtensionByGit(installURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.Name != "basic" || ext.DevMode || len(downloader.GetExtensions()) != 1 {
+		t.Fatalf("unexpected installed extension: name=%q devMode=%v", ext.Name, ext.DevMode)
+	}
+	rr, err := downloader.Resolve(&base.Request{URL: "https://github.com/test"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Res.Name != "test" || len(rr.Res.Files) != 2 {
+		t.Fatalf("unexpected fixture resolution: name=%q files=%d", rr.Res.Name, len(rr.Res.Files))
+	}
+	for i, file := range rr.Res.Files {
+		if file.Size != 1024 || file.Req.Labels["from"] != "basic" {
+			t.Fatalf("fixture file %d did not come from installed script", i)
+		}
+	}
+}
+
+// Map only the expected normalized URL to a local repository. The file transport
+// uses git-upload-pack, preserving the production shallow-clone behavior.
+type extensionGitFixtureTransport struct {
+	transport.Transport
+	repoDir string
+}
+
+func (f extensionGitFixtureTransport) NewUploadPackSession(endpoint *transport.Endpoint, auth transport.AuthMethod) (transport.UploadPackSession, error) {
+	if endpoint.String() != "https://fixture.invalid/extensions.git" {
+		return nil, transport.ErrRepositoryNotFound
+	}
+	local, err := transport.NewEndpoint(f.repoDir)
+	if err != nil {
+		return nil, err
+	}
+	return f.Transport.NewUploadPackSession(local, auth)
 }
 
 func TestDownloader_UpgradeExtension(t *testing.T) {
