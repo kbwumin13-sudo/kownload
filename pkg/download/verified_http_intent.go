@@ -39,6 +39,10 @@ func (d *Downloader) freezeVerifiedOptions(input *base.Options) (*base.Options, 
 	if err != nil || opts == nil {
 		return nil, ErrVerifiedHTTPInvalid
 	}
+	opts.Path, err = d.freezeVerifiedRoot(opts.Path)
+	if err != nil {
+		return nil, err
+	}
 	extra := map[string]any{}
 	if opts.Extra != nil {
 		raw, err := json.Marshal(opts.Extra)

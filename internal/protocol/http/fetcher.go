@@ -654,7 +654,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	// Publish prefetch lifecycle channels before resolvedCh lets Start proceed.
 	// Non-range responses remain open for the one-time download connection.
 	keepResponse = true
-	if res.Range && res.Size > 0 {
+	if res.Range && res.Size > 0 && !f.verifiedOutputPolicy.Load() {
 		f.prefetchStopCh = make(chan struct{})
 		f.prefetchDoneCh = make(chan struct{})
 		go f.asyncPrefetch()
@@ -906,7 +906,7 @@ func (f *Fetcher) resetUnavailableResumeData() error {
 	if len(f.connections) == 0 && f.resolveConn == nil && f.resolveDataPos.Load() == 0 {
 		return nil
 	}
-	info, err := os.Stat(f.meta.SingleFilepath())
+	info, err := f.localOutputInfo()
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,20 +56,22 @@ func (f *Fetcher) upgradeRangeResume() error {
 	failure := func() error {
 		return fmt.Errorf("cannot verify saved HTTP prefix for range resume; partial file preserved")
 	}
-	file, err := os.Open(f.meta.SingleFilepath())
+	file, release, err := f.openResumeFile()
 	if err != nil {
 		return failure()
 	}
-	defer file.Close()
 	stat, err := file.Stat()
 	if err != nil || stat.Size() < prefix {
+		release()
 		return failure()
 	}
 	begin := max(int64(0), prefix-64*1024)
 	expected := make([]byte, prefix-begin)
 	if _, err := file.ReadAt(expected, begin); err != nil {
+		release()
 		return failure()
 	}
+	release()
 	validator := modified.UTC().Format(http.TimeFormat)
 	request.Header.Set("If-Range", validator)
 	if err := f.compareRangeOverlap(request, begin, expected, func(response *http.Response) bool {
@@ -245,11 +246,11 @@ func (f *Fetcher) readOverlapSamples() ([]overlapSample, error) {
 	if len(spans) == 0 {
 		return nil, fmt.Errorf("%w: no saved overlap available", ErrUnsafeResume)
 	}
-	file, err := os.Open(f.meta.SingleFilepath())
+	file, release, err := f.openResumeFile()
 	if err != nil {
 		return nil, fmt.Errorf("%w: saved overlap unavailable", ErrUnsafeResume)
 	}
-	defer file.Close()
+	defer release()
 	samples := make([]overlapSample, len(spans))
 	for i, span := range spans {
 		samples[i] = overlapSample{begin: span.begin, expected: make([]byte, span.end-span.begin)}

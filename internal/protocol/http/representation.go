@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -295,7 +294,7 @@ func (f *Fetcher) completedLocalCheckpoint() bool {
 	if !complete || total != f.meta.Res.Size {
 		return false
 	}
-	info, err := os.Stat(f.meta.SingleFilepath())
+	info, err := f.localOutputInfo()
 	return err == nil && info.Size() == f.meta.Res.Size
 }
 

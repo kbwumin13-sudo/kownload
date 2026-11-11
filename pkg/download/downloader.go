@@ -118,6 +118,7 @@ type Downloader struct {
 	listenerLock          sync.RWMutex
 	listener              Listener
 	verifiedDone          *verifiedHTTPDoneBroker
+	verifiedCompleter     *transfer.VerifiedCompleter
 
 	lock               *sync.Mutex
 	fetcherMapLock     *sync.RWMutex
@@ -166,6 +167,7 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 		queueSignal:  make(chan struct{}),
 		verifiedDone: newVerifiedHTTPDoneBroker(),
 	}
+	d.verifiedCompleter, _ = transfer.NewVerifiedCompleter(2)
 
 	loggerSetupOnce.Do(func() { zerolog.ErrorStackMarshaler = pkgerrors.MarshalStack })
 	d.Logger = logger.NewLogger(cfg.ProductionMode, filepath.Join(cfg.StorageDir, "logs", "core.log"))
@@ -301,7 +303,7 @@ func (d *Downloader) Setup() error {
 						defer task.lock.Unlock()
 						task.statusLock.Lock()
 						defer task.statusLock.Unlock()
-						if task.getStatus() != base.DownloadStatusRunning && !task.Uploading {
+						if task.verificationOnly.Load() || (task.getStatus() != base.DownloadStatusRunning && !task.Uploading) {
 							return
 						}
 						// check if task is deleted
@@ -734,7 +736,7 @@ func (d *Downloader) notifyRunning() {
 func (d *Downloader) remainRunningCount() int {
 	runningCount := 0
 	for _, t := range d.tasks {
-		if t.getStatus() == base.DownloadStatusRunning {
+		if t.getStatus() == base.DownloadStatusRunning && !t.verificationOnly.Load() {
 			runningCount++
 		}
 	}
@@ -1522,13 +1524,22 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 		d.doOnError(task, err, expected...)
 		return
 	}
-	committed, completionErr := d.commitTaskCompletion(task, f, expected...)
+	var committed bool
+	var completionErr error
+	if task.Completion != nil {
+		committed, completionErr = d.completeVerifiedHTTP(task, f, generation, runLease)
+	} else {
+		committed, completionErr = d.commitTaskCompletion(task, f, expected...)
+	}
 	if completionErr != nil {
 		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr), expected...)
 		return
 	}
 	if !committed {
 		return
+	}
+	if task.Completion != nil {
+		d.publishVerifiedHTTPDone(task)
 	}
 	d.emit(EventKeyDone, task)
 	d.emit(EventKeyFinally, task, err)
@@ -1983,6 +1994,7 @@ func (d *Downloader) doStart(task *Task) (err error) {
 
 func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	var needCreate bool
+	var verificationResume bool
 	var generation uint64
 	var runCtx context.Context
 	var runCancel context.CancelFunc
@@ -2002,12 +2014,25 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return
 		}
 
-		err = d.restoreTask(task)
+		if task.Completion != nil {
+			identity, e := d.DatasetIdentity()
+			if e != nil {
+				return true, e
+			}
+			_, record, e := d.readVerifiedTask(identity.DatasetID, task.ID)
+			if e != nil {
+				return true, e
+			}
+			verificationResume = record.Phase != transfer.CompletionPrepared
+		}
+		if !verificationResume {
+			err = d.restoreTask(task)
+		}
 		if err != nil {
 			d.Logger.Error().Stack().Err(err).Msgf("restore fetcher failed, task id: %s", task.ID)
 			return
 		}
-		if task.CreationOperation != nil {
+		if task.CreationOperation != nil && !verificationResume {
 			_, uploading := task.fetcher.(fetcher.Uploader)
 			task.dataLock.Lock()
 			task.Uploading = uploading
@@ -2022,6 +2047,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			owner.active.Store(false)
 		}
 		task.runGeneration = d.recoveryGenerationBase(task) + 1
+		task.verificationOnly.Store(false)
 		task.dataLock.Lock()
 		task.clearReadPublishedLocked()
 		task.dataLock.Unlock()
@@ -2066,6 +2092,31 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		task.statusLock.Unlock()
 		if obsolete || d.getTask(task.ID) != task {
 			return nil
+		}
+		if verificationResume {
+			identity, e := d.DatasetIdentity()
+			if e != nil {
+				return e
+			}
+			owner, e := d.ensureTaskRecovery(task, "")
+			if e != nil {
+				return e
+			}
+			lease, e := owner.beginVerificationRun(runCtx, identity.DatasetID, generation)
+			if e != nil {
+				return e
+			}
+			task.verificationOnly.Store(true)
+			task.timer.Start()
+			go func() { defer runCancel(); d.watchRun(task, nil, generation, func() error { return nil }, lease) }()
+			return nil
+		}
+		if task.Completion != nil {
+			output, ok := task.fetcher.(interface{ RequireVerifiedOutput() })
+			if !ok {
+				return transfer.ErrRecoveryHeld
+			}
+			output.RequireVerifiedOutput()
 		}
 
 		var recovery *taskRecoveryOwner
@@ -2235,6 +2286,43 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}(); err != nil {
 			return err
+		}
+		if task.Completion != nil {
+			lease := transfer.RecoveryLeaseFromContext(runCtx)
+			if lease == nil {
+				return transfer.ErrRecoveryHeld
+			}
+			// Freeze resolved target metadata before the first stage write.
+			if err := d.saveTask(task); err != nil {
+				return err
+			}
+			identity, e := d.DatasetIdentity()
+			if e != nil {
+				return e
+			}
+			task.lock.Unlock()
+			file, e := d.prepareVerifiedOutput(runCtx, identity.DatasetID, task, lease)
+			task.lock.Lock()
+			if e != nil {
+				return e
+			}
+			if runCtx.Err() != nil {
+				file.Close()
+				return runCtx.Err()
+			}
+			output, ok := task.fetcher.(interface {
+				SetVerifiedOutput(*os.File) error
+				ReleaseVerifiedOutput()
+			})
+			if !ok {
+				file.Close()
+				return transfer.ErrRecoveryHeld
+			}
+			if e = output.SetVerifiedOutput(file); e != nil {
+				file.Close()
+				return e
+			}
+			defer output.ReleaseVerifiedOutput()
 		}
 
 		task.statusLock.Lock()

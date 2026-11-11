@@ -60,6 +60,9 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		if snapshot.ID != o.taskID || snapshot.Protocol != "http" || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
 		}
+		if err := guardCompletionSnapshot(tx, snapshot); err != nil {
+			return err
+		}
 		digest := record.ExecutionDefaultsHash
 		if len(defaults) > 0 {
 			digest = defaults[0]

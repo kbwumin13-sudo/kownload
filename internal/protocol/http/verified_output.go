@@ -1,9 +1,61 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
+
+// Called only by the required-capability Core path before Resolve. It avoids
+// resolve-phase file writes before the managed stage's identity is ACKed.
+func (f *Fetcher) RequireVerifiedOutput() { f.verifiedOutputPolicy.Store(true) }
+
+func (f *Fetcher) JoinVerifiedWriters(ctx context.Context) error {
+	if !f.verifiedOutputPolicy.Load() {
+		return ErrUnsafeResume
+	}
+	if err := f.CaptureRunQuiescence()(ctx); err != nil {
+		return err
+	}
+	f.wg.Wait()
+	return ctx.Err()
+}
+
+// Borrow the same pinned descriptor for local checkpoint checks. Callers must
+// release before any network probe; legacy callers still own a pathname read.
+func (f *Fetcher) openResumeFile() (*os.File, func(), error) {
+	f.fileMu.RLock()
+	if f.verifiedOutputPolicy.Load() {
+		file := f.verifiedOutput
+		if file == nil {
+			file = f.file
+		}
+		if file == nil {
+			f.fileMu.RUnlock()
+			return nil, func() {}, ErrUnsafeResume
+		}
+		return file, f.fileMu.RUnlock, nil
+	}
+	f.fileMu.RUnlock()
+	file, err := os.Open(f.meta.SingleFilepath())
+	return file, func() {
+		if file != nil {
+			_ = file.Close()
+		}
+	}, err
+}
+
+func (f *Fetcher) localOutputInfo() (os.FileInfo, error) {
+	if !f.verifiedOutputPolicy.Load() {
+		return os.Stat(f.meta.SingleFilepath())
+	}
+	file, release, err := f.openResumeFile()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return file.Stat()
+}
 
 // SetVerifiedOutput transfers an already-pinned writable staging handle from
 // Core. It does not create/reopen a path or itself authorize a Task capability.

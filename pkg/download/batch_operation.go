@@ -536,6 +536,13 @@ func (d *Downloader) attachOperationSnapshotLocked(task *Task, createdNow bool) 
 		return ErrOperationConflict
 	}
 	initTask(task)
+	if task.Completion != nil && !createdNow {
+		// Unknown M ACK/replay may expose an already stored Task, never its
+		// lost first-IO authority. An explicit later user Continue is separate.
+		task.updateStatus(base.DownloadStatusPause)
+		d.tasks = append(d.tasks, task)
+		return nil
+	}
 	// Only this process's successful M authorizes the first unresolved HTTP
 	// request. Q readback/replay and startup do not recover that authority.
 	task.initialHTTPExecution.Store(createdNow && task.Protocol == "http" && task.Meta.Res == nil)

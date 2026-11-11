@@ -81,6 +81,9 @@ type Task struct {
 	// Read only atomically by Delete: never wait on statusLock before removing
 	// membership while a completion Put may be blocked under that lock.
 	recoveryRunCancel atomic.Pointer[context.CancelFunc]
+	// Network writers have joined; the same run may still be verifying. No
+	// second Task/queue or persisted status is created for the bounded hash slot.
+	verificationOnly atomic.Bool
 }
 
 func NewTask() *Task {

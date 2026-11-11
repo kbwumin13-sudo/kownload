@@ -5,7 +5,7 @@ import "github.com/GopeedLab/gopeed/internal/transfer"
 func (t *Task) recoveryHeld() bool {
 	t.dataLock.RLock()
 	defer t.dataLock.RUnlock()
-	return t.recoveryBlocked || t.Completion != nil || (t.Recovery != nil && !supportedRecoveryVersion(t.Recovery.Version))
+	return t.recoveryBlocked || (t.Recovery != nil && !supportedRecoveryVersion(t.Recovery.Version))
 }
 
 // Read-only capability check. Missing all three parts is a legacy task, never
