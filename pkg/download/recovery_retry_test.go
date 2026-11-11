@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -92,6 +93,12 @@ func TestExplicitRecoveryRetryHistoricalReplayAndDefaults(t *testing.T) {
 	}
 	if owner.record.SourceRevision <= first.SourceRevision || !owner.record.valid(task.ID) || owner.record.LastExplicitRetry.SourceRevision != first.SourceRevision {
 		t.Fatal("legitimate defaults CAS invalidated history")
+	}
+	if lease, err := owner.begin(2, ""); err != nil || lease.Check() != nil || owner.record.TotalUsed != 0 {
+		t.Fatal("legitimate defaults change lost the original one-shot Retry", err)
+	}
+	if lease, err := owner.begin(3, ""); err != nil || lease.Check() != nil || owner.record.TotalUsed != 1 {
+		t.Fatal("ordinary continue restored free Retry after defaults change", err)
 	}
 	if _, fresh, err = owner.commitExplicitRetry(context.Background(), dataset, request, 1); err != nil || fresh {
 		t.Fatal("history replay issued IO", err)
@@ -206,6 +213,78 @@ func TestExplicitRecoveryRetryTripletWriteFailuresRollBack(t *testing.T) {
 			saved, record, err := readRecovery(store, task.ID)
 			if err != nil || record.Version != 1 || saved.Recovery.Version != 1 || record.Episode != before.Episode || record.TotalUsed != before.TotalUsed {
 				t.Fatal("partial v2 transaction", err, record)
+			}
+		})
+	}
+}
+
+func TestExplicitRecoveryRetryOldWaitAndCleanupCannotTouchNewEpisode(t *testing.T) {
+	for _, late := range []error{nil, errors.New("synthetic old episode error")} {
+		t.Run(map[bool]string{true: "nil", false: "error"}[late == nil], func(t *testing.T) {
+			store := NewMemStorage()
+			d := operationDownloader(t, store, t.TempDir())
+			defer d.Close()
+			dataset, task, owner, request := explicitRetryFixture(t, store)
+			initTask(task)
+			old, err := owner.currentLease(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			task.recoveryOwner.Store(owner)
+			task.runGeneration = old.Token.Generation
+			task.Status = base.DownloadStatusRunning
+			f := &recoveryLateFetcher{meta: task.Meta}
+			task.fetcher, task.fetcherManager = f, &recoverySourceCheckpointManager{}
+			d.lock.Lock()
+			d.tasks = append(d.tasks, task)
+			d.lock.Unlock()
+			defer func() { d.lock.Lock(); d.tasks = nil; d.lock.Unlock() }()
+			entered, result, done := make(chan struct{}), make(chan error, 1), make(chan struct{})
+			defer func() {
+				select {
+				case result <- errors.New("fixture cleanup"):
+				default:
+				}
+			}()
+			go func() {
+				d.watchRun(task, f, old.Token.Generation, func() error { close(entered); return <-result }, old)
+				close(done)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("old Wait not entered")
+			}
+			if _, fresh, err := owner.commitExplicitRetry(context.Background(), dataset, request, old.Token.Generation); err != nil || !fresh {
+				t.Fatal(err)
+			}
+			task.dataLock.Lock()
+			task.Recovery = &TaskRecoveryRef{Version: 2}
+			task.dataLock.Unlock()
+			task.statusLock.Lock()
+			task.runGeneration++
+			generation := task.runGeneration
+			task.statusLock.Unlock()
+			current, err := owner.begin(generation, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = owner.currentLease(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			result <- late
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("old result blocked")
+			}
+			d.failTaskPreparation(task, old.Token.Generation, func() {}, errors.New("old preparation cleanup"))
+			if !errors.Is(old.Check(), transfer.ErrRecoveryStale) || current.Check() != nil || task.getStatus() != base.DownloadStatusRunning {
+				t.Fatal("old result/cleanup affected new episode", current.Check())
+			}
+			_, stored, err := readRecovery(store, task.ID)
+			if err != nil || stored.Episode != current.Token.Episode || stored.Generation != current.Token.Generation || stored.TotalUsed != 0 {
+				t.Fatal("old result rewrote/reset current episode", err, stored)
 			}
 		})
 	}

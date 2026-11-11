@@ -128,6 +128,21 @@ func (d *Downloader) QueryRecoveryForDataset(dataset, id string) (RecoveryTaskSt
 			return transfer.ErrRecoveryHeld
 		}
 		result = RecoveryTaskState{Version: 1, TaskID: id, Status: task.Status, Management: "held", Reason: "recovery_held"}
+		// This candidate does not execute S4 state. A dedicated Retry must
+		// not bypass the same presence guard used by Continue/restore.
+		if task.Completion != nil {
+			return nil
+		}
+		for _, bucket := range []string{"task_completion_v1", "task_completion_required_v1"} {
+			var value json.RawMessage
+			present, err := reader.Get(bucket, id, &value)
+			if err != nil {
+				return transfer.ErrRecoveryUnavailable
+			}
+			if present {
+				return nil
+			}
+		}
 		if task.handoffHeld() || task.creationHeld() {
 			return nil
 		}
@@ -281,6 +296,9 @@ func (d *Downloader) RetryRecoveryForDataset(ctx context.Context, dataset, id st
 		defer task.statusLock.Unlock()
 		if !present || task.getStatus() != base.DownloadStatusError || task.runGeneration != generation {
 			return transfer.ErrRecoveryStale
+		}
+		if err := d.checkTaskRecovery(task); err != nil {
+			return err
 		}
 		if task.fetcher == nil {
 			if err := d.restoreFetcher(task); err != nil {
