@@ -1,6 +1,7 @@
-import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,SUBMIT_RESEND_DELAYS,delay,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
+import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
 import {installDownloadCapture,createAppBridge,createAppMediaBridge} from './lib.js';
+import {sendNativeBound,nativeBinding,validBridgeBinding} from './native-identity.js';
 
 installNetdiskBridge(chrome);
 const appBridge = createAppBridge(chrome,message => native(message,false,true));
@@ -131,16 +132,14 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(d => { void navigate(d,'s
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(d => { void navigate(d,'spa'); });
 chrome.tabs.onRemoved.addListener(tabId => { void clear(tabId,null,true); });
 
-function native(message,rest = false,raw = false) {
-  return new Promise((resolve,reject) => chrome.runtime.sendNativeMessage('com.gopeed.gopeed',message,response => {
-    const err = chrome.runtime.lastError;
-    if (err) reject(bridgeFailure('ipc_unavailable')); else { try {
+async function native(message,rest = false,raw = false) {
+    const response=await sendNativeBound(chrome,message);
+    try {
       // Submissions classify every answer themselves (nativeSubmission), including legacy hosts.
-      if (raw) { resolve(response); return; }
+      if (raw) return response;
       if (!response || response.code !== 0) throw Object.assign(bridgeFailure(response?.error),{httpStatus:Number.isInteger(response?.httpStatus) ? response.httpStatus : null});
-      resolve(rest ? nativeData(response) : response.data);
-    } catch(e) { reject(e.category ? e : bridgeFailure('business_error')); } }
-  }));
+      return rest ? nativeData(response) : response.data;
+    } catch(e) { throw e.category ? e : bridgeFailure('business_error'); }
 }
 async function forward(method,path,data) {
   const operationId = newOperationId(),started = Date.now(),domain = siteOf(data?.req?.url || data?.sourcePage || '');
@@ -255,7 +254,9 @@ async function create(item,options = {}) {
     // One explicit click owns one operation ID. An ID still recorded here
     // belongs to an earlier click that ended without a definitive answer (lost
     // reply, worker restart); it is finished first so it cannot be duplicated.
-    let operationId = state.operations?.[mark] || '';
+    const savedOperation=state.operations?.[mark];
+    let operationId = typeof savedOperation==='string' ? savedOperation : savedOperation?.operationId || '';
+    let bridgeBinding=savedOperation?.bridgeBinding;
     const started = Date.now(),domain = siteOf(options.imageUrl || item.url);
     const trace = (stage,errorCategory = '') => {
       if (typeof console !== 'undefined') console.info('kownload submission', {operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
@@ -263,7 +264,8 @@ async function create(item,options = {}) {
     const remember = id => serial(async () => {
       const latest = await read();
       latest.operations ||= {};
-      if (id) latest.operations[mark] = id; else if (latest.operations[mark] === operationId) delete latest.operations[mark];
+      if (id) latest.operations[mark] = {version:1,operationId:id,bridgeBinding};
+      else if ((typeof latest.operations[mark]==='string' ? latest.operations[mark] : latest.operations[mark]?.operationId) === operationId) delete latest.operations[mark];
       await write(latest,item.tabId,true);
     });
     let sent = false;
@@ -276,34 +278,47 @@ async function create(item,options = {}) {
       const media = usesMedia(item);
       const extra = media ? mediaExtra(req,{format,mediaKind,container:options.container || '',subtitleLanguages:options.subtitleLanguages || [],writeAutomaticSubtitles:!!options.writeAutomaticSubtitles,embedSubtitles:!!options.embedSubtitles}) : {header:req.header,sourcePage:req.sourcePage};
       const payload = {req:{url:req.url,...(media ? {protocol:'media'} : {}),extra},opts:{name:options.name || '',path:options.path || ''}};
-      const submit = async resends => {
-        for (let attempt = 0;;attempt++) {
-          trace('assistant_submit');
-          sent = true;
-          try {
-            return nativeSubmission(await native({method:'create',operationId,meta:{silent:true},params:payload},false,true),operationId);
-          } catch (error) {
-            if (submissionOutcome(error) !== 'resend' || attempt >= resends) throw error;
-            trace('assistant_resend',error.category);
-            await delay(SUBMIT_RESEND_DELAYS[attempt]);
-          }
+      const query = async () => {
+        await nativeBinding(chrome,bridgeBinding);
+        const data=await appBridge.request('submission',{operationId},bridgeBinding);
+        if(data?.state==='created' && Array.isArray(data.taskIds) && data.taskIds.length && data.taskIds.every(id=>typeof id==='string' && id.trim())) {
+          return {state:'created',taskIds:data.taskIds,taskId:data.taskIds[0],operationId};
+        }
+        if(data?.state==='accepted' && Array.isArray(data.taskIds) && data.taskIds.length===0)return {state:'accepted',taskIds:[],operationId};
+        if(data?.state==='cancelled')return {state:'cancelled',taskIds:[],operationId};
+        throw bridgeFailure('submission_unknown');
+      };
+      const submit = async () => {
+        trace('assistant_submit');sent=true;
+        try {
+          return nativeSubmission(await native({method:'create',operationId,bridgeBinding,meta:{silent:true},params:payload},false,true),operationId);
+        } catch(error) {
+          if(!['resend','unknown'].includes(submissionOutcome(error)))throw error;
+          trace('assistant_query',error.category);
+          // Unknown stays journaled. Query the same route/op, never replay create.
+          let result;
+          try {result=await query();}catch{throw bridgeFailure('submission_unknown');}
+          if(result.state==='cancelled')throw bridgeFailure('submission_cancelled');
+          return result;
         }
       };
       let result;
       if (operationId) {
-        try { result = await submit(0); } catch (error) { if (submissionOutcome(error) !== 'final') throw error; }
-        if (result?.state !== 'created') { await remember(''); result = undefined; }
+        if(savedOperation?.version!==1 || !validBridgeBinding(bridgeBinding))throw bridgeFailure('binding_required');
+        result=await query();
+        if(result.state==='cancelled'){await remember('');result=undefined;}
       }
       if (!result) {
         operationId = newOperationId();
+        bridgeBinding=Object.freeze(await nativeBinding(chrome));
         await remember(operationId);
-        result = await submit(SUBMIT_RESEND_DELAYS.length);
+        result = await submit();
       }
       trace(result.state === 'created' ? 'assistant_created' : 'assistant_accepted');
       await serial(async () => {
         const latest = await read();
         latest.operations ||= {};
-        if (latest.operations[mark] === operationId) delete latest.operations[mark];
+        if (latest.operations[mark]?.operationId === operationId) delete latest.operations[mark];
         if (result.state === 'created' && latest.items[item.id]) latest.submitted[mark] = result.taskId;
         await write(latest,item.tabId,true);
       });

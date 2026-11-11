@@ -1,4 +1,4 @@
-import {contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
+import {identityReply,contractReply,isTaskCreation,taskPayload} from './fixtures/native.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,15 +12,16 @@ function browser(seed = {}) {
   const memory = structuredClone(seed), events = {}, messages = [], starts = [], scripts = [], queries = [];
   let handler, inspectData = {supported:true,title:'测试视频',duration:8,thumbnail:'https://cdn.test/cover.jpg',formats:[{id:'v',ext:'mp4',height:720,vcodec:'h264',acodec:'none'},{id:'a',ext:'m4a',vcodec:'none',acodec:'aac',language:'en'}]};
   const event = key => ({addListener(fn){events[key] = fn;}});
+  const local={netdiskInstanceId:'system-profile'};
   const chrome = {
-    storage:{session:{get:async () => structuredClone(memory),set:async p => Object.assign(memory,structuredClone(p)),remove:async k => {delete memory[k];}},local:{get:async () => ({})}},
+    storage:{session:{get:async () => structuredClone(memory),set:async p => Object.assign(memory,structuredClone(p)),remove:async k => {delete memory[k];}},local:{get:async()=>structuredClone(local),set:async value=>Object.assign(local,structuredClone(value))}},
     action:{setBadgeText:async()=>{},setBadgeBackgroundColor:async()=>{}},
     tabs:{get:async()=>({id:1,url:pageURL}),onRemoved:event('removed'),create:async()=>{},sendMessage:async(_,m)=>{starts.push(m);return {started:true};}},
     cookies:{getAllCookieStores:async()=>[{id:'store-1',tabIds:[1]}],getPartitionKey:async()=>({topLevelSite:'https://page.test'}),getAll:async q=>{queries.push(q);return []; }},
     webNavigation:{onCommitted:event('commit'),onHistoryStateUpdated:event('spa'),onReferenceFragmentUpdated:event('hash'),getFrame:async()=>({url:pageURL,documentId:'doc-1'})},
     webRequest:Object.fromEntries(['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred'].map(k=>[k,event(k)])),
     scripting:{executeScript:async s=>{scripts.push(s);return [];}},
-    runtime:{onMessage:{addListener(fn){handler=fn;}},getURL:p=>'chrome-extension://test/'+p,sendMessage:async()=>{},sendNativeMessage:(_,m,callback)=>{messages.push(m);callback(contractReply(m,m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data:m.params?.path?.endsWith('/media/inspect')?inspectData:isTaskCreation(m)?'one-task':[]}}));}}
+    runtime:{id:'test',onMessage:{addListener(fn){handler=fn;}},getURL:p=>'chrome-extension://test/'+p,sendMessage:async()=>{},sendNativeMessage:(_,m,callback)=>{const info=identityReply(m);if(info){callback(info);return;}messages.push(m);callback(contractReply(m,m.method==='wakeup'?{code:0,data:true}:{code:0,data:{code:0,data:m.params?.path?.endsWith('/media/inspect')?inspectData:isTaskCreation(m)?'one-task':[]}}));}}
   };
   vm.runInNewContext(fs.readFileSync(new URL('../background.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,''),{...lib,installNetdiskBridge:()=>{},chrome,URL,URLSearchParams});
   return {memory,events,messages,starts,scripts,queries,chrome,setInspection:x=>{inspectData=x;},request:(m,s={})=>new Promise(r=>handler(m,s,r))};
