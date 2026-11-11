@@ -135,3 +135,11 @@ transfer模块及新completion_state.go三方存储内核/测试；11拥有新pu
 publish/clear/access及测试。12/11不写model/watch/HTTP/batch。14新REST薄文件/server注册及
 既有GetTask/GetTasks仅响应装饰，16纯transient DTO/原轮询UI。三方借接点各自
 明确后实施；本文件与S0行是planned契约，不是已部署能力。
+
+## REST 首增量的验证边界
+
+专用receiver和公开projection formatter可先在独立候选验证；真实BuildServer暂仅从所绑定
+Core只读核dataset并返回supported:false，create/query/cancel均明确unsupported，不回退旧
+API、不会把无校验Task当校验任务。正例注入仅位于测试。真实Core typedR/三方guard/Fence/C/
+published snapshot未接通时，不启用能力，也不装饰普通Task/list的phase；该部分须待同源
+Core×API×UI/MCP交集验证。此增量不修改build40已交包。
