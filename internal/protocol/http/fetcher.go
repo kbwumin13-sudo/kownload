@@ -2464,7 +2464,10 @@ func (f *Fetcher) PatchWithContext(req *base.Request, opts *base.Options, mode t
 	if foreign && fresh == nil && (parsed.User != nil || transfer.HasUnscopedCredentials(patchHeaders)) {
 		return transfer.ErrScopedContext
 	}
-	if foreign && (original.Body != "" || original.Method != "" && !strings.EqualFold(original.Method, "GET") && !strings.EqualFold(original.Method, "HEAD")) {
+	carriesBody := func(extra *fhttp.ReqExtra) bool {
+		return extra != nil && (extra.Body != "" || extra.Method != "" && !strings.EqualFold(extra.Method, "GET") && !strings.EqualFold(extra.Method, "HEAD"))
+	}
+	if foreign && (carriesBody(original) || carriesBody(patchExtra)) {
 		if fresh == nil || mode != transfer.HeadersReplace || patchExtra == nil {
 			return transfer.ErrScopedContext
 		}

@@ -71,7 +71,7 @@ func outboundCredentialGuard(root string, ctx *transfer.TargetCredentials, jar h
 		}
 		foreign := old != next
 		if foreign {
-			if r.Method != "GET" && r.Method != "HEAD" {
+			if r.Method != "GET" && r.Method != "HEAD" || r.Body != nil && r.Body != http.NoBody || r.ContentLength > 0 {
 				return transfer.ErrScopedContext
 			}
 			if r.URL.User != nil && !ctx.Matches(r.URL.String()) {

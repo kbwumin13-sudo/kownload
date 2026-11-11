@@ -437,3 +437,67 @@ func TestAuthCookiePatchReplacesProviderJarSnapshot(t *testing.T) {
 		t.Fatal("provider jar survived explicit replacement")
 	}
 }
+
+func TestAuthForeignPatchRequiresScopedNewBody(t *testing.T) {
+	for _, extra := range []*model.ReqExtra{{Method: "POST", Body: "unproved-body"}, {Body: "unproved-body"}, {Method: "POST"}} {
+		f := buildFetcher()
+		f.meta.Req = &base.Request{URL: "http://a.example/file", Extra: &model.ReqExtra{}}
+		e := f.Patch(&base.Request{URL: "http://b.example/file", Extra: extra}, nil)
+		if !errors.Is(e, transfer.ErrScopedContext) || f.meta.Req.URL != "http://a.example/file" {
+			t.Fatal("unscoped incoming body/method accepted")
+		}
+		_ = f.Close()
+	}
+}
+func TestAuthExplicitFreshTargetBodyIsUsable(t *testing.T) {
+	received := make(chan string, 1)
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		received <- r.Method + ":" + string(data)
+		_, _ = w.Write([]byte("B"))
+	}))
+	defer b.Close()
+	f := buildFetcher()
+	defer f.Close()
+	f.meta.Req = &base.Request{URL: "http://a.example/file", Extra: &model.ReqExtra{Method: "POST", Body: "old-A"}}
+	c, e := transfer.NewTargetCredentials(b.URL, nil, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	e = f.PatchWithContext(&base.Request{URL: b.URL, Extra: &model.ReqExtra{Method: "POST", Body: "new-B"}}, nil, transfer.HeadersReplace, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	req, e := f.buildRequest(context.Background(), f.meta.Req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	res, e := doCredentialRequest(f.buildClient(), req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+	if v := <-received; v != "POST:new-B" {
+		t.Fatal("fresh target body lost or inherited A")
+	}
+}
+
+func TestAuthRedirectCannotReplayGetBody(t *testing.T) {
+	var reached bool
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	defer b.Close()
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, b.URL, http.StatusTemporaryRedirect) }))
+	defer a.Close()
+	f := buildFetcher()
+	defer f.Close()
+	f.meta.Req = &base.Request{URL: a.URL, Extra: &model.ReqExtra{Method: "GET", Body: "private-A-get-body"}}
+	req, e := f.buildRequest(context.Background(), f.meta.Req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = doCredentialRequest(f.buildClient(), req)
+	if !errors.Is(e, transfer.ErrScopedContext) || reached {
+		t.Fatal("cross-origin GET body replayed")
+	}
+}
