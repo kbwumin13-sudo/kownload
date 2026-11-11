@@ -2218,6 +2218,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			setter.SetRecoveryLease(lease)
 			runCtx = transfer.WithRecoveryLease(runCtx, lease)
 		}
+		if task.Completion != nil && recovery == nil {
+			// New recovery-managed output must never resolve through the legacy
+			// PAC/unsupported path, including after R's configuration changes.
+			return transfer.ErrRecoveryHeld
+		}
 		if recovery == nil {
 			task.recoveryInitialEligible.Store(false)
 		}

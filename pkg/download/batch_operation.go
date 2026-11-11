@@ -395,6 +395,9 @@ func (d *Downloader) reserveOperationInDataset(atomicStore AtomicStorage, r Batc
 			if m.State != "pending" || m.Protocol != "http" {
 				return ErrVerifiedHTTPInvalid
 			}
+			if err := d.checkVerifiedHTTPContext(item.Req); err != nil {
+				return err
+			}
 			m.CompletionID = NewTask().ID
 			m.Options, err = d.freezeVerifiedOptions(m.Options)
 			if err != nil {

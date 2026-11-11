@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 )
 
@@ -103,4 +104,26 @@ func (d *Downloader) freezeVerifiedOptions(input *base.Options) (*base.Options, 
 	}
 	opts.Extra = extra
 	return opts, nil
+}
+
+// Capture only interpreted configuration; no Resolve, Restore, wire request,
+// protocol Store or output file operation takes place at this pre-R check.
+// Actual execution captures again at its safe run boundary, and holds if the
+// context has since become unsupported. Existing R bypasses this new-R check.
+func (d *Downloader) checkVerifiedHTTPContext(req *base.Request) error {
+	f, err := d.buildFetcher(req)
+	if err != nil {
+		return ErrVerifiedHTTPUnsupportedOption
+	}
+	capture, ok := f.(interface {
+		CaptureRecoveryContext(*base.Request) (*transfer.HTTPExecutionContext, bool, error)
+	})
+	if !ok {
+		return ErrVerifiedHTTPUnsupportedOption
+	}
+	snapshot, supported, err := capture.CaptureRecoveryContext(req)
+	if err != nil || !supported || snapshot == nil {
+		return ErrVerifiedHTTPUnsupportedOption
+	}
+	return nil
 }
