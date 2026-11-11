@@ -306,6 +306,21 @@ class SnapshotPair(Rollback):
         self.assert_unchanged()
 
     @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
+    def test_mcp_special_mode_refuses_before_output(self):
+        entry, value = self.mcp_fixture()
+        raw = json.dumps(value).encode()
+        self.marker_write(entry, raw)
+        entry.chmod(0o4700)
+        self.assertEqual(entry.stat().st_mode & 0o7777, 0o4700)
+        self.meta['data']['sha256'] = fixture_digest(self.data)
+        self.save_manifest()
+        p = self.run_pair('--apply')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.marker_read(entry), raw)
+        self.assertEqual(entry.stat().st_mode & 0o7777, 0o4700)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'MCP install marker is macOS-only')
     def test_mcp_marker_read_failure_refuses_before_copy(self):
         entry, value = self.mcp_fixture()
         raw = json.dumps(value).encode()

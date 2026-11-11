@@ -97,7 +97,7 @@ def mcp_helper_info(data):
     except FileNotFoundError:
         return None
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
-            info.st_uid != os.getuid() or info.st_mode & 0o777 != 0o700):
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError('snapshot_mcp_helper_invalid')
     return info
 
