@@ -1697,7 +1697,24 @@ func (d *Downloader) doOnError(task *Task, err error, generation ...uint64) {
 			(len(generation) > 0 && task.runGeneration != generation[0]) {
 			return false
 		}
-		d.Logger.Warn().Err(err).Msgf("task download failed, task id: %s", task.ID)
+		failureLog := d.Logger.Warn().Err(err)
+		if task.Protocol == "http" {
+			// Fixed recovery categories omit the original request error. Keep
+			// the existing host diagnostic without logging userinfo, path,
+			// signed query parameters or request headers.
+			task.dataLock.RLock()
+			var host string
+			if task.Meta != nil && task.Meta.Req != nil {
+				if parsed, parseErr := url.Parse(task.Meta.Req.URL); parseErr == nil {
+					host = parsed.Host
+				}
+			}
+			task.dataLock.RUnlock()
+			if host != "" {
+				failureLog.Str("host", host)
+			}
+		}
+		failureLog.Msgf("task download failed, task id: %s", task.ID)
 		task.updateStatus(base.DownloadStatusError)
 		if saveErr := d.saveTask(task); saveErr != nil {
 			d.Logger.Error().Err(saveErr).Msgf("persist failed task: %s", task.ID)

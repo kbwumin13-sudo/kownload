@@ -66,7 +66,13 @@ func TestNonRangeResumeLaterQueue(t *testing.T) {
 	if err = d.Continue(&TaskFilter{IDs: []string{first}}); err != nil {
 		t.Fatal(err)
 	}
-	key := transfer.SourceKey("origin|" + a.URL + "|direct")
+	// Recovery freezes the effective proxy policy. The budget uses that same
+	// immutable ID, rather than the legacy literal "direct".
+	_, proxyID, supported := d.protocolController("http").GetRecoveryProxySnapshot(nil)
+	if !supported || proxyID == "" {
+		t.Fatal("fixture requires a supported proxy snapshot")
+	}
+	key := transfer.SourceKey("origin|" + a.URL + "|" + proxyID)
 	waitForCondition(t, "resumed GET refused and cooldown entered", 3*time.Second, func() bool {
 		return calls.Load() >= 2 && !d.budget.Cooldown(key).IsZero()
 	})
