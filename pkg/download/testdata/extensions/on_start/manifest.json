@@ -7,7 +7,7 @@
       "event": "onStart",
       "match": {
         "urls": [
-          "*://github.com/*"
+          "http://127.0.0.1/start/*"
         ],
         "labels": [
           "test"

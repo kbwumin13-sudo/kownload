@@ -7,7 +7,7 @@
       "event": "onDone",
       "match": {
         "urls": [
-          "*://github.com/*"
+          "http://127.0.0.1/done/*"
         ]
       },
       "entry": "index.js"

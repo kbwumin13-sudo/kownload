@@ -1,8 +1,11 @@
 package download
 
 import (
-	"errors"
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,131 +170,182 @@ func TestDownloader_UpgradeExtension(t *testing.T) {
 	})
 }
 
+// The hook tests exercise real HTTP transfers, but never depend on a public host.
+// A missing endpoint lets onStart rewrite before any I/O and onError recover
+// only after an actual HTTP failure.
+type extensionHookFixture struct {
+	downloader *Downloader
+	url        string
+	payload    []byte
+	missing    atomic.Bool
+	served     atomic.Bool
+}
+
+func newExtensionHookFixture(t *testing.T) *extensionHookFixture {
+	t.Helper()
+	f := &extensionHookFixture{payload: []byte("local extension hook download\n")}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/missing", "/start/missing":
+			f.missing.Store(true)
+			http.NotFound(w, r)
+		case "/file", "/done/file":
+			f.served.Store(true)
+			http.ServeContent(w, r, "hook.txt", time.Time{}, bytes.NewReader(f.payload))
+		default:
+			t.Errorf("unexpected hook fixture request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	f.url = server.URL
+	f.downloader = extensionTestDownloader(t)
+	return f
+}
+
+func (f *extensionHookFixture) install(t *testing.T, name string) *Extension {
+	t.Helper()
+	ext, err := f.downloader.InstallExtensionByFolder("./testdata/extensions/"+name, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ext
+}
+
+func (f *extensionHookFixture) download(t *testing.T, req *base.Request, wantError bool) *Task {
+	t.Helper()
+	finished := make(chan *Event, 1)
+	f.downloader.Listener(func(event *Event) {
+		if event.Key == EventKeyFinally {
+			finished <- event
+		}
+	})
+	id, err := f.downloader.CreateDirect(req, &base.Options{Path: t.TempDir(), Name: "hook.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-finished:
+		if event.Task.ID != id {
+			t.Fatalf("finished task = %s, want %s", event.Task.ID, id)
+		}
+		if (event.Err != nil) != wantError {
+			t.Fatalf("download error = %v, wantError = %v", event.Err, wantError)
+		}
+		// onDone runs after EventKeyFinally. Return the event's snapshot;
+		// its caller awaits the hook's storage acknowledgement before rereading.
+		return event.Task
+	case <-time.After(5 * time.Second):
+		t.Fatal("local hook download did not finish")
+	}
+	return nil
+}
+
+func (f *extensionHookFixture) checkFile(t *testing.T, task *Task) {
+	t.Helper()
+	if task.Status != base.DownloadStatusDone {
+		t.Fatalf("task status = %s, want done", task.Status)
+	}
+	got, err := os.ReadFile(task.Meta.SingleFilepath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, f.payload) {
+		t.Fatalf("downloaded body = %q, want %q", got, f.payload)
+	}
+}
+
 func TestDownloader_Extension_OnStart(t *testing.T) {
-	downloadAndCheck := func(req *base.Request) {
-		setupDownloader(func(downloader *Downloader) {
-			if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/on_start", false); err != nil {
-				t.Fatal(err)
+	for _, tc := range []struct {
+		name    string
+		path    string
+		label   bool
+		matches bool
+	}{
+		{name: "url match", path: "/start/missing", matches: true},
+		{name: "label match", path: "/missing", label: true, matches: true},
+		{name: "no match", path: "/missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExtensionHookFixture(t)
+			f.install(t, "on_start")
+			req := &base.Request{URL: f.url + tc.path, Labels: map[string]string{"fixtureUrl": f.url + "/file"}}
+			if tc.label {
+				req.Labels["test"] = "true"
 			}
-			errCh := make(chan error, 1)
-			downloader.Listener(func(event *Event) {
-				if event.Key == EventKeyFinally {
-					errCh <- event.Err
+			task := f.download(t, req, !tc.matches)
+			if !tc.matches {
+				if task.Status != base.DownloadStatusError || task.Meta.Req.URL != f.url+tc.path || task.Meta.Req.Labels["modified"] != "" {
+					t.Fatalf("unmatched onStart changed task: %+v", task)
 				}
-			})
-			id, err := downloader.CreateDirect(req, nil)
-			if err != nil {
-				t.Fatal(err)
+				if !f.missing.Load() || f.served.Load() {
+					t.Fatal("unmatched onStart bypassed the missing resource")
+				}
+				return
 			}
-			select {
-			case err = <-errCh:
-				break
-			case <-time.After(time.Second * 30): // Increased timeout for real network requests
-				err = errors.New("timeout")
+			if task.Meta.Req.URL != f.url+"/file" || task.Meta.Req.Labels["modified"] != "true" {
+				t.Fatalf("onStart did not rewrite URL and label: %+v", task.Meta.Req)
 			}
-			if err != nil {
-				panic("extension on start download error: " + err.Error())
+			if f.missing.Load() || !f.served.Load() {
+				t.Fatal("onStart must rewrite the URL before HTTP I/O")
 			}
-			task := downloader.GetTask(id)
-			if task.Meta.Req.URL != "https://github.com" {
-				t.Fatalf("except url: https://github.com, actual: %s", task.Meta.Req.URL)
-			}
-			if task.Meta.Req.Labels["modified"] != "true" {
-				t.Fatalf("except label: modified=true, actual: %s", task.Meta.Req.Labels["modified"])
-			}
+			f.checkFile(t, task)
 		})
 	}
-
-	// url match
-	downloadAndCheck(&base.Request{
-		URL: "https://github.com/gopeed/test/404",
-	})
-
-	// label match
-	downloadAndCheck(&base.Request{
-		URL: "https://test.com",
-		Labels: map[string]string{
-			"test": "true",
-		},
-	})
 }
 
 func TestDownloader_Extension_OnError(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/on_error", false); err != nil {
-			t.Fatal(err)
+	for _, matched := range []bool{true, false} {
+		name := "no match"
+		if matched {
+			name = "label match recovers"
 		}
-		errCh := make(chan error, 1)
-		downloader.Listener(func(event *Event) {
-			if event.Key == EventKeyFinally {
-				errCh <- event.Err
+		t.Run(name, func(t *testing.T) {
+			f := newExtensionHookFixture(t)
+			f.install(t, "on_error")
+			req := &base.Request{URL: f.url + "/missing", Labels: map[string]string{"fixtureUrl": f.url + "/file"}}
+			if matched {
+				req.Labels["test"] = "true"
 			}
+			task := f.download(t, req, !matched)
+			if !f.missing.Load() {
+				t.Fatal("onError test did not exercise an HTTP failure")
+			}
+			if !matched {
+				if task.Status != base.DownloadStatusError || task.Meta.Req.URL != f.url+"/missing" || f.served.Load() {
+					t.Fatalf("unmatched onError recovered the task: %+v", task)
+				}
+				return
+			}
+			if task.Meta.Req.URL != f.url+"/file" || !f.served.Load() {
+				t.Fatal("onError did not rewrite and continue the failed download")
+			}
+			f.checkFile(t, task)
 		})
-		id, err := downloader.CreateDirect(&base.Request{
-			URL: "https://github.com/gopeed/test/404",
-			Labels: map[string]string{
-				"test": "true",
-			},
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case err = <-errCh:
-			break
-		case <-time.After(time.Second * 30): // Increased timeout for real network requests
-			err = errors.New("timeout")
-		}
-
-		if err != nil {
-			panic("extension on error download error: " + err.Error())
-		}
-		// extension on error modify url and continue download
-		task := downloader.GetTask(id)
-		if task.Status != base.DownloadStatusDone {
-			t.Fatalf("except status is done, actual: %s", task.Status)
-		}
-	})
+	}
 }
 
 func TestDownloader_Extension_OnDone(t *testing.T) {
-	setupDownloader(func(downloader *Downloader) {
-		if _, err := downloader.InstallExtensionByFolder("./testdata/extensions/on_done", false); err != nil {
-			t.Fatal(err)
-		}
-		errCh := make(chan error, 1)
-		downloader.Listener(func(event *Event) {
-			if event.Key == EventKeyFinally {
-				errCh <- event.Err
-			}
-		})
-		id, err := downloader.CreateDirect(&base.Request{
-			URL: "https://github.com",
-		}, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+	f := newExtensionHookFixture(t)
+	ext := f.install(t, "on_done")
+	task := f.download(t, &base.Request{URL: f.url + "/done/file"}, false)
+	storage := &ContextStorage{storage: f.downloader.storage, identity: ext.buildIdentity()}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for storage.Get("hookDone") != "true" {
 		select {
-		case err = <-errCh:
-			break
-		case <-time.After(time.Second * 30): // Increased timeout for real network requests
-			err = errors.New("timeout")
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("onDone hook did not acknowledge completion")
 		}
-		// wait for script execution
-		time.Sleep(time.Millisecond * 3000)
-
-		if err != nil {
-			panic("extension on done download error: " + err.Error())
-		}
-		// extension on error modify url and continue download
-		task := downloader.GetTask(id)
-		if task.Meta.Req.Labels["modified"] != "true" {
-			t.Fatalf("except label: modified=true, actual: %s", task.Meta.Req.Labels["modified"])
-		}
-		if task.Status != base.DownloadStatusDone {
-			t.Fatalf("except status is done, actual: %s", task.Status)
-		}
-	})
+	}
+	task = f.downloader.GetTask(task.ID)
+	if task.Meta.Req.Labels["modified"] != "true" {
+		t.Fatalf("onDone label = %q, want true", task.Meta.Req.Labels["modified"])
+	}
+	f.checkFile(t, task)
 }
 
 func TestDownloader_Extension_Errors(t *testing.T) {
