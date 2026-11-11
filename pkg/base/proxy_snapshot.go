@@ -67,7 +67,16 @@ func captureSystemProxySnapshot(conf ieproxy.ProxyConf, env httpproxy.Config) (f
 		return nil, "", false
 	}
 	if conf.Static.Active {
-		return frozenProxyConfig("system-static", httpproxy.Config{HTTPProxy: conf.Static.Protocols["http"], HTTPSProxy: conf.Static.Protocols["https"], NoProxy: conf.Static.NoProxy})
+		// go-ieproxy represents a common Windows proxy under the empty key.
+		// A present empty protocol value is an explicit direct override.
+		protocol := func(scheme string) string {
+			value, present := conf.Static.Protocols[scheme]
+			if !present {
+				value = conf.Static.Protocols[""]
+			}
+			return value
+		}
+		return frozenProxyConfig("system-static", httpproxy.Config{HTTPProxy: protocol("http"), HTTPSProxy: protocol("https"), NoProxy: conf.Static.NoProxy})
 	}
 	return frozenProxyConfig("environment", env)
 }
