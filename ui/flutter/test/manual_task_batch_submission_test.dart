@@ -91,6 +91,7 @@ void main() {
   late JournalBox journalBox;
   const urls = 'https://fixture.invalid/one\nhttps://fixture.invalid/two';
   int singles = 0;
+  Completer<String>? singleGate;
   setUpAll(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     HttpOverrides.global = null;
@@ -107,6 +108,7 @@ void main() {
     Database.instance.box = SettingsBox();
     journalBox = JournalBox(box);
     singles = 0;
+    singleGate = null;
     final app = Get.put<AppController>(App());
     app.downloaderConfig.value.downloadDir = dir.path;
     Get.put(CreateController());
@@ -120,6 +122,7 @@ void main() {
         .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
   });
   tearDown(() async {
+    if (singleGate?.isCompleted == false) singleGate!.complete('new-single');
     if (journalBox.gate?.isCompleted == false) journalBox.gate!.complete();
     if (f.postGate?.isCompleted == false) f.postGate!.complete();
     Get.reset();
@@ -151,7 +154,9 @@ void main() {
               batchAcknowledgementTimeout: timeout,
               taskCreator: (CreateTask task) async {
                 singles++;
-                return 'single-$singles';
+                return singleGate == null
+                    ? 'single-$singles'
+                    : await singleGate!.future;
               }))
     ]));
     await t.pumpAndSettle();
@@ -352,6 +357,73 @@ void main() {
     expect(journalBox.puts, 0);
     expect(input(t), urls);
   });
+  for (final stage in ['identity', 'preflight', 'journal', 'POST']) {
+    testWidgets(
+        'editing input during pending $stage releases only the old confirmation',
+        (t) async {
+      final gate = Completer<void>();
+      final handled = Completer<void>();
+      var waiting = false;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      if (stage == 'journal') journalBox.gate = gate;
+      f.override = (req) async {
+        final hold = !waiting &&
+            ((stage == 'identity' &&
+                    req.uri.path == '/api/v1/dataset/identity') ||
+                (stage == 'preflight' &&
+                    req.method == 'GET' &&
+                    req.uri.path.contains('/datasets/')) ||
+                (stage == 'POST' && req.method == 'POST'));
+        if (hold) {
+          waiting = true;
+          await gate.future;
+        }
+        await f.handle(req);
+        if (hold) handled.complete();
+      };
+      singleGate = Completer<String>();
+      await mount(t);
+      await click(t);
+      await spin(t,
+          () => stage == 'journal' ? journalBox.started.isCompleted : waiting);
+      final controller = Get.find<CreateController>();
+      expect(controller.isConfirming.value, isTrue);
+      const next = 'https://fixture.invalid/next-draft';
+      await t.enterText(
+          find.byKey(const ValueKey('panel-download-input')), next);
+      await t.pump();
+      expect(gate.isCompleted, isFalse);
+      expect(controller.isConfirming.value, isFalse);
+      controller.directDownload.value = true;
+      await click(t);
+      await spin(t, () => singles == 1);
+      expect(controller.isConfirming.value, isTrue);
+      gate.complete();
+      await spin(
+          t,
+          () => stage == 'journal'
+              ? journalBox.settled.isCompleted
+              : handled.isCompleted);
+      await t.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await t.pump(const Duration(milliseconds: 20));
+      expect(controller.isConfirming.value, isTrue);
+      expect(input(t), next);
+      expect(MacPanel.taskResult.value, isNull);
+      expect(f.posts, stage == 'POST' ? 1 : 0);
+      expect(journalBox.puts, stage == 'journal' || stage == 'POST' ? 1 : 0);
+      singleGate!.complete('new-single');
+      await spin(t, () => !controller.isConfirming.value && input(t).isEmpty);
+      expect(singles, 1);
+      expect(f.posts, stage == 'POST' ? 1 : 0);
+      expect(
+          TaskBatchJournal.decode(box.get(TaskBatchJournalStore.storageKey))
+              .refs,
+          hasLength(stage == 'journal' || stage == 'POST' ? 1 : 0));
+    });
+  }
   testWidgets('changed input discards late ACK and preserves the new draft',
       (t) async {
     journalBox.gate = Completer<void>();
@@ -361,7 +433,8 @@ void main() {
     await t.enterText(find.byKey(const ValueKey('panel-download-input')),
         'https://fixture.invalid/new');
     journalBox.gate!.complete();
-    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    await spin(t, () => journalBox.settled.isCompleted);
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
     expect(f.posts, 0);
     expect(input(t), 'https://fixture.invalid/new');
     expect(journalBox.puts, 1);
@@ -564,13 +637,22 @@ void main() {
       'late POST reply cannot clear a changed draft or publish old task feedback',
       (t) async {
     f.postGate = Completer<void>();
+    final handled = Completer<void>();
+    f.override = (req) async {
+      await f.handle(req);
+      if (req.method == 'POST') handled.complete();
+    };
     await mount(t);
     await click(t);
     await spin(t, () => f.posts == 1);
     await t.enterText(find.byKey(const ValueKey('panel-download-input')),
         'https://fixture.invalid/new');
     f.postGate!.complete();
-    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    await spin(t, () => handled.isCompleted);
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await t.pumpAndSettle();
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
     expect(input(t), 'https://fixture.invalid/new');
     expect(MacPanel.taskResult.value, isNull);
     expect(f.posts, 1);

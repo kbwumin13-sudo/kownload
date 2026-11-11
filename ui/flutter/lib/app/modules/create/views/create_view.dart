@@ -109,6 +109,7 @@ class _CreateViewState extends State<CreateView> {
     final text = _urlController.text;
     if (text == _manualObservedText) return;
     _manualObservedText = text;
+    final wasWaiting = _manualBusy;
     ++_manualEpoch;
     _manualBusy = false;
     if (_manualBatch != null && _manualBatch!.input == text.trim()) {
@@ -117,6 +118,7 @@ class _CreateViewState extends State<CreateView> {
       _manualBatch = null;
       _manualNotice.value = null;
     }
+    if (wasWaiting) _endManualConfirmationWait();
   }
 
   CreateTaskBatch _manualPayload(List<String> urls, Options opts) =>
@@ -150,8 +152,7 @@ class _CreateViewState extends State<CreateView> {
     _drainQueuedInputs();
   }
 
-  void _stopManualWait() {
-    ++_manualEpoch;
+  void _endManualConfirmationWait() {
     final stop = _manualConfirmationStop;
     if (stop != null && _manualConfirmationEpoch == _confirmationEpoch) {
       ++_confirmationEpoch;
@@ -162,6 +163,11 @@ class _CreateViewState extends State<CreateView> {
       _releaseConfirmation();
       stop.complete();
     }
+  }
+
+  void _stopManualWait() {
+    ++_manualEpoch;
+    _endManualConfirmationWait();
     _manualBusy = false;
     _manualNotice.value =
         _manualBatch == null ? '已停止本次提交，未发送创建请求。' : '已停止等待。本批次引用已保留，请在原连接查询结果。';
