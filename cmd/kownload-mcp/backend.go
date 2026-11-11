@@ -19,12 +19,13 @@ const maxBackend = 128 << 10
 
 type backend struct {
 	socket    string
+	apiToken  string
 	client    *http.Client
 	transport *http.Transport
 }
 
-func newBackend(socket string) *backend {
-	b := &backend{socket: socket}
+func newBackend(socket, apiToken string) *backend {
+	b := &backend{socket: socket, apiToken: apiToken}
 	b.transport = &http.Transport{DisableKeepAlives: true, DisableCompression: true, MaxResponseHeaderBytes: 8192, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		if err := checkSocket(socket); err != nil {
 			return nil, err
@@ -48,6 +49,10 @@ func (b *backend) close() { b.transport.CloseIdleConnections() }
 // component again for every connection. Peer UID adds a post-connect check;
 // neither UID nor a product name authenticates a different process of this user.
 func checkSocket(path string) error {
+	return checkSocketForUID(path, os.Getuid())
+}
+
+func checkSocketForUID(path string, uid int) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("untrusted socket")
 	}
@@ -64,14 +69,14 @@ func checkSocket(path string) error {
 			return errors.New("symlink")
 		}
 		if current == path {
-			if info.Mode()&os.ModeSocket == 0 || int(stat.Uid) != os.Getuid() || info.Mode().Perm()&0077 != 0 {
+			if info.Mode()&os.ModeSocket == 0 || int(stat.Uid) != uid || info.Mode().Perm()&0022 != 0 {
 				return errors.New("socket permissions")
 			}
 		} else {
-			if !info.IsDir() || (stat.Uid != 0 && int(stat.Uid) != os.Getuid()) {
+			if !info.IsDir() || (stat.Uid != 0 && int(stat.Uid) != uid) {
 				return errors.New("directory owner")
 			}
-			if current == filepath.Dir(path) && (int(stat.Uid) != os.Getuid() || info.Mode().Perm()&0077 != 0) {
+			if current == filepath.Dir(path) && (int(stat.Uid) != uid || info.Mode().Perm()&0077 != 0) {
 				return errors.New("private socket parent required")
 			}
 			if info.Mode().Perm()&0022 != 0 && !(info.Mode()&os.ModeSticky != 0 && current != filepath.Dir(path)) {
@@ -97,6 +102,9 @@ func (b *backend) get(ctx context.Context, path string) (json.RawMessage, string
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("X-Kownload-Read-Version", "1")
+	if b.apiToken != "" {
+		request.Header.Set("X-Api-Token", b.apiToken)
+	}
 	response, err := b.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -105,6 +113,9 @@ func (b *backend) get(ctx context.Context, path string) (json.RawMessage, string
 		return nil, "app_unavailable"
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		return nil, "app_authentication_failed"
+	}
 	if response.StatusCode == 404 {
 		return nil, "endpoint_or_task_unavailable"
 	}

@@ -18,8 +18,8 @@ const mcpReadPrefix = "/api/v1/mcp/read/v1/tasks"
 // RegisterMCPReadRoutes is an explicit integration point; it does not start a
 // server or initialize a Downloader. Register only on the existing trusted UDS
 // router (startCfg.Network == "unix"), retaining its access-control middleware.
-// The version header is compatibility metadata, NOT authentication. No call is
-// added to BuildServer by this change; the integration owner wires it later.
+// The version header is compatibility metadata, NOT authentication.
+// BuildServer registers this only on its existing unix listener.
 func RegisterMCPReadRoutes(router *mux.Router, downloader *download.Downloader) {
 	router.PathPrefix("/api/v1/mcp/read/v1/").Handler(newMCPReadHandler(downloader))
 }

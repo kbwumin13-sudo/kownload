@@ -33,6 +33,7 @@ func run() error {
 	flags := flag.NewFlagSet("kownload-mcp", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	socket := flags.String("socket", filepath.Join(home, "Library", "Application Support", "io.github.kbwumin13-sudo.kownload", "ipc", "api.sock"), "trusted application socket")
+	tokenFile := flags.String("api-token-file", "", "explicit private API token file (read once)")
 	showVersion := flags.Bool("version", false, "print bridge version")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
@@ -47,7 +48,20 @@ func run() error {
 	if !filepath.IsAbs(*socket) || filepath.Clean(*socket) != *socket {
 		return fmt.Errorf("invalid socket")
 	}
-	backend := newBackend(*socket)
+	var apiToken string
+	var tokenFileSet bool
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "api-token-file" {
+			tokenFileSet = true
+		}
+	})
+	if tokenFileSet {
+		apiToken, err = readAPITokenFile(*tokenFile)
+		if err != nil {
+			return err
+		}
+	}
+	backend := newBackend(*socket, apiToken)
 	defer backend.close()
 	server := newServer(backend)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

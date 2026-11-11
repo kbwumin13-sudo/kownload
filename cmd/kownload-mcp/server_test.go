@@ -42,7 +42,7 @@ func fixture(t *testing.T, h http.HandlerFunc) string {
 }
 func session(t *testing.T, path string) *mcp.ClientSession {
 	t.Helper()
-	b := newBackend(path)
+	b := newBackend(path, "")
 	t.Cleanup(b.close)
 	st, ct := mcp.NewInMemoryTransports()
 	serverSession, err := newServer(b).Connect(context.Background(), st, nil)
@@ -253,6 +253,22 @@ func TestSocketTrust(t *testing.T) {
 	if err := checkSocket(path); err != nil {
 		t.Fatal(err)
 	}
+	// Read/execute socket bits are acceptable only inside the private parent.
+	if err := os.Chmod(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSocket(path); err != nil {
+		t.Fatal("private parent with 0755 socket rejected")
+	}
+	if err := checkSocketForUID(path, os.Getuid()+1); err == nil {
+		t.Fatal("socket owner mismatch accepted")
+	}
+	if err := os.Chmod(path, 0620); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSocket(path); err == nil {
+		t.Fatal("group writable socket accepted")
+	}
 	if err := os.Chmod(path, 0666); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +301,7 @@ func TestLineBounds(t *testing.T) {
 
 func TestBackendDeadline(t *testing.T) {
 	path := fixture(t, func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
-	b := newBackend(path)
+	b := newBackend(path, "")
 	defer b.close()
 	start := time.Now()
 	_, code := b.get(context.Background(), readPrefix)

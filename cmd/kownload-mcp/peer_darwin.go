@@ -8,6 +8,10 @@ import (
 )
 
 func checkPeer(conn net.Conn) error {
+	return checkPeerForUID(conn, os.Getuid())
+}
+
+func checkPeerForUID(conn net.Conn, uid int) error {
 	socket, ok := conn.(*net.UnixConn)
 	if !ok {
 		return errors.New("not unix")
@@ -23,7 +27,7 @@ func checkPeer(conn net.Conn) error {
 			credentialErr = e
 			return
 		}
-		if int(cred.Uid) != os.Getuid() {
+		if int(cred.Uid) != uid {
 			credentialErr = errors.New("peer owner mismatch")
 		}
 	})

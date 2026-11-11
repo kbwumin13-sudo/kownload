@@ -2,7 +2,7 @@
 
 独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
 
-**本增量是桥实现与受控 UDS 验证。冻结 App build 39/main 446b474 没有下述专用读取端点，不能据此称 App 五读已完成。** App 接线由 core 负责人另行实现和联调；桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
+**当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 始终 null，stats/errors 始终 unavailable。** 已安装 build 39 没有这些端点；正式 App 默认 IPC 父目录的私有权限增量、同源隔离 App 联调及部署仍待集成。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
 ## 固定依赖与构建
 
@@ -19,7 +19,7 @@ GOTOOLCHAIN=local "$GO_BIN" build -trimpath -o /tmp/kownload-mcp .
 
 构建时可用 `-ldflags '-X main.version=<固定发行版本+提交>'` 注入桥版本。开发默认 `0.1.0-dev`。本模块代码沿仓库主 LICENSE；依赖原始许可与哈希保存在 `licenses/`。SDK 固定 LICENSE 包含 MIT→Apache-2.0 迁移说明，不应改标为纯 MIT。`go.sum` 固定模块内容，后续正式源码收集需包含本模块的模块源码 ZIP 和许可，交由构建负责人接线；本增量不修改共享打包脚本/third_party。
 
-## 五读合同草案 v1（供 App 负责人接线）
+## 五读接口 v1（当前部分数据能力）
 
 所有请求只能是 GET，携带 `X-Kownload-Read-Version: 1`；响应为 `{"version":1,"data":<DTO>}`。未知 envelope/DTO 字段均拒绝，不向客户端转发原始响应。无端点或任务返回 404；不把 404 当“空任务”，不探测旧 API。版本不兼容失败关闭。正文最大 128 KiB，HTTP 响应头最大 8 KiB；不跟随重定向。单次超时 3 秒，最多 4 个同时读取，第 5 个返回 busy。
 
@@ -54,13 +54,25 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 - retryable 为 bool，occurredAt 为有效 RFC3339。
 - App 可在原错误路径维护有界内存快照；缺历史返回 unavailable，不抓日志/私密数据库，不把 unavailable 等同于没有错误。
 
-读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。只有以上五个注册工具；annotations 是提示，不承担权限控制。
+读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / app_authentication_failed / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。只有以上五个注册工具；annotations 是提示，不承担权限控制。
 
 ## 传输与权限边界
 
 默认固定 socket：`~/Library/Application Support/io.github.kbwumin13-sudo.kownload/ipc/api.sock`。`--socket <绝对路径>` 仅为可信宿主启动配置/隔离测试；工具参数不能改变 socket、host、路径、method 或请求头。
 
-每次连接检查组件非符号链接、目录 owner 为 root/当前 UID、非共享可写（上层 sticky 临时目录例外）；socket 与直接父目录必须是当前 UID 且无 group/world 权限。连接后检查 Darwin peer UID。桥不 chmod、不创建/删除 socket、不修复生产权限。UID/产品名不是对同用户恶意进程的认证；正式接线还需可信安装位置/注册归属。build39 的实际权限适配未在本增量验证，不自动放宽检查。
+每次连接检查规范绝对路径及所有组件无符号链接，祖先目录 owner 为 root/当前 UID 且非共享可写（上层 sticky 临时目录例外）；socket 必须是文件系统 UDS、属当前 UID、无 group/world 写位，直接父目录必须属当前 UID 且无任何 group/world 访问位。私有父目录阻止其他 UID 到达 socket，因此 socket 自身的读/执行位（例如 0755）可以保留；父目录非私有时，即使 socket 为 0600 也拒绝。连接后检查 Darwin 内核 peer UID。
+
+同 UID 的进程仍在信任范围内；UID/产品名不证明对端是可信 App，也不抵抗同 UID 恶意进程。桥不 chmod、不创建/删除 socket、不修复目录或生产权限。实际 `BuildServer` 的原 listener、自愈机制和进程 umask 均未改动。当前默认 IPC 父目录的创建代码尚不保证私有权限，需独立 App 增量及同源隔离联调；本模块不提供手动 chmod 全数据目录的补救流程。
+
+### 可选显式 API 凭据
+
+`--api-token-file /ABSOLUTE/PRIVATE/token` 仅为用户显式准备的可信启动配置，不是 MCP 工具输入。桥不读取 Hive、数据库或其他应用配置，不自动发现/生成/导出 token，不登录 Web、不使用 Bearer 替代鉴权。未配置文件时不发送 token；App 开启 API token 或仅开启 WebAuth 时，缺少适用凭据会返回固定 `app_authentication_failed`。API token 正确时按原中间件规则通过，包括同时开启 WebAuth 的情况。
+
+文件在启动时只读一次：规范绝对路径，逐级无符号链接、可信且非共享可写祖先（sticky 临时祖先例外），当前 UID 的私有父目录；常规文件、当前 UID、无硬链接，权限严格 0400/0600。采用逐级目录 FD + no-follow 打开并核对文件身份，拒绝 FIFO/目录/链接，最多读取 4096 字节；内容是非空可打印 ASCII 单 token，可有一个结尾 LF，拒绝空白、CRLF、控制符和多行。文件不可用或不安全即启动失败，只输出固定结束信息，不输出文件路径/内容。轮换文件不会改变运行中桥的凭据，新进程读取新值。
+
+内存 token 只加入固定五个 GET 的 `X-Api-Token`，不跟随重定向，不使用 HTTP 代理，不将请求头、错误正文或凭据返回到 MCP。原 API token 是全局 API 凭据，**没有被降权为只读 token**；五读限制属于桥的工具与固定请求集合，不能改变持有该凭据的其他进程权限。凭据文件私有检查不因 socket 权限组合调整而放宽。
+
+客户端配置只可包含显式文件路径，不内嵌 token。mcporter `list --json` 的外层 `transport` 会展示其本地启动参数；它属于客户端配置元数据，与 MCP `tools` schema、工具结果和错误输出分开核验。桥工具 schema/结果不含 token 文件路径或内容。
 
 stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最多 256 KiB，慢读端写入最多等待 5 秒后结束桥。stdout 仅协议帧（显式 `--version` 除外），SDK 日志丢弃，stderr 只给固定结束信息。消息/返回上限不等于下载总字节配额：不拒绝正常未知 Content-Length/chunked 资源，不承诺内核下载硬限额。
 
@@ -90,4 +102,6 @@ stdio 单行最多 64 KiB，tool arguments 最多 4 KiB，输出单次写入最�
 
 `go test`/`go test -race` 使用隔离 UDS 和官方 SDK；包含五工具 schema、读路径、非法输入/未知写工具、私密字段/异常响应、限额、超时/取消、并发与 socket 边界。`tests/mcporter_smoke.py` 使用本机已有 mcporter CLI 和真实构建的桥，执行 tools/list、五读、写调用拒绝及两版本稳定路径模拟；不是自制客户端替代测试。
 
-尚待：App 专用端点、候选 App 五读完整联调、真实签名/包内集成、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。
+新增 `pkg/rest/mcp_read_integration_test.go` 使用实际 `BuildServer`、原认证中间件、私有合成 Bolt 数据与原 UDS listener；覆盖鉴权矩阵、TCP 不注册、Web 兜底顺序、405、五读及 socket 自愈，不手动 chmod socket。设置 `KOWNLOAD_MCP_TEST_BINARY=/ABSOLUTE/TEST-BRIDGE` 后运行 `TestMCPReadBuildServerCLI`，通过已有 mcporter 与真实 stdio 二进制验证五读、错误/缺失 token、文件启动拒绝、凭据路径稳定/轮换和自愈后五读。测试配置与客户端 HOME 均为临时目录；未设置该变量时此 CLI 集成用例显式跳过，不能将其计为已验证。
+
+尚待：默认 App IPC 私有目录增量集成、S3 安全统计/错误发布快照与有效总量、候选 App 五读完整联调、真实签名/包内集成、获准生产稳定路径部署与客户端配置迁移。当前不接触生产 App、日常浏览器、用户任务或凭据。
