@@ -98,6 +98,9 @@ class _ManualBatchAttempt {
 class _CreateViewState extends State<CreateView> {
   _ManualBatchAttempt? _manualBatch;
   int _manualEpoch = 0;
+  int _confirmationEpoch = 0;
+  int? _manualConfirmationEpoch;
+  Completer<void>? _manualConfirmationStop;
   String _manualObservedText = '';
   bool _manualBusy = false;
   final _manualNotice = RxnString();
@@ -137,8 +140,26 @@ class _CreateViewState extends State<CreateView> {
                       selectFiles: [],
                       extra: parseReqOptsExtra()))
               .toJson());
+  void _releaseConfirmation() {
+    _confirmController.reset();
+    _confirmingCapture = null;
+    _captureCompletedDuringConfirm = false;
+    controller.isConfirming.value = false;
+    _drainQueuedInputs();
+  }
+
   void _stopManualWait() {
     ++_manualEpoch;
+    final stop = _manualConfirmationStop;
+    if (stop != null && _manualConfirmationEpoch == _confirmationEpoch) {
+      ++_confirmationEpoch;
+      _manualConfirmationStop = null;
+      _manualConfirmationEpoch = null;
+      // Release only this UI wait. The real journal write keeps its Box fence,
+      // and the attempt keeps its consumed first-send permission.
+      _releaseConfirmation();
+      stop.complete();
+    }
     _manualBusy = false;
     _manualNotice.value =
         _manualBatch == null ? '已停止本次提交，未发送创建请求。' : '已停止等待。本批次引用已保留，请在原连接查询结果。';
@@ -2478,6 +2499,7 @@ class _CreateViewState extends State<CreateView> {
     if (controller.isConfirming.value) {
       return;
     }
+    final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
         ? _panelRequest?.browserOperationId
@@ -2613,7 +2635,10 @@ class _CreateViewState extends State<CreateView> {
             _netdiskRequest.value == null &&
             Get.find<AppController>().pendingUpdateTask.value == null &&
             urls.every((url) => parseProtocol(url) == Protocol.http)) {
-          await _submitManualBatch(urls, opt);
+          final stop = Completer<void>();
+          _manualConfirmationEpoch = confirmation;
+          _manualConfirmationStop = stop;
+          await Future.any<void>([_submitManualBatch(urls, opt), stop.future]);
           return;
         }
         if (isDirect) {
@@ -2646,11 +2671,11 @@ class _CreateViewState extends State<CreateView> {
       _panelError.value = error.toString();
       if (!Util.isMacos()) showErrorMessage(error);
     } finally {
-      _confirmController.reset();
-      _confirmingCapture = null;
-      _captureCompletedDuringConfirm = false;
-      controller.isConfirming.value = false;
-      _drainQueuedInputs();
+      if (_manualConfirmationEpoch == confirmation) {
+        _manualConfirmationEpoch = null;
+        _manualConfirmationStop = null;
+      }
+      if (confirmation == _confirmationEpoch) _releaseConfirmation();
     }
   }
 

@@ -54,6 +54,7 @@ class JournalBox extends Fake implements Box {
   bool fail = false;
   final started = Completer<void>();
   int puts = 0;
+  final settled = Completer<void>();
   JournalBox(this.inner);
   @override
   dynamic get(dynamic key, {dynamic defaultValue}) =>
@@ -62,9 +63,13 @@ class JournalBox extends Fake implements Box {
   Future<void> put(dynamic key, dynamic value) async {
     puts++;
     if (!started.isCompleted) started.complete();
-    if (gate != null) await gate!.future;
-    if (fail) throw StateError('fixture journal failure');
-    await ioZone.run(() => inner.put(key, value));
+    try {
+      if (gate != null) await gate!.future;
+      if (fail) throw StateError('fixture journal failure');
+      await ioZone.run(() => inner.put(key, value));
+    } finally {
+      if (!settled.isCompleted) settled.complete();
+    }
   }
 }
 
@@ -242,7 +247,8 @@ void main() {
     await t.tap(find.byKey(const ValueKey('manual-batch-stop')));
     await t.pump();
     journalBox.gate!.complete();
-    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    await spin(t, () => journalBox.settled.isCompleted);
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
     expect(f.posts, 0);
     expect(input(t), urls);
     expect(
@@ -250,12 +256,83 @@ void main() {
         hasLength(1));
   });
   testWidgets(
+      'stop releases confirmation before journal settles and late completion cannot reset a new query',
+      (t) async {
+    journalBox.gate = Completer<void>();
+    final queryGate = Completer<void>();
+    addTearDown(() {
+      if (!queryGate.isCompleted) queryGate.complete();
+    });
+    await mount(t);
+    await click(t);
+    await spin(t, () => journalBox.started.isCompleted);
+    await t.tap(find.byKey(const ValueKey('manual-batch-stop')));
+    await t.pump();
+    final controller = Get.find<CreateController>();
+    expect(controller.isConfirming.value, isFalse);
+    expect(journalBox.gate!.isCompleted, isFalse);
+    final gets = f.scopedGets;
+    f.override = (req) async {
+      if (req.method == 'GET' && req.uri.path.contains('/datasets/')) {
+        await queryGate.future;
+      }
+      await f.handle(req);
+    };
+    await click(t);
+    await spin(t, () => f.scopedGets > gets);
+    expect(controller.isConfirming.value, isTrue);
+    journalBox.gate!.complete();
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 30)));
+    await t.pump();
+    expect(controller.isConfirming.value, isTrue);
+    expect(f.posts, 0);
+    expect(journalBox.puts, 1);
+    queryGate.complete();
+    await spin(t, () => !controller.isConfirming.value);
+    expect(input(t), urls);
+    expect(
+        TaskBatchJournal.decode(box.get(TaskBatchJournalStore.storageKey)).refs,
+        hasLength(1));
+  });
+  testWidgets(
+      'stop during POST permits query while original POST remains pending',
+      (t) async {
+    f.postGate = Completer<void>();
+    final handled = Completer<void>();
+    f.override = (req) async {
+      await f.handle(req);
+      if (req.method == 'POST') handled.complete();
+    };
+    await mount(t);
+    await click(t);
+    await spin(t, () => f.posts == 1);
+    await t.tap(find.byKey(const ValueKey('manual-batch-stop')));
+    await t.pump();
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
+    expect(f.postGate!.isCompleted, isFalse);
+    final gets = f.scopedGets;
+    await t.tap(find.byKey(const ValueKey('manual-batch-query')));
+    await spin(t, () => f.scopedGets > gets);
+    expect(f.posts, 1);
+    f.postGate!.complete();
+    await spin(t, () => handled.isCompleted);
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await t.pumpAndSettle();
+    expect(input(t), urls);
+    expect(f.posts, 1);
+    expect(journalBox.puts, 1);
+  });
+  testWidgets(
       'stop during identity preflight claims no recorded reference and sends zero POST',
       (t) async {
     final gate = Completer<void>();
+    final handled = Completer<void>();
     f.override = (req) async {
       if (req.uri.path == '/api/v1/dataset/identity') await gate.future;
       await f.handle(req);
+      handled.complete();
     };
     await mount(t);
     await click(t);
@@ -263,7 +340,11 @@ void main() {
     await t.tap(find.byKey(const ValueKey('manual-batch-stop')));
     await t.pump();
     gate.complete();
-    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    await spin(t, () => handled.isCompleted);
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await t.pumpAndSettle();
+    expect(Get.find<CreateController>().isConfirming.value, isFalse);
     expect(find.text('已停止本次提交，未发送创建请求。'), findsOneWidget);
     expect(f.posts, 0);
     expect(journalBox.puts, 0);
