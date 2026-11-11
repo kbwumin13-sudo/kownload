@@ -42,6 +42,7 @@ import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_onboarding.dart';
 import '../../task/controllers/task_controller.dart';
 import '../../task/views/task_batch_groups.dart';
+import '../../task/views/http_completion_status.dart';
 import '../../../routes/app_pages.dart';
 import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
@@ -52,6 +53,8 @@ import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
 import 'browser_media_view.dart';
+import 'http_checksum_input.dart';
+import '../../../../../api/verified_http_api.dart';
 
 class CreateView extends StatefulWidget {
   final TaskBatchJournalStore? batchJournal;
@@ -90,9 +93,11 @@ class _ManualBatchAttempt {
   final TaskBatchOperationRef operation;
   final CreateTaskBatch batch;
   final String input, signature;
+  final String? expectedSha256;
   bool sent = false;
   _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
-      this.input, this.signature);
+      this.input, this.signature,
+      {this.expectedSha256});
 }
 
 class _CreateViewState extends State<CreateView> {
@@ -134,16 +139,40 @@ class _CreateViewState extends State<CreateView> {
       attempt.api.snapshot.isCurrent;
   bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
       _manualReferenceCurrent(attempt, epoch) &&
+      _checksumDraftMatches(attempt) &&
       attempt.input == _urlController.text.trim() &&
       attempt.signature ==
           jsonEncode(_manualPayload(
                   Util.textToLines(attempt.input),
                   Options(
-                      name: '',
+                      name: attempt.expectedSha256 == null
+                          ? ''
+                          : _renameController.text,
                       path: _pathController.text,
                       selectFiles: [],
                       extra: parseReqOptsExtra()))
               .toJson());
+  bool _checksumDraftMatches(_ManualBatchAttempt attempt) {
+    try {
+      return normalizedExpectedSha256(_expectedSha256Controller.text) ==
+              attempt.expectedSha256 &&
+          (attempt.expectedSha256 == null ||
+              _expectedSha256Url == attempt.input);
+    } on FormatException {
+      return false;
+    }
+  }
+
+  void _checksumChanged() {
+    _expectedSha256Url = _urlController.text.trim();
+    if (_manualBusy) {
+      ++_manualEpoch;
+      _manualBusy = false;
+      _endManualConfirmationWait();
+      _manualNotice.value = '摘要已变化，原引用只可查询，当前草稿已保留。';
+    }
+  }
+
   void _releaseConfirmation() {
     _confirmController.reset();
     _confirmingCapture = null;
@@ -269,7 +298,8 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
-  Future<void> _submitManualBatch(List<String> urls, Options opts) async {
+  Future<void> _submitManualBatch(List<String> urls, Options opts,
+      {String? expectedSha256}) async {
     if (_manualBatch != null) {
       await _queryManualBatch();
       return;
@@ -283,6 +313,18 @@ class _CreateViewState extends State<CreateView> {
     final epoch = ++_manualEpoch;
     final raw = jsonEncode(_manualPayload(urls, opts).toJson());
     final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
+    // Existing attempts returned through query above. A purely local rejection
+    // of a new draft must not create a journal reference or consume permission.
+    if (expectedSha256 != null) {
+      try {
+        VerifiedHttpApi.validateRequest(frozen);
+      } on ArgumentError catch (error) {
+        _manualNotice.value = error.message == 'unsupported_option'
+            ? 'SHA-256 校验不支持自动加种或自动解压（unsupported_option），请关闭相应选项后重试。'
+            : 'SHA-256 校验仅支持单个直接 HTTP(S) 成品，未提交任务。';
+        return;
+      }
+    }
     setState(() => _manualBusy = true);
     _manualNotice.value = '正在检查批次能力…';
     try {
@@ -290,7 +332,19 @@ class _CreateViewState extends State<CreateView> {
       if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) {
         return;
       }
-      final bound = ScopedTaskBatchApi(snapshot: snapshot, identity: identity);
+      final ScopedTaskBatchApi bound = expectedSha256 == null
+          ? ScopedTaskBatchApi(snapshot: snapshot, identity: identity)
+          : VerifiedHttpApi(
+              snapshot: snapshot,
+              identity: identity,
+              expectedSHA256: expectedSha256);
+      if (bound is VerifiedHttpApi && !await bound.supported()) {
+        if (mounted && epoch == _manualEpoch && snapshot.isCurrent) {
+          _manualNotice.value = '当前下载服务未确认 SHA-256 校验能力，未提交任务。';
+        }
+        return;
+      }
+      if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) return;
       final id =
           'manual-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
       final operation = TaskBatchOperationRef(
@@ -302,7 +356,8 @@ class _CreateViewState extends State<CreateView> {
           operation,
           frozen,
           input,
-          raw);
+          raw,
+          expectedSha256: expectedSha256);
       // Preflight is a pure capability/domain query, never a recovered submit permit.
       final preflight = await bound.query(operation);
       if (!mounted ||
@@ -530,6 +585,7 @@ class _CreateViewState extends State<CreateView> {
       _urlController,
       _renameController,
       _connectionsController,
+      _expectedSha256Controller,
       _pathController,
       _proxyIpController,
       _proxyPortController,
@@ -552,6 +608,8 @@ class _CreateViewState extends State<CreateView> {
   final _urlController = TextEditingController();
   final _renameController = TextEditingController();
   final _connectionsController = TextEditingController();
+  final _expectedSha256Controller = TextEditingController();
+  String? _expectedSha256Url;
   final _pathController = TextEditingController();
   final _confirmController = RoundedLoadingButtonController();
   final _proxyIpController = TextEditingController();
@@ -1180,6 +1238,13 @@ class _CreateViewState extends State<CreateView> {
                               ],
                             )),
                         if (Util.isMacos()) const SizedBox(height: 12),
+                        if (Util.isMacos()) ...[
+                          HttpChecksumInput(
+                            controller: _expectedSha256Controller,
+                            onChanged: (_) => _checksumChanged(),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         _macLabeledField(
                             'downloadDir'.tr,
                             DirectorySelector(
@@ -1775,6 +1840,8 @@ class _CreateViewState extends State<CreateView> {
     }
     _originalRequest = null;
     _renameController.clear();
+    _expectedSha256Controller.clear();
+    _expectedSha256Url = null;
     _btTrackerController.clear();
     _archivePasswordController.clear();
     _proxyIpController.clear();
@@ -2260,6 +2327,7 @@ class _CreateViewState extends State<CreateView> {
     final running = task.status == Status.running;
     final failed = task.status == Status.error;
     final done = task.status == Status.done;
+    final completion = HttpCompletionView.forTask(task);
     final total = task.meta.res?.size ?? 0;
     final progress =
         total > 0 ? (task.progress.downloaded / total).clamp(0.0, 1.0) : 0.0;
@@ -2289,7 +2357,7 @@ class _CreateViewState extends State<CreateView> {
                         fontWeight: FontWeight.w400,
                         color: c.text)),
                 const SizedBox(height: 3),
-                if (failed)
+                if (failed && completion == null)
                   MacTaskFailure(
                       key: ValueKey('failure-${task.id}'),
                       taskId: task.id,
@@ -2299,20 +2367,22 @@ class _CreateViewState extends State<CreateView> {
                   Text(
                       task.handoff?.blocked == true
                           ? task.handoff!.label
-                          : failed
-                              ? '下载失败 · 查看详情'
-                              : done
-                                  ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                                  : task.fetchingTorrentInfo
-                                      ? '正在获取种子信息'
-                                      : running
-                                          ? (total > 0
-                                              ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
-                                              : Util.fmtByte(
-                                                  task.progress.downloaded))
-                                          : task.status == Status.pause
-                                              ? '已暂停'
-                                              : '等待下载',
+                          : completion != null
+                              ? completion.labelFor(task.status)
+                              : failed
+                                  ? '下载失败 · 查看详情'
+                                  : done
+                                      ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                                      : task.fetchingTorrentInfo
+                                          ? '正在获取种子信息'
+                                          : running
+                                              ? (total > 0
+                                                  ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
+                                                  : Util.fmtByte(
+                                                      task.progress.downloaded))
+                                              : task.status == Status.pause
+                                                  ? '已暂停'
+                                                  : '等待下载',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -2375,8 +2445,13 @@ class _CreateViewState extends State<CreateView> {
                     }
                   })
                 else if (done)
-                  Icon(CupertinoIcons.checkmark_circle,
-                      size: 17, color: c.secondary)
+                  Icon(
+                      completion == null ||
+                              completion.isConfirmedDoneFor(task.status)
+                          ? CupertinoIcons.checkmark_circle
+                          : CupertinoIcons.question_circle,
+                      size: 17,
+                      color: c.secondary)
                 else
                   _panelIcon(
                       c,
@@ -2508,10 +2583,39 @@ class _CreateViewState extends State<CreateView> {
     }
   }
 
+  bool _checksumInputBlocked() {
+    String? expected;
+    try {
+      expected = normalizedExpectedSha256(_expectedSha256Controller.text);
+    } on FormatException catch (error) {
+      _manualNotice.value = error.message;
+      return true;
+    }
+    if (expected == null) return false;
+    final input = _urlController.text.trim();
+    final urls = Util.textToLines(input);
+    if (urls.length != 1 ||
+        parseProtocol(urls.single) != Protocol.http ||
+        !const {'http', 'https'}.contains(Uri.tryParse(urls.single)?.scheme) ||
+        (Uri.tryParse(urls.single)?.host.isEmpty ?? true) ||
+        _panelRequest != null ||
+        _originalRequest != null ||
+        _netdiskRequest.value != null ||
+        Get.find<AppController>().pendingUpdateTask.value != null) {
+      _manualNotice.value = 'SHA-256 校验目前仅支持手动单链接 HTTP(S)，未提交任务。';
+    } else if (_expectedSha256Url != input) {
+      _manualNotice.value = '链接已变化，请重新填写当前链接的 SHA-256，未提交任务。';
+    } else {
+      return false;
+    }
+    return true;
+  }
+
   Future<void> _doConfirm() async {
     if (controller.isConfirming.value) {
       return;
     }
+    if (_checksumInputBlocked()) return;
     final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
@@ -2632,6 +2736,8 @@ class _CreateViewState extends State<CreateView> {
         1. Direct download option is checked
         2. Muli line urls
         */
+        final expectedSha256 =
+            normalizedExpectedSha256(_expectedSha256Controller.text);
         final isMultiLine = urls.length > 1;
         final isDirect = controller.directDownload.value || isMultiLine;
         final opt = Options(
@@ -2642,7 +2748,7 @@ class _CreateViewState extends State<CreateView> {
         );
         if (Util.isMacos() &&
             netdiskInputs.isEmpty &&
-            isMultiLine &&
+            (isMultiLine || expectedSha256 != null || _manualBatch != null) &&
             _panelRequest == null &&
             _originalRequest == null &&
             _netdiskRequest.value == null &&
@@ -2651,7 +2757,10 @@ class _CreateViewState extends State<CreateView> {
           final stop = Completer<void>();
           _manualConfirmationEpoch = confirmation;
           _manualConfirmationStop = stop;
-          await Future.any<void>([_submitManualBatch(urls, opt), stop.future]);
+          await Future.any<void>([
+            _submitManualBatch(urls, opt, expectedSha256: expectedSha256),
+            stop.future
+          ]);
           return;
         }
         if (isDirect) {
