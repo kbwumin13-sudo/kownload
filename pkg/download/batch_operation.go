@@ -49,27 +49,40 @@ type BatchOperationRequest struct {
 	integrity   *VerifiedHTTPIntegrityIntent // dedicated verified receiver only, never legacy wire Extra
 }
 type operationMember struct {
-	Index        int           `json:"index"`
-	TaskID       string        `json:"taskId"`
-	State        string        `json:"state"`
-	Error        string        `json:"error,omitempty"`
-	Protocol     string        `json:"protocol,omitempty"`
-	Options      *base.Options `json:"options,omitempty"`
-	CompletionID string        `json:"completionId,omitempty"`
+	PathFreeze   *TaskPathFreeze `json:"pathFreeze,omitempty"`
+	Index        int             `json:"index"`
+	TaskID       string          `json:"taskId"`
+	State        string          `json:"state"`
+	Error        string          `json:"error,omitempty"`
+	Protocol     string          `json:"protocol,omitempty"`
+	Options      *base.Options   `json:"options,omitempty"`
+	CompletionID string          `json:"completionId,omitempty"`
 }
 type batchOperationRecord struct {
-	Version     int                          `json:"version"`
-	Namespace   string                       `json:"namespace"`
-	OperationID string                       `json:"operationId"`
-	RequestHash string                       `json:"requestHash"`
-	CreatedAt   time.Time                    `json:"createdAt"`
-	UpdatedAt   time.Time                    `json:"updatedAt"`
-	Members     []operationMember            `json:"members"`
-	Integrity   *VerifiedHTTPIntegrityIntent `json:"integrity,omitempty"`
+	Kind                 string                       `json:"kind,omitempty"`
+	RequiredCapabilities []string                     `json:"requiredCapabilities,omitempty"`
+	Path                 *pathOperationState          `json:"path,omitempty"`
+	Version              int                          `json:"version"`
+	Namespace            string                       `json:"namespace"`
+	OperationID          string                       `json:"operationId"`
+	RequestHash          string                       `json:"requestHash"`
+	CreatedAt            time.Time                    `json:"createdAt"`
+	UpdatedAt            time.Time                    `json:"updatedAt"`
+	Members              []operationMember            `json:"members"`
+	Integrity            *VerifiedHTTPIntegrityIntent `json:"integrity,omitempty"`
 }
 
 func (r *batchOperationRecord) UnmarshalJSON(b []byte) error {
 	type record batchOperationRecord
+	var version struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(b, &version); err != nil {
+		return err
+	}
+	if version.Version == 2 {
+		return mcpWriteDecode(b, (*record)(r))
+	}
 	return decodeStoredJSON(b, (*record)(r))
 }
 
@@ -174,7 +187,14 @@ func canonicalBatch(r BatchOperationRequest) ([]*base.CreateTaskBatchItem, strin
 	return items, hex.EncodeToString(sum[:]), nil
 }
 func (r *batchOperationRecord) valid() bool {
-	if r.Version != 1 || r.Namespace != batchOperationNamespace || !operationIDPattern.MatchString(r.OperationID) || len(r.Members) == 0 || len(r.Members) > 10000 {
+	if r.Version == 2 {
+		if !pathRecordValid(r) {
+			return false
+		}
+	} else if r.Version != 1 || r.Kind != "" || r.RequiredCapabilities != nil || r.Path != nil {
+		return false
+	}
+	if r.Namespace != batchOperationNamespace || !operationIDPattern.MatchString(r.OperationID) || len(r.Members) == 0 || len(r.Members) > 10000 {
 		return false
 	}
 	if r.Integrity != nil && (!r.Integrity.valid() || len(r.Members) != 1) {
@@ -186,6 +206,9 @@ func (r *batchOperationRecord) valid() bool {
 	}
 	ids := map[string]bool{}
 	for i, m := range r.Members {
+		if r.Version == 1 && m.PathFreeze != nil {
+			return false
+		}
 		if m.Index != i || m.TaskID == "" || ids[m.TaskID] {
 			return false
 		}
@@ -217,7 +240,7 @@ func (r *batchOperationRecord) valid() bool {
 }
 func operationKey(id string) string { return batchOperationNamespace + ":" + id }
 func operationRef(r *batchOperationRecord, i int) CreationOperation {
-	return CreationOperation{1, batchOperationNamespace, r.OperationID, i}
+	return CreationOperation{r.Version, batchOperationNamespace, r.OperationID, i}
 }
 
 func (d *Downloader) loadOperation(id string) (*batchOperationRecord, error) {
@@ -246,7 +269,7 @@ func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 	if err != nil {
 		return ErrOperationUnavailable
 	}
-	if !exists && t.CreationOperation == nil && t.MCPWrite == nil {
+	if !exists && t.CreationOperation == nil && t.MCPWrite == nil && t.PathFreeze == nil {
 		return nil
 	}
 	if !exists || t.CreationOperation == nil || link.TaskID != t.ID || link.Ref != *t.CreationOperation {
@@ -267,6 +290,24 @@ func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 		}
 		_, _, err := readMCPWriteTask(reader, t.ID)
 		return err
+	}
+
+	if ref.Version == 2 && ref.Namespace == batchOperationNamespace {
+		if t.PathFreeze == nil || t.MCPWrite != nil {
+			return ErrOperationConflict
+		}
+		if store, ok := reader.(Storage); ok {
+			record, err := loadOperationFrom(reader, ref.OperationID)
+			if err != nil || record == nil || record.Path == nil {
+				return ErrOperationConflict
+			}
+			return withDatasetReadView(store, record.Path.DatasetID, func(view datasetReader) error { _, _, err := ReadPathFreeze(view, t.ID); return err })
+		}
+		_, _, err := ReadPathFreeze(reader, t.ID)
+		return err
+	}
+	if t.PathFreeze != nil || t.MCPWrite != nil {
+		return ErrOperationConflict
 	}
 	if ref.Version != 1 || ref.Namespace != batchOperationNamespace {
 		return ErrOperationConflict
@@ -289,6 +330,9 @@ func (t *Task) creationHeld() bool {
 	defer t.dataLock.RUnlock()
 	if t.creationBlocked {
 		return true
+	}
+	if t.PathFreeze != nil {
+		return t.MCPWrite != nil || t.CreationOperation == nil || t.CreationOperation.Version != 2 || t.CreationOperation.Namespace != batchOperationNamespace || !pathFrozenValid(*t.PathFreeze)
 	}
 	if t.MCPWrite != nil {
 		return t.CreationOperation == nil || t.CreationOperation.Version != 2 || t.CreationOperation.Namespace != MCPWriteNamespace || !mcpWriteStateValid(*t.MCPWrite)

@@ -242,8 +242,8 @@ func readMCPWriteTask(reader datasetReader, id string) (*Task, mcpWriteRecord, e
 	if !present || task.ID != id {
 		return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
 	}
-	mcpLink := linked && (link.Ref.Namespace == MCPWriteNamespace || link.Ref.Version == 2)
-	mcpRef := task.CreationOperation != nil && (task.CreationOperation.Namespace == MCPWriteNamespace || task.CreationOperation.Version == 2)
+	mcpLink := linked && link.Ref.Namespace == MCPWriteNamespace
+	mcpRef := task.CreationOperation != nil && task.CreationOperation.Namespace == MCPWriteNamespace
 	if task.MCPWrite == nil && !mcpLink && !mcpRef {
 		if err := checkCreationAssociationFrom(reader, task); err != nil {
 			return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
