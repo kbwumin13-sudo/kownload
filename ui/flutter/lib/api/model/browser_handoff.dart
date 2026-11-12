@@ -53,17 +53,49 @@ bool validHandoffId(dynamic value) =>
     value is String &&
     RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$').hasMatch(value);
 
+/// Read-only association with the existing handoff operation, never a permit.
+class BrowserPathHandoffProjection {
+  final String datasetId;
+  final List<String> requiredCapabilities;
+  const BrowserPathHandoffProjection._(this.datasetId, this.requiredCapabilities);
+  factory BrowserPathHandoffProjection.fromJson(Map value, {required bool unknown}) {
+    final caps = value['requiredCapabilities'];
+    if (value['version'] is! int || value['version'] != 1 ||
+        value['datasetId'] is! String ||
+        RegExp(r'^[0-9a-f]{32}$').stringMatch(value['datasetId']) != value['datasetId'] ||
+        value['kind'] != 'http-path-create/v1' || caps is! List ||
+        !(unknown && caps.isEmpty ||
+          caps.length == 1 && caps[0] == 'single-http-path-freeze/v1' ||
+          caps.length == 2 && caps[0] == 'single-http-path-freeze/v1' && caps[1] == 'http-sha256-completion/v1')) {
+      throw const FormatException('invalid_path_handoff_projection');
+    }
+    return BrowserPathHandoffProjection._(value['datasetId'], List<String>.unmodifiable(caps));
+  }
+  Map<String, dynamic> toJson() => {'version': 1, 'datasetId': datasetId,
+    'kind': 'http-path-create/v1', 'requiredCapabilities': requiredCapabilities};
+}
+
+class BrowserHandoffRequestFailure implements Exception {
+  final int? statusCode, code;
+  final String? reason;
+  const BrowserHandoffRequestFailure(this.statusCode, this.code, this.reason);
+  bool get conflicted => statusCode == 409 || reason == 'operation_conflict';
+  @override
+  String toString() => 'BrowserHandoffRequestFailure(${reason ?? 'query_required'})';
+}
+
 class BrowserHandoffResult {
   final String operationId, state;
   final List<String> taskIds;
   final String? reason, taskStatus;
   final BrowserDownloadIdentity? download;
+  final BrowserPathHandoffProjection? pathCreate;
   const BrowserHandoffResult(this.operationId, this.state, this.taskIds,
-      {this.reason, this.taskStatus, this.download});
+      {this.reason, this.taskStatus, this.download, this.pathCreate});
   factory BrowserHandoffResult.fromJson(Map value,
       {String? operationId, bool allowLocalAbort = false}) {
     final state = value['state'], ids = value['taskIds'];
-    if (value['version'] != 1 ||
+    if (value['version'] is! int || value['version'] != 1 ||
         !validHandoffId(value['operationId']) ||
         operationId != null && value['operationId'] != operationId ||
         !const ['prepared', 'committed', 'aborted', 'unknown']
@@ -74,6 +106,7 @@ class BrowserHandoffResult {
         const ['prepared', 'committed'].contains(state) && ids.length != 1 ||
         state == 'unknown' && ids.isNotEmpty ||
         state == 'aborted' && ids.isEmpty && !allowLocalAbort ||
+        value['pathCreate'] != null && value['pathCreate'] is! Map ||
         value['taskId'] != null &&
             (ids.length != 1 || value['taskId'] != ids.single)) {
       throw const FormatException('invalid_handoff_result');
@@ -84,6 +117,9 @@ class BrowserHandoffResult {
         taskStatus: value['taskStatus'] is String ? value['taskStatus'] : null,
         download: value['download'] is Map
             ? BrowserDownloadIdentity.fromJson(value['download'])
+            : null,
+        pathCreate: value['pathCreate'] is Map
+            ? BrowserPathHandoffProjection.fromJson(value['pathCreate'], unknown: state == 'unknown')
             : null);
   }
   Map<String, dynamic> toJson() => {
@@ -94,7 +130,8 @@ class BrowserHandoffResult {
         if (taskIds.isNotEmpty) 'taskId': taskIds.single,
         if (reason != null) 'reason': reason,
         if (taskStatus != null) 'taskStatus': taskStatus,
-        if (download != null) 'download': download!.toJson()
+        if (download != null) 'download': download!.toJson(),
+        if (pathCreate != null) 'pathCreate': pathCreate!.toJson(),
       };
   bool get committed => state == 'committed';
   String get message => state == 'prepared'

@@ -11,6 +11,7 @@ import '../database/database.dart';
 import '../database/task_batch_journal.dart';
 import '../util/util.dart';
 import 'model/create_task.dart';
+import 'model/browser_handoff.dart';
 import 'model/create_task_batch.dart';
 import 'model/downloader_config.dart';
 import 'model/extension.dart';
@@ -418,14 +419,37 @@ Future<ResolveResult> resolve(ResolveTask resolveTask) async {
 
 /// Fixed core endpoint; no fallback to ordinary create on unsupported cores.
 Future<Map<String, dynamic>> browserHandoffRequest(
-        String method, Map<String, dynamic> data) =>
-    _parse<Map<String, dynamic>>(
+        String method, Map<String, dynamic> data,
+        {ActiveApiSnapshot? snapshot}) async {
+  if (snapshot == null) return _parse<Map<String, dynamic>>(
         () => method == 'GET'
             ? _client.dio.get('/api/v1/browser/handoff')
             : _client.dio.post('/api/v1/browser/handoff', data: data),
         (value) => value is Map
             ? Map<String, dynamic>.from(value)
             : throw const FormatException('invalid_handoff_result'));
+  if (!const {'GET', 'POST'}.contains(method) || method == 'GET' && data.isNotEmpty) {
+    throw ArgumentError('invalid_handoff_endpoint');
+  }
+  if (!snapshot.isCurrent) throw StateError('handoff_route_changed');
+  Response<dynamic> response;
+  try {
+    response = await snapshot._transport.dio.request('/api/v1/browser/handoff',
+        data: method == 'GET' ? null : data,
+        options: Options(method: method, followRedirects: false));
+  } on DioException catch (error) {
+    if (error.response == null) rethrow;
+    response = error.response!;
+  }
+  if (!snapshot.isCurrent) throw StateError('handoff_route_changed');
+  final body = response.data;
+  final code = body is Map && body['code'] is int ? body['code'] as int : null;
+  if (response.statusCode != 200 || code != 0 || body is! Map || body['data'] is! Map) {
+    throw BrowserHandoffRequestFailure(response.statusCode, code,
+        body is Map && body['msg'] is String ? body['msg'] : null);
+  }
+  return Map<String, dynamic>.from(body['data']);
+}
 
 Future<String> createTask(CreateTask createTask, {String? operationId}) async {
   return _parse<String>(
