@@ -191,17 +191,21 @@ func hasRecoveryMember(m []string, w string) bool {
 // This owner never takes Downloader/task locks from a protocol callback. Core
 // invalidates the atomic run fence before Pause/Delete/Close waits on protocol IO.
 type taskRecoveryOwner struct {
-	mu                 sync.Mutex
-	store              AtomicStorage
-	taskID             string
-	record             recoveryRecord
-	active             atomic.Bool
-	closed             *atomic.Bool
-	token              transfer.RecoveryToken
-	runContext         context.Context // guarded by mu; runtime lease is tied to preparation cancellation
-	permits            map[uint64]map[string]*transfer.RecoveryPermit
-	retryAuthorization atomic.Pointer[recoveryRetryAuthorization]
-	verificationOnly   bool // mu; verifier tokens cannot authorize transport work
+	mu                              sync.Mutex
+	store                           AtomicStorage
+	taskID                          string
+	record                          recoveryRecord
+	active                          atomic.Bool
+	closed                          *atomic.Bool
+	token                           transfer.RecoveryToken
+	runContext                      context.Context // guarded by mu; runtime lease is tied to preparation cancellation
+	permits                         map[uint64]map[string]*transfer.RecoveryPermit
+	retryAuthorization              atomic.Pointer[recoveryRetryAuthorization]
+	verificationOnly                bool // mu; verifier tokens cannot authorize transport work
+	coverageNewEnrollment           atomic.Bool
+	coverageInstallAuthorization    atomic.Pointer[transfer.RecoveryToken]
+	coverageSettlementAuthorization atomic.Pointer[coverageSettlementAuthorization]
+	coverageObservationHeld         atomic.Bool
 }
 
 type recoveryReader interface {
@@ -254,6 +258,7 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 	}
 	var record recoveryRecord
 	freshInitial := task.recoveryInitialEligible.Swap(false)
+	freshEnrollment := false
 	e = store.UpdateAtomic(func(tx StorageTransaction) error {
 		var required recoveryRequirement
 		var existing recoveryRecord
@@ -285,6 +290,7 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 			return transfer.ErrRecoveryHeld
 		}
 		saved.Recovery = &TaskRecoveryRef{Version: 1}
+		freshEnrollment = freshInitial
 		initialState := "uncertain"
 		if freshInitial {
 			initialState = "ungranted"
@@ -301,11 +307,17 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 	if e != nil {
 		return nil, recoveryStorageError(e)
 	}
-	return &taskRecoveryOwner{store: store, taskID: task.ID, record: record, permits: map[uint64]map[string]*transfer.RecoveryPermit{}}, nil
+	owner := &taskRecoveryOwner{store: store, taskID: task.ID, record: record, permits: map[uint64]map[string]*transfer.RecoveryPermit{}}
+	owner.coverageNewEnrollment.Store(freshEnrollment)
+	return owner, nil
 }
 func (o *taskRecoveryOwner) invalidate() {
 	o.active.Store(false)
 	o.retryAuthorization.Store(nil)
+	o.coverageNewEnrollment.Store(false)
+	o.coverageInstallAuthorization.Store(nil)
+	o.coverageSettlementAuthorization.Store(nil)
+	o.coverageObservationHeld.Store(true)
 }
 func (o *taskRecoveryOwner) invalidateToken(token transfer.RecoveryToken) {
 	o.mu.Lock()
@@ -352,6 +364,9 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 	// An acknowledged explicit user action may fund exactly this one attempt.
 	// Neither the durable receipt nor a reloaded owner can reconstruct it.
 	explicit := o.retryAuthorization.Swap(nil)
+	initialCoverage := o.coverageNewEnrollment.Swap(false)
+	o.coverageInstallAuthorization.Store(nil)
+	earned := o.coverageSettlementAuthorization.Swap(nil)
 	var committed recoveryRecord
 	err := o.store.UpdateAtomic(func(tx StorageTransaction) error {
 		task, r, e := readRecovery(tx, o.taskID)
@@ -381,7 +396,17 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 			bound, err := recoverySourceHash(task.Meta.Req, explicit.DefaultsHash)
 			freshRetry = err == nil && bound == explicit.SourceHash
 		}
-		if r.InitialAttempt.State != "ungranted" && !clean && !freshRetry {
+		if earned != nil {
+			// A fresh ACK is bound to its dataset, including the admission of
+			// its next run. A changed/unknown domain cannot consume the grant.
+			if e = requireDataset(tx, earned.DatasetID); e != nil {
+				return transfer.ErrRecoveryHeld
+			}
+		}
+		freshCoverage := earned != nil && r.Version == 3 && r.Coverage != nil && r.Coverage.Status == "tracking" &&
+			earned.Episode == r.Episode && earned.SourceHash == r.SourceHash && earned.DefaultsHash == r.ExecutionDefaultsHash &&
+			earned.IdentityHash == r.Coverage.IdentityHash && earned.Sequence == r.Coverage.SettlementSequence
+		if r.InitialAttempt.State != "ungranted" && !clean && !freshRetry && !freshCoverage {
 			if e = appendRecoveryAction(&r, generation, []string{"start"}); e != nil {
 				return e
 			}
@@ -395,14 +420,19 @@ func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*t
 		return nil
 	})
 	if err != nil {
-		o.observeUnknownWrite()
+		o.observeUnknownWrite(err)
 		return nil, recoveryStorageError(err)
 	}
 	o.verificationOnly = false
 	o.record = committed
 	o.token = transfer.RecoveryToken{TaskID: o.taskID, Episode: committed.Episode, Generation: generation, SourceRevision: committed.SourceRevision}
 	o.permits = map[uint64]map[string]*transfer.RecoveryPermit{}
+	o.coverageObservationHeld.Store(false)
 	o.active.Store(true)
+	if initialCoverage && committed.Version == 1 {
+		token := o.token
+		o.coverageInstallAuthorization.Store(&token)
+	}
 	return &transfer.RecoveryLease{Token: o.token, Round: committed.NextAction, Owner: o, SourceHash: committed.SourceHash}, nil
 }
 func recoveryStorageError(err error) error {
@@ -417,7 +447,15 @@ func recoveryStorageError(err error) error {
 // An unknown write result never reconstructs an IO capability. Inspect only
 // the original record for later query/restart; even a visible charged action
 // stays consumed and this generation remains invalidated.
-func (o *taskRecoveryOwner) observeUnknownWrite() {
+func (o *taskRecoveryOwner) observeUnknownWrite(causes ...error) {
+	o.coverageNewEnrollment.Store(false)
+	o.coverageInstallAuthorization.Store(nil)
+	o.coverageSettlementAuthorization.Store(nil)
+	// Only a known exhaustion rollback can retain result observation. Unknown
+	// ACK/context failures cannot restore IO or coverage settlement authority.
+	if len(causes) == 0 || !errors.Is(causes[0], transfer.ErrRecoveryExhausted) {
+		o.coverageObservationHeld.Store(true)
+	}
 	o.active.Store(false)
 	if _, record, err := readRecovery(o.store, o.taskID); err == nil && record.Episode == o.record.Episode && record.SourceRevision == o.record.SourceRevision && record.SourceHash == o.record.SourceHash && record.ExecutionDefaultsHash == o.record.ExecutionDefaultsHash {
 		o.record = record
@@ -480,7 +518,7 @@ func (o *taskRecoveryOwner) RetryRecovery(ctx context.Context, token transfer.Re
 		return nil
 	})
 	if err != nil {
-		o.observeUnknownWrite()
+		o.observeUnknownWrite(err)
 		return nil, recoveryStorageError(err)
 	}
 	o.record = committed
@@ -531,7 +569,7 @@ func (o *taskRecoveryOwner) FinishRecovery(ctx context.Context, token transfer.R
 		return nil
 	})
 	if err != nil {
-		o.observeUnknownWrite()
+		o.observeUnknownWrite(err)
 		return recoveryStorageError(err)
 	}
 	o.record = committed

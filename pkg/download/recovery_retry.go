@@ -487,6 +487,10 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		return recoveryRecord{}, false, err
 	}
 	if fresh {
+		o.coverageNewEnrollment.Store(false)
+		o.coverageInstallAuthorization.Store(nil)
+		o.coverageSettlementAuthorization.Store(nil)
+		o.coverageObservationHeld.Store(true)
 		o.active.Store(false)
 		o.token = transfer.RecoveryToken{}
 		o.record = result

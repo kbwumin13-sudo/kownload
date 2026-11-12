@@ -1567,8 +1567,16 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 		}
 		expected = []uint64{generation}
 	}
+	coverageSeal := d.recordRunRecoveryCoverage(task, f, runLease)
 	if err != nil {
 		d.doOnError(task, err, expected...)
+		if coverageSeal != nil && task.Completion == nil {
+			if owner := task.recoveryOwner.Load(); owner != nil {
+				if ctx, e := owner.coverageRunContext(runLease.Token); e == nil {
+					_ = d.storeRunRecoveryCoverage(ctx, task, runLease, coverageSeal, true)
+				}
+			}
+		}
 		return
 	}
 	var committed bool
@@ -1580,6 +1588,13 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	}
 	if completionErr != nil {
 		d.doOnError(task, fmt.Errorf("persist task completion: %w", completionErr), expected...)
+		if coverageSeal != nil && task.Completion == nil {
+			if owner := task.recoveryOwner.Load(); owner != nil {
+				if ctx, e := owner.coverageRunContext(runLease.Token); e == nil {
+					_ = d.storeRunRecoveryCoverage(ctx, task, runLease, coverageSeal, true)
+				}
+			}
+		}
 		return
 	}
 	if !committed {
@@ -2284,6 +2299,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 				return transfer.ErrRecoveryHeld
 			}
 		}
+		if recovery != nil {
+			if err := d.observeTaskRecoveryCoverage(task, transfer.RecoveryLeaseFromContext(runCtx)); err != nil {
+				return err
+			}
+		}
 		// Resolve owns its request/options. Keep the published task view detached
 		// so Pause can cancel resolution without waiting for a snapshot lock.
 		task.dataLock.RLock()
@@ -2363,6 +2383,16 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}(); err != nil {
 			return err
+		}
+		if recovery != nil && recovery.coverageInstallAuthorization.Load() != nil {
+			// Release the Task operation before Delete/Fence admission. No target
+			// writer has been opened yet; the private slot is consumed exactly once.
+			task.lock.Unlock()
+			coverageErr := d.installTaskRecoveryCoverage(runCtx, task, transfer.RecoveryLeaseFromContext(runCtx))
+			task.lock.Lock()
+			if coverageErr != nil {
+				return coverageErr
+			}
 		}
 		if task.Completion != nil {
 			lease := transfer.RecoveryLeaseFromContext(runCtx)

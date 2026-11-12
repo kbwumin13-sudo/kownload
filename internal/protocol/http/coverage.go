@@ -106,7 +106,15 @@ func (f *Fetcher) coverageCurrent(o *httpCoverageObserver) bool {
 		return false
 	}
 	run := f.recovery.Load()
-	return run != nil && run.lease != nil && run.lease.Token == o.lease.Token && run.lease.SourceHash == o.lease.SourceHash && o.lease.Check() == nil
+	if run == nil || run.lease == nil || run.lease.Token != o.lease.Token || run.lease.SourceHash != o.lease.SourceHash {
+		return false
+	}
+	if observer, ok := o.lease.Owner.(interface {
+		CheckRecoveryObservation(transfer.RecoveryToken) error
+	}); ok {
+		return observer.CheckRecoveryObservation(o.lease.Token) == nil
+	}
+	return o.lease.Check() == nil
 }
 func (o *httpCoverageObserver) disable(err error) {
 	o.mu.Lock()
@@ -368,4 +376,25 @@ func (fm *FetcherManager) StoreRecoveryCoverage(ctx context.Context, ff fetcher.
 		return nil, transfer.ErrRecoveryStale
 	}
 	return &s, nil
+}
+
+// InitialRecoveryCoverage reports the actual current response identity before
+// any target byte. It grants neither enrollment nor network execution.
+func (f *Fetcher) InitialRecoveryCoverage(token transfer.RecoveryToken) (transfer.HTTPCoverageState, error) {
+	o := f.coverage.Load()
+	if o == nil || o.lease.Token != token || o.lease.Check() != nil || !f.coverageCurrent(o) {
+		return transfer.HTTPCoverageState{}, transfer.ErrRecoveryStale
+	}
+	f.fileMu.RLock()
+	active := f.file != nil
+	f.fileMu.RUnlock()
+	if active {
+		return transfer.HTTPCoverageState{}, transfer.ErrHTTPCoverageUnprovable
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.failure != nil || o.state == nil || o.resolve == nil || len(o.current) != 0 || o.sealed != nil {
+		return transfer.HTTPCoverageState{}, transfer.ErrHTTPCoverageUnprovable
+	}
+	return transfer.NewHTTPCoverageState(o.state.IdentityHash, o.state.Size)
 }
