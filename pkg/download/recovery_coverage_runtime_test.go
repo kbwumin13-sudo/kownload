@@ -54,6 +54,7 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 			var once sync.Once
 			release := func() { once.Do(func() { close(gate) }) }
 			var requests atomic.Int32
+			var bodyWritten atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				w.Header().Set("ETag", `"new-m-identity"`)
@@ -62,7 +63,8 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 				w.(http.Flusher).Flush()
 				select {
 				case <-gate:
-					w.Write(payload)
+					n, _ := w.Write(payload)
+					bodyWritten.Add(int64(n))
 				case <-r.Context().Done():
 				}
 			}))
@@ -102,8 +104,21 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 			}
 			task := d.GetTask(id)
 			info, err := os.Stat(task.Meta.SingleFilepath())
-			if err != nil || info.Size() != 0 {
-				t.Fatal("target bytes preceded v3 ACK", err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Touch may preallocate the declared size before the asynchronous
+			// single-stream worker truncates it. Neither zero-filled allocation
+			// nor file length is evidence that response payload was written.
+			if info.Size() != 0 && info.Size() != int64(len(payload)) {
+				t.Fatalf("unexpected initial allocation size: %d", info.Size())
+			}
+			initial, err := os.ReadFile(task.Meta.SingleFilepath())
+			if err != nil || len(initial) > len(payload) || !bytes.Equal(initial, make([]byte, len(initial))) {
+				t.Fatal("target contains payload before body gate", err)
+			}
+			if bodyWritten.Load() != 0 || task.Progress == nil || task.Progress.Downloaded != 0 {
+				t.Fatal("source body/progress preceded body gate")
 			}
 			release()
 			waitStatus(t, d, id, base.DownloadStatusDone, 5*time.Second)
