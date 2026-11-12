@@ -24,7 +24,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | bucket `task_recovery_v1`，record.version=1（本地候选已实现，未发布/安装） | S3 同候选，首能力仅 `http-transport-recovery/v1` 可冻结的 direct/manual/static/env 上下文 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、必需 executionDefaultsHash、initialAttempt、计数与有界 actions；缺坏默认摘要 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保 episode、issued 证据、余额/actions/notBefore；只读不 enroll、删除不重造 | 三方必须同事务；当前仅 transport action，总16且 transport6；refreshUsed/deferralUsed 仅0、notBefore 仅空值受支持，其他值拒绝而不清空 |
 | bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | 显式 error Retry 三方 v2 与 `lastExplicitRetry.version=1`（本地候选，未审查/合入/安装） | 本地 writer 在首次真正用户 Retry 同事务把 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个既有 version 一起1→2；bucket/cap名称不变，不增 Task 字段 | 39忽略新状态仍不安全；冻结26/cdd76b11 v1 reader真实打开v2 Bolt后，Setup无fetcher且显式Continue held；既有输出保留 | 新 reader 仅接受完整v1/noLast或完整v2/Last；混版、缺坏Last、未知版本 held零IO，GET不升版 | Last是历史回执，不是首IO许可；仅新action已确认fresh ACK给本进程一次retryAuthorization，unknown/replay/restart不恢复 | 配对快照及禁止裸活动库回退；只明确用户新episode重置本轮计数/actions，Continue/Pause/Resume从不暗reset，保持同TaskID/path/checkpoint/source/D/notBefore |
-| D4 净新覆盖三方 v3（planned，本地合同候选，未落库/未发布） | 原 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个 version 同事务升3；原bucket/cap不变，ledger必需 coverage.version=1；不增Task字段/第二ledger/迁移 | normal40/41/42均unsupported v3（政策）；40无held保证，41仅静态拒版，42仅可按下文运行树字节关联ceff；实际入口/source/log待15精确回执，不能把政策或静态检查写实测；39仍unsafe | 新reader仅接受完整v1无Last/Coverage、v2必Last无Coverage且Last.ToEpisode=current、v3必合法Coverage且Last可历史；混版/缺坏/未知held零IO | 首装只消费本进程普通新Task/本次new M已确认ACK、首byte前RAM一次资格；历史/unknown/replay/reload不补；checkpoint和完整record独立CAS，结算不直接授IO | 配对快照且禁止裸活动库回退；现slot482仅schema/版本测试，无writer/enroll；精确planned安装/结算/Retry约束见下节，normal42不含本候选 |
+| D4 净新覆盖三方 v3（本地成套已接线，待审/未安装） | 原 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个 version 同事务升3；原bucket/cap不变，ledger必需 coverage.version=1；不增Task字段/第二ledger/迁移 | normal40/41/42均unsupported v3（政策）；40无held保证，41仅静态拒版，42仅按运行树字节关联下文ceff实际reader；不等于42 App冷启；39仍unsafe | 新reader仅接受完整v1无Last/Coverage、v2必Last无Coverage且Last.ToEpisode=current、v3必合法Coverage且Last可历史；混版/缺坏/未知held零IO | 首装只消费本进程普通新Task/本次new M已确认ACK、首byte前RAM一次资格；历史/unknown/replay/reload不补；checkpoint和完整record独立CAS，结算不直接授IO | 配对快照且禁止裸活动库回退；slot482本身仅schema/版本测试；本地runtime候选及验证分层见下节，normal42不含本候选 |
 | `Task.completion={version:1,completionId:string}`（S4本地候选已接线，待审/未安装） | 普通single directHTTP(S)/显式SHA256专用receiver；ID等原R冻结值及record.CompletionID，无checksum原流程不变 | 旧39/Core可能忽略ref，不安全执行 | 新端见ref/record/required任一即核三方；缺坏/未知或CID空/错配held，bucket key不能代替CID绑定；Resolve/Start/staging前须确认受理 | 显式/批量/自动Continue不能绕过；prepared不授执行，删除不重造 | 与以下两行同M事务；精确v1，不增v2/迁移；旧Core不能消费新guard，禁止裸活动库回退，配对快照不证明输出/续跑安全 |
 | `task_completion_v1`，record.version=1（S4本地候选已接线，待审/未安装） | 同TaskID，R冻结稳定completionId/typed integrity完整意图；Core/REST真实链已验，UI/App待成套验收 | 旧Core不理解校验/安全发布阶段 | prepared可空basename/size=-1/无anchor；首byte前完整name/root与真实inode保存ACK，join后才waiting_verify | 未C重开重hash；外来同hash不认领，未知阶段拒绝；不自动整理stage | phase仅prepared/waiting_verify/verifying/verified/published_pending_commit/committed；expected/actual与归属锚点不构成跨FS+DB原子保证 |
 | `task_completion_required_v1={version:1,capability:http-sha256-completion/v1}`（S4本地候选已接线，待审/未安装） | 同M三方required；同C原子done+record+required，fresh ACK后API线性化与一次私有成功许可 | 旧39/Core忽略bucket仍unsafe；不能靠文档声称已拒 | 三方缺失/混坏/未知版，旧writer丢ref也不得降legacy；真实IO需同run/Fence | unknown ACK只读原ID，不补许可；恢复C仅重建状态不补脚本/Webhook | 备份保三方及实际输出另核；受理与公开DTO见VERIFIED_HTTP_COMPLETION.md，正常build40/41未含 |
@@ -102,13 +102,13 @@ TestFrozenV1ReaderRejectsExplicitRetryV2已实际RUN/PASS，覆盖Setup无fetche
 held与原输出保留。两次overlay未命中的no-tests不计证据。该拒执行证据不证明App39安全
 执行新状态；39仍unsafe，禁止裸活动库回退。
 
-### D4 净新覆盖三方 v3 planned 合同
+### D4 净新覆盖三方 v3 本地候选与合同
 
-此处只登记15原合同§18.5及本地slot
+此处登记15原合同§18.5、§18.8及本地slot
 `4820268823a6f039a65c2f94e664f381e9f90036`，依赖纯值模块
 `ffbd8534aa1401391d0502b0f91bc12fcdb0cef8`。slot只定义Coverage与严格版本变体，
-没有writer/enroll/activation；本笔只有文档，不写数据库、不迁移、不进入normal40/41/42。
-冻结ceff旧reader的实际入口、最终source与日志，待15精确回执后另记；本笔不补写运行通过。
+没有writer/enroll/activation；后续本地runtime已接线，见以下证据分层。
+本笔只有文档，不写数据库、不迁移、不进入normal40/41/42。
 
 
 #### 旧普通版本的v3政策与证据分层
@@ -120,9 +120,33 @@ normal40/41/42均unsupported v3，回退必须同一停写时点App+data+prefs�
 | --- | --- | --- |
 | 40 / 02c6c7e | 早于S3，没有Recovery/required守卫；普通无S2关联Task不能保证held | 未实测其误执行，不声称已发生误执行，也不把unsupported政策当已有guard |
 | 41 / 4e5182b | reader版本谓词静态严格接受1或2、拒非1或2 | 这里只是静态结论，不是该App打开v3库/冷启动/逐入口拒执行实证 |
-| 42 / ea27387 | pkg/download、pkg/rest、internal/protocol/http、internal/transfer运行子树逐字节同ceff | 可据此关联15实际writer Bolt→ceff旧reader；入口、最终source及log须15精确回执后登记，不是42 App冷启 |
+| 42 / ea27387 | pkg/download、pkg/rest、internal/protocol/http、internal/transfer运行子树逐字节同ceff | 可关联以下实际writer Bolt→ceff旧reader证据；不是42 App冷启 |
 
-旧e13的planned范围、原负证与文件保留，不补造缺失状态。此次无新运行测试或状态写入。
+旧e13的planned范围、原负证与文件保留，不补造缺失状态。此次文档变更没有新运行测试或状态写入。
+
+本地成套候选`d31a0b8696d4a6c88fd6c3db86ef7e15e28a2cda`（runtime提交
+`99ef225918a85942674b6501f2da5728105030fb`）已接线，待审/未安装。
+实际writer测试`TestCoverageRuntimeWriteCompatibilityDatabase`由真实新M与HTTP响应、
+install3、join/Sync、earned seq1写出Bolt和实际前缀；`compat-writer.log`为1主RUN/PASS。
+该writer使用dataset最终补点前WIP hash层，完整源文件SHA256见
+`/tmp/k15-d4-runtime-evidence/source-union.json`的`runtimeWIP`，其中
+`recovery_coverage_runtime.go`为`ed3c50965d687cceb0fd25364033ef929d340886e3bcac4b60ebb54f3f0c1ebb`；
+不能把这次writer或此前合并race的22主25子改称最终runtime全量复跑。
+最终dataset补点后，earned/unknown/repeat-prefix/nextbegin定向plain/race各4主6子PASS，
+日志为`dataset-final-plain.log`、`dataset-final-race.log`，原`dataset-ack-old-red.log`保留。
+
+冻结产品树`ceff9bb8abdd0a0e515259d5bf0d9628308799b5`未改源码，仅overlay私有harness，
+读取上述同一writer Bolt；`TestFrozenCeffReaderRejectsActualCoverageV3` plain/race各1主实际
+RUN/PASS，见`/tmp/k15-d4-runtime-evidence/ceff-reader-final.log`与`ceff-reader-race.log`。
+Setup在Restore前held；Continue(single/all/multi-ID filter)、Patch、专用Retry均held，
+RecoveryQuery为held/retryAllowed=false；QueryBatch历史仍可读。Restore=0、Build=0、
+fetcher=nil，Close前后全bucket/key原JSON及输出字节保全。
+专用`ContinueBatch`另以同ceff/同原writer Bolt直接调用补验，plain/race各1主RUN/PASS，
+Restore=0/Build=0且全records/output不变；见`continuebatch-reader-supplement.json`与
+`ceff-continuebatch-reader-plain.log`、`ceff-continuebatch-reader-race.log`。
+原harness与writer DB未重造，不能把原multi-ID filter日志改称专用入口证据。
+完整来源、日志摘要与未验证范围见`/tmp/k15-d4-runtime-evidence/results.json`及15原合同§18.8；
+旧no-tests日志不计通过，normal40无guard/41仅静态/42源码关联的边界保持上表。
 
 ledger新增唯一`coverage`对象，固定JSON字段为`version:1`、`identityHash`、`size`、
 `status:tracking|unprovable`、`durableRanges`、`settledRanges`、`checkpointHash`、
