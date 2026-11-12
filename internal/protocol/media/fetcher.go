@@ -69,12 +69,17 @@ func (*FetcherManager) Store(item fetcher.Fetcher) (any, error) {
 func (*FetcherManager) Restore() (any, func(*fetcher.FetcherMeta, any) fetcher.Fetcher) {
 	return &fetcherData{}, func(meta *fetcher.FetcherMeta, data any) fetcher.Fetcher {
 		d := data.(*fetcherData)
-		return &Fetcher{pathLayout: cloneMediaPathLayout(d.PathLayout), meta: meta, downloaded: d.Downloaded, total: d.Total, format: d.Format, tracks: d.Tracks, identity: d.Identity, workID: d.WorkID, needsResolve: d.NeedsResolve, workPrefix: d.WorkPrefix}
+		restored := &Fetcher{pathLayout: cloneMediaPathLayout(d.PathLayout), meta: meta, downloaded: d.Downloaded, total: d.Total, format: d.Format, tracks: d.Tracks, identity: d.Identity, workID: d.WorkID, needsResolve: d.NeedsResolve, workPrefix: d.WorkPrefix}
+		if restored.pathLayout != nil {
+			restored.pathOwner = restored.pathLayout.OwnerID
+		}
+		return restored
 	}
 }
 func (*FetcherManager) Close() error { return nil }
 
 type Fetcher struct {
+	pathExecution *transfer.PathFreezeExecution
 	pathOwner     string
 	pathLayout    *mediaPathLayout
 	workPrefix    string
@@ -423,6 +428,7 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	}
 	f.mu.Lock()
 	target := f.meta.SingleFilepath()
+	execution, strict := f.pathExecution, f.pathOwner != "" || f.pathLayout != nil
 	workPrefix := f.workPrefix
 	if workPrefix == "" {
 		workPrefix = target + ".gopeed-media"
@@ -432,6 +438,25 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 		f.workPrefix = workPrefix
 	}
 	f.mu.Unlock()
+	var exactOutput string
+	if strict {
+		if execution == nil {
+			return transfer.ErrRecoveryHeld
+		}
+		if err := execution.Check(); err != nil {
+			return err
+		}
+		layout := execution.Layout()
+		if len(layout.Members) == 0 || target != filepath.Join(layout.ParentRoot, layout.Members[0].RelativePath) {
+			return transfer.ErrRecoveryHeld
+		}
+		exactOutput = filepath.Join(execution.WorkPath(), layout.Members[0].RelativePath)
+		workPrefix = strings.TrimSuffix(exactOutput, filepath.Ext(exactOutput))
+		f.mu.Lock()
+		f.workPrefix = workPrefix
+		f.mu.Unlock()
+		ctx = mediaOutputContext(ctx, execution)
+	}
 	extra, err := extraFor(req)
 	if err != nil {
 		return err
@@ -439,16 +464,20 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	if err := mediaRecoveryCheck(ctx); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return err
+	if !strict {
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
 	}
 	args, cleanup, err := requestArgs(req, extra, ctl, cfg)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(workPrefix), 0755); err != nil {
-		cleanup()
-		return err
+	if !strict {
+		if err := os.MkdirAll(filepath.Dir(workPrefix), 0755); err != nil {
+			cleanup()
+			return err
+		}
 	}
 	subArgs, err := subtitleArgs(extra)
 	if err != nil {
@@ -459,11 +488,19 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	args = append(args, formatArgs(extra)...)
 	args = append(args, "--no-simulate", "--continue", "--newline", "--progress", "--concurrent-fragments", strconv.Itoa(cfg.Connections))
 	args = append(args, "--progress-template", "download:media-progress:%(info.format_id)j\t%(progress)j", "--print", "before_postprocess:media-merge:{}", "--print", "after_move:media-final:%(filepath)j")
-	args = append(args, "-o", strings.ReplaceAll(workPrefix, "%", "%%")+".%(ext)s", req.URL)
+	if strict {
+		args = append(args, "--paths", "home:"+execution.WorkPath(), "--paths", "temp:"+execution.WorkPath(), "-o", strings.ReplaceAll(exactOutput, "%", "%%"), req.URL)
+	} else {
+		args = append(args, "-o", strings.ReplaceAll(workPrefix, "%", "%%")+".%(ext)s", req.URL)
+	}
 	cmd, commandCleanup, err := mediaCommand(mediaWorkContext(ctx, "media/download"), cfg, req, extra, args)
 	if err != nil {
 		cleanup()
 		return err
+	}
+	if strict {
+		cmd.Dir = execution.WorkPath()
+		cmd.Env = append(cmd.Env, "TMPDIR="+execution.WorkPath())
 	}
 	requestCleanup := cleanup
 	cleanup = func() { commandCleanup(); requestCleanup() }
@@ -494,11 +531,11 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	f.cmd, f.running, f.starting, f.phase = cmd, true, false, "download"
 	f.mu.Unlock()
 	launched = true
-	go f.run(ctx, cmd, stdout, stderr, target, workPrefix, extra, cfg, cleanup, cancel)
+	go f.run(ctx, cmd, stdout, stderr, target, workPrefix, extra, cfg, execution, cleanup, cancel)
 	return nil
 }
 
-func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Reader, target, workPrefix string, extra *model.ReqExtra, cfg model.Config, cleanup func(), cancel context.CancelFunc) {
+func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Reader, target, workPrefix string, extra *model.ReqExtra, cfg model.Config, execution *transfer.PathFreezeExecution, cleanup func(), cancel context.CancelFunc) {
 	var finalPath string
 	var errorTail boundedTail
 	var scanWG sync.WaitGroup
@@ -543,13 +580,15 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 		_, _ = io.Copy(&errorTail, stderr)
 	}()
 	scanWG.Wait()
-	err := cmd.Wait()
-	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil {
+	commandErr := cmd.Wait()
+	err := commandErr
+	checkErr := mediaRecoveryCheck(ctx)
+	if checkErr != nil {
 		err = checkErr
 	}
 	cleanup()
 	if err == nil {
-		if finalPath == "" || !strings.HasPrefix(filepath.Clean(finalPath), filepath.Clean(workPrefix)+".") {
+		if finalPath == "" || (execution == nil && !strings.HasPrefix(filepath.Clean(finalPath), filepath.Clean(workPrefix)+".")) || (execution != nil && finalPath != filepath.Join(execution.WorkPath(), execution.Layout().Members[0].RelativePath)) {
 			err = errors.New("media downloader did not report a final file")
 		} else {
 			stat, statErr := os.Stat(finalPath)
@@ -561,10 +600,19 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 				err = mediaRecoveryCheck(ctx)
 			} else if subtitleErr := validateSubtitleFiles(workPrefix, extra.SubtitleLanguages); subtitleErr != nil {
 				err = subtitleErr
-			} else if subtitleErr := moveSubtitleFiles(workPrefix, target); subtitleErr != nil {
-				err = subtitleErr
-			} else if renameErr := os.Rename(finalPath, target); renameErr != nil {
-				err = errors.New("media final file could not be moved")
+			} else if publishErr := func() error {
+				if execution != nil {
+					return publishMediaLayout(ctx, execution, finalPath)
+				}
+				if err := moveSubtitleFiles(workPrefix, target); err != nil {
+					return err
+				}
+				if err := os.Rename(finalPath, target); err != nil {
+					return errors.New("media final file could not be moved")
+				}
+				return nil
+			}(); publishErr != nil {
+				err = publishErr
 			} else {
 				f.mu.Lock()
 				f.downloaded = stat.Size()
@@ -582,7 +630,9 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 			f.mu.Unlock()
 			invalidateInspection(req, cfg)
 		}
-		err = mediaError(errorTail.data)
+		if checkErr == nil {
+			err = mediaError(errorTail.data)
+		}
 	}
 	paused := ctx.Err() != nil
 	cancel()

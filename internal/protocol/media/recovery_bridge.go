@@ -49,6 +49,11 @@ type mediaRecoveryBridge struct {
 }
 
 type mediaWorkKey struct{}
+type mediaOutputKey struct{}
+
+func mediaOutputContext(ctx context.Context, execution *transfer.PathFreezeExecution) context.Context {
+	return context.WithValue(ctx, mediaOutputKey{}, execution)
+}
 
 func mediaWorkContext(ctx context.Context, work string) context.Context {
 	return context.WithValue(ctx, mediaWorkKey{}, work)
@@ -56,6 +61,11 @@ func mediaWorkContext(ctx context.Context, work string) context.Context {
 func mediaRecoveryCheck(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if execution, ok := ctx.Value(mediaOutputKey{}).(*transfer.PathFreezeExecution); ok {
+		if err := execution.Check(); err != nil {
+			return err
+		}
 	}
 	if lease := transfer.RecoveryLeaseFromContext(ctx); lease != nil {
 		return lease.Check()

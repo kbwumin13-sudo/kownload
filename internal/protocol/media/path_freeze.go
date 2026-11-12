@@ -1,8 +1,10 @@
 package media
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,6 +51,7 @@ func (f *Fetcher) RequirePathFreeze(ownerID string) error {
 		return transfer.ErrRecoveryHeld
 	}
 	f.pathOwner = ownerID
+	f.pathExecution = nil
 	return nil
 }
 
@@ -114,4 +117,59 @@ func sameMediaPathLayout(a, b *mediaPathLayout) bool {
 	}
 	right, err := pathpolicy.LayoutFingerprint(b.Layout)
 	return err == nil && left == right
+}
+
+// BindPathFreezeExecution receives only Core's in-process known-ACK object.
+// No persisted checkpoint, caller JSON or owner string can create one here.
+func (f *Fetcher) BindPathFreezeExecution(execution *transfer.PathFreezeExecution) error {
+	if execution == nil {
+		return transfer.ErrRecoveryHeld
+	}
+	if err := execution.Check(); err != nil {
+		return err
+	}
+	layout := execution.Layout()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.running || f.starting || f.resolveCancel != nil || f.pathLayout == nil || execution.OwnerID() != f.pathOwner {
+		return transfer.ErrRecoveryHeld
+	}
+	expected := cloneMediaPathLayout(f.pathLayout)
+	candidate := &mediaPathLayout{OwnerID: execution.OwnerID(), Layout: layout, WorkDirectory: expected.WorkDirectory}
+	if !sameMediaPathLayout(expected, candidate) || execution.WorkPath() != filepath.Join(layout.ParentRoot, expected.WorkDirectory) {
+		return transfer.ErrRecoveryHeld
+	}
+	f.pathExecution = execution
+	return nil
+}
+
+func publishMediaLayout(ctx context.Context, execution *transfer.PathFreezeExecution, finalPath string) error {
+	if execution == nil {
+		return transfer.ErrRecoveryHeld
+	}
+	layout := execution.Layout()
+	if len(layout.Members) == 0 || finalPath != filepath.Join(execution.WorkPath(), layout.Members[0].RelativePath) {
+		return transfer.ErrRecoveryHeld
+	}
+	// The subprocess and both pipes have joined before this function is called.
+	// Validate every expected output before publishing any. Core owns identity,
+	// durable transitions and noReplace; this does not claim group atomic publish.
+	for _, member := range layout.Members {
+		if err := mediaRecoveryCheck(ctx); err != nil {
+			return err
+		}
+		stat, err := os.Lstat(filepath.Join(execution.WorkPath(), member.RelativePath))
+		if err != nil || !stat.Mode().IsRegular() || stat.Size() == 0 {
+			return transfer.ErrRecoveryHeld
+		}
+	}
+	for _, member := range layout.Members {
+		if err := mediaRecoveryCheck(ctx); err != nil {
+			return err
+		}
+		if err := execution.Publish(member.Index); err != nil {
+			return err
+		}
+	}
+	return nil
 }
