@@ -64,6 +64,7 @@ func NewProtocolExecutionContext(protocol string, req *base.Request, config json
 	return &ProtocolExecutionContext{protocol, defaults, source, proxyID, owned, proxy}, nil
 }
 
+func (c *ProtocolExecutionContext) Protocol() string { return c.protocol }
 func (c *ProtocolExecutionContext) DefaultsHash() string                         { return c.defaultsHash }
 func (c *ProtocolExecutionContext) SourceHash() string                           { return c.sourceHash }
 func (c *ProtocolExecutionContext) ProxyID() string                              { return c.proxyID }
