@@ -65,6 +65,82 @@ func (fm *FetcherManager) RegisterPathFreeze(ownerID string, req *base.Request) 
 	return nil
 }
 
+// ForgetPathFreeze is only for a known-ACK Task deletion AFTER a successful
+// lock-free Quiesce. Pause, Close, shutdown and unknown deletion ACK must not
+// call this. It removes this owner's native resume metadata, never output files.
+func (fm *FetcherManager) ForgetPathFreeze(ownerID string, req *base.Request) error {
+	if ownerID == "" || req == nil {
+		return transfer.ErrLayoutStorageHeld
+	}
+	link, err := parseLink(req.URL)
+	if err != nil {
+		return err
+	}
+	fm.mu.Lock()
+	if fm.client != nil && fm.client.FindTransfer(link.Hash).IsValid() {
+		fm.mu.Unlock()
+		return transfer.ErrLayoutStorageHeld
+	}
+	store := fm.getStateStoreLocked()
+	fm.mu.Unlock()
+	store.stateMu.Lock()
+	defer store.stateMu.Unlock()
+	store.pathMu.Lock()
+	if current := store.pathOwners[link.Hash]; current != "" && current != ownerID {
+		store.pathMu.Unlock()
+		return transfer.ErrLayoutStorageHeld
+	}
+	if record, ok := store.pathRecords[link.Hash]; ok && record.OwnerID != ownerID {
+		store.pathMu.Unlock()
+		return transfer.ErrLayoutStorageHeld
+	}
+	store.pathMu.Unlock()
+	if store.store != nil {
+		var state nativePathState
+		exists, err := store.store.Load(&state)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if state.Version != 0 && state.Version != 1 && state.Version != 2 {
+				return transfer.ErrLayoutStorageHeld
+			}
+			for _, record := range state.Transfers {
+				if record.Hash == link.Hash {
+					return transfer.ErrLayoutStorageHeld
+				}
+			}
+			kept := make([]nativePathTransfer, 0, len(state.PathFrozenTransfers))
+			for _, record := range state.PathFrozenTransfers {
+				if record.Transfer.Hash != link.Hash {
+					kept = append(kept, record)
+					continue
+				}
+				if record.OwnerID != ownerID {
+					return transfer.ErrLayoutStorageHeld
+				}
+			}
+			state.PathFrozenTransfers = kept
+			// Failure (including uncertain Save) does not release RAM ownership.
+			if err := store.store.Save(&state); err != nil {
+				return err
+			}
+		}
+	} else {
+		store.pathMu.Lock()
+		_, pending := store.pathRecords[link.Hash]
+		store.pathMu.Unlock()
+		if pending {
+			return transfer.ErrLayoutStorageHeld
+		}
+	}
+	store.pathMu.Lock()
+	delete(store.pathRecords, link.Hash)
+	delete(store.pathOwners, link.Hash)
+	store.pathMu.Unlock()
+	return nil
+}
+
 func (f *Fetcher) RequirePathFreeze(ownerID string) error {
 	f.pathMu.Lock()
 	defer f.pathMu.Unlock()

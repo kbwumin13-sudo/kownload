@@ -101,4 +101,24 @@ func TestED2KPathResumeDoesNotEnterLegacyAutoLoad(t *testing.T) {
 	if fixture.raw == nil {
 		t.Fatal("delete lost held D6 resume")
 	}
+	before := string(fixture.raw)
+	if err := fm.ForgetPathFreeze("other-task", &base.Request{URL: testLink}); !errors.Is(err, transfer.ErrLayoutStorageHeld) {
+		t.Fatal("forgot foreign owner")
+	}
+	if string(fixture.raw) != before {
+		t.Fatal("rejected forget changed snapshot")
+	}
+	if err := fm.ForgetPathFreeze("task", &base.Request{URL: testLink}); err != nil {
+		t.Fatal(err)
+	}
+	saved = nativePathState{}
+	if err := json.Unmarshal(fixture.raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.PathFrozenTransfers) != 0 {
+		t.Fatal("deleted Task retained native hash ownership")
+	}
+	if err := fm.RegisterPathFreeze("new-task", &base.Request{URL: testLink}); err != nil {
+		t.Fatal("cannot explicitly recreate deleted hash")
+	}
 }

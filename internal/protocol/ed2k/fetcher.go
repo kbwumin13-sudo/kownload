@@ -20,6 +20,7 @@ import (
 
 type clientStateStore struct {
 	store       fetcher.ProtocolStateStore
+	stateMu     sync.Mutex // serializes native snapshots and explicit post-delete forget
 	pathMu      sync.Mutex
 	pathOwners  map[gprotocol.Hash]string
 	pathRecords map[gprotocol.Hash]nativePathTransfer
@@ -29,6 +30,8 @@ func (s *clientStateStore) Load() (*goed2k.ClientState, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	var state nativePathState
 	exist, err := s.store.Load(&state)
 	if err != nil {
@@ -44,6 +47,8 @@ func (s *clientStateStore) Save(state *goed2k.ClientState) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	s.pathMu.Lock()
 	noPathRecords := len(s.pathRecords) == 0
 	noPathOwners := len(s.pathOwners) == 0
