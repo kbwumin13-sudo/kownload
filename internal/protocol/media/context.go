@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -140,25 +141,44 @@ func validReferer(raw string) string {
 	return parsed.String()
 }
 
+// Inspect only the configured entrypoint. An existing standalone executable is
+// structurally unsupported; lookup/read/permission failures are real errors.
+// This never executes a probe or classifies an actual network/bridge failure.
+func mediaBridgeInterpreter(cfg model.Config) (string, error) {
+	tool, err := exec.LookPath(cfg.YtDlpPath)
+	if err != nil {
+		return "", transfer.ErrRecoveryHeld
+	}
+	f, err := os.Open(tool)
+	if err != nil {
+		return "", transfer.ErrRecoveryHeld
+	}
+	b := make([]byte, 1024)
+	n, readErr := f.Read(b)
+	closeErr := f.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || closeErr != nil {
+		return "", transfer.ErrRecoveryHeld
+	}
+	line, _, _ := strings.Cut(string(b[:n]), "\n")
+	candidate := strings.TrimSpace(strings.TrimPrefix(line, "#!"))
+	if !strings.HasPrefix(line, "#!") || !filepath.IsAbs(candidate) || !strings.HasPrefix(filepath.Base(candidate), "python") {
+		return "", nil
+	}
+	if !executablePath(candidate) || strings.Count(contextWrapper, "# KOWNLOAD_RECOVERY_BRIDGE") != 1 || recoveryWrapper == "" {
+		return "", transfer.ErrRecoveryHeld
+	}
+	return candidate, nil
+}
+
 // Use the configured entrypoint's interpreter, never a different yt-dlp installation.
 func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extra *model.ReqExtra, args []string) (*exec.Cmd, func(), error) {
 	scopes, err := contextScopes(req, extra)
 	if err != nil {
 		return nil, nil, err
 	}
-	tool, err := exec.LookPath(cfg.YtDlpPath)
-	var interpreter string
-	if err == nil {
-		if f, openErr := os.Open(tool); openErr == nil {
-			b := make([]byte, 1024)
-			n, _ := f.Read(b)
-			_ = f.Close()
-			line, _, _ := strings.Cut(string(b[:n]), "\n")
-			candidate := strings.TrimSpace(strings.TrimPrefix(line, "#!"))
-			if strings.HasPrefix(line, "#!") && filepath.IsAbs(candidate) && strings.HasPrefix(filepath.Base(candidate), "python") && executablePath(candidate) {
-				interpreter = candidate
-			}
-		}
+	interpreter, interpreterErr := mediaBridgeInterpreter(cfg)
+	if interpreterErr != nil && transfer.RecoveryLeaseFromContext(ctx) != nil {
+		return nil, nil, interpreterErr
 	}
 	if interpreter == "" {
 		if transfer.RecoveryLeaseFromContext(ctx) != nil {

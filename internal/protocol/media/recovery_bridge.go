@@ -271,6 +271,23 @@ func (b *mediaRecoveryBody) Close() error {
 	return err
 }
 
+// SupportsParentRecovery is a pre-enrollment structural check using the same
+// immutable configuration and interpreter selection as the actual command.
+// Only false,nil permits an unregistered task to retain its legacy workflow.
+// Core must keep an existing managed task held when this returns false or error.
+func (f *Fetcher) SupportsParentRecovery(snapshot *transfer.ProtocolExecutionContext) (bool, error) {
+	if snapshot == nil || snapshot.Protocol() != "media" {
+		return false, transfer.ErrRecoveryHeld
+	}
+	var frozen model.Config
+	if err := snapshot.Config(&frozen); err != nil {
+		return false, err
+	}
+	ctl := &controller.Controller{GetConfig: func(out any) { _ = snapshot.Config(out) }}
+	interpreter, err := mediaBridgeInterpreter(configFor(ctl))
+	return interpreter != "", err
+}
+
 // SetParentRecoveryContext is called by Core only after the previous run has
 // joined. It does not create a recovery episode or replace its durable owner.
 func (f *Fetcher) SetParentRecoveryContext(ctx context.Context) error {
