@@ -32,28 +32,42 @@ func isLocalFileError(err error) bool {
 
 // A new full response starts at byte zero, including retries inside one run.
 // Reset under the file lock so Pause cannot close the file during truncation.
-func (f *Fetcher) resetSingleStreamAttempt(conn *connection) error {
+func (f *Fetcher) resetSingleStreamAttempt(conn *connection, proofs ...*coverageResponseProof) error {
 	f.fileMu.Lock()
-	defer f.fileMu.Unlock()
 	if f.file == nil {
+		f.fileMu.Unlock()
 		return &localFileError{os.ErrClosed}
 	}
 	if err := f.file.Truncate(0); err != nil {
+		f.fileMu.Unlock()
 		return &localFileError{err}
 	}
 	f.connMu.Lock()
 	f.resetConnectionForRestart(conn)
 	f.connMu.Unlock()
+	f.fileMu.Unlock()
+	if len(proofs) > 0 {
+		f.resetCoverage(proofs[0])
+	}
 	return nil
 }
 
-func (f *Fetcher) writeDownloadAt(data []byte, offset int64) error {
+func (f *Fetcher) writeDownloadAt(data []byte, offset int64, proofs ...*coverageResponseProof) error {
+	var proof *coverageResponseProof
+	if len(proofs) > 0 {
+		proof = proofs[0]
+	}
+	valid := f.coverageProofCurrent(proof) // owner checks outside the fd lock
 	f.fileMu.RLock()
-	defer f.fileMu.RUnlock()
 	if f.file == nil {
+		f.fileMu.RUnlock()
 		return &localFileError{os.ErrClosed}
 	}
 	n, err := f.file.WriteAt(data, offset)
+	f.fileMu.RUnlock()
+	if valid && n > 0 {
+		f.recordCoverageWrite(proof, offset, n)
+	}
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
