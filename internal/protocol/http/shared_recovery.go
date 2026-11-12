@@ -41,6 +41,8 @@ type httpSharedRecovery struct {
 	barrier   *recoveryWaveBarrier
 	failure   error
 	pending   *sharedHTTPWait
+	refresh *sharedHTTPRefresh
+	responses map[string]sharedRefreshResponse
 	permits   map[string]*transfer.RecoveryPermit
 	completed map[string]bool
 }
@@ -65,6 +67,7 @@ func (f *Fetcher) sharedRun() *httpSharedRecovery {
 }
 
 func (f *Fetcher) enterSharedIO(ctx context.Context, work string) (*recoveryWaveWork, error) {
+	ctx = f.recoveryContext(ctx)
 	s := f.sharedRun()
 	if s == nil {
 		return &recoveryWaveWork{Context: ctx, leave: func() {}}, nil
@@ -174,6 +177,10 @@ func (s *httpSharedRecovery) prepareRateLimitReport(ctx context.Context, work st
 	if cause != nil {
 		var report *sharedWaveFailure
 		re := extractRequestError(cause)
+		if errors.As(cause,&report) && report.barrier != nil && report.barrier != s.barrier {
+			old,current := report.barrier.token,s.lease.Token
+			if old.TaskID == current.TaskID && old.Episode == current.Episode && old.Generation == current.Generation && old.SourceRevision < current.SourceRevision { return nil,nil }
+		}
 		if !errors.As(cause, &report) || report.barrier != s.barrier || report.epoch == 0 || report.epoch > epoch || re == nil || !transfer.IsRateLimitStatus(re.Code) {
 			return nil, transfer.ErrRecoveryWork
 		}

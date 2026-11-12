@@ -46,16 +46,16 @@ const (
 // Extensions require one leading dot and match the final suffix, folded to
 // lowercase and NFC; compound suffixes and dot-only hidden names are excluded.
 type Match struct {
-	Domain    string
-	MIME      string
-	Extension string
+	Domain    string `json:"domain,omitempty"`
+	MIME      string `json:"mime,omitempty"`
+	Extension string `json:"extension,omitempty"`
 }
 
 type Rule struct {
-	ID    string
-	Kind  Kind
-	Match Match
-	Root  string
+	ID    string `json:"id"`
+	Kind  Kind   `json:"kind"`
+	Match Match  `json:"match"`
+	Root  string `json:"root"`
 }
 
 // Config.Rules is ordered by the user. Within each kind, the first matching
@@ -63,9 +63,9 @@ type Rule struct {
 // Version identifies that immutable rule snapshot, not this package's format;
 // it is required only when selecting a rule. The zero config is disabled.
 type Config struct {
-	Enabled bool
-	Version string
-	Rules   []Rule
+	Enabled bool   `json:"enabled"`
+	Version string `json:"ruleVersion"`
+	Rules   []Rule `json:"rules"`
 }
 
 // Input represents a whole task/tree, never individual members. Path is the
@@ -86,11 +86,11 @@ type Input struct {
 // Version is the evaluator format; legacy frozen values remain unchanged.
 // No member names or relative paths are modified by this package.
 type Decision struct {
-	Version     int
-	Root        string
-	Origin      Origin
-	RuleID      string
-	RuleVersion *string
+	Version     int     `json:"version"`
+	Root        string  `json:"root"`
+	Origin      Origin  `json:"origin"`
+	RuleID      string  `json:"ruleId"`
+	RuleVersion *string `json:"ruleVersion"`
 }
 
 var (

@@ -255,6 +255,8 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
+	pathFreeze atomic.Pointer[httpFrozenPath]
+	metadataOnly atomic.Bool
 	mcpTransport         atomic.Pointer[mcpHTTPTransportBinding]
 	mcpOutputRequired    atomic.Bool
 	mcpOutputSynced      atomic.Bool
@@ -671,7 +673,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	})
 
 	// If start was called before resolve completed, auto-start
-	if f.startPending.Load() {
+	if f.startPending.Load() && !f.metadataOnly.Load() {
 		go func() {
 			if err := f.doStart(); err != nil {
 				f.setState(stateError)
@@ -962,6 +964,7 @@ func (f *Fetcher) resetUnavailableResumeData() error {
 }
 
 func (f *Fetcher) doStart() error {
+	if err := f.checkFrozenPathWrite();err != nil { return err }
 	if f.sharedRun() != nil {
 		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "startup")
 		if err != nil {
@@ -1545,6 +1548,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 		if errors.Is(err, errSharedWaveDraining) {
 			continue
 		}
+		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
+			if refreshErr != nil { f.stopForCredentialFailure(conn,refreshErr);return }
+			continue
+		}
 		if err == nil {
 			rateLimits = 0
 			f.connMu.Lock()
@@ -1772,9 +1779,13 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 	// Record connection start time for adaptive timeout tracking
 	connStartTime := time.Now()
 
-	resp, err := doCredentialRequest(client, httpReq)
-	if err == nil {
-		resp, err = f.refreshResponse(ctx, client, httpReq, resp)
+	resp, err := f.takeSharedRefreshResponse(f.recoveryWork(conn),rangeStart,rangeEnd)
+	if err != nil { return err }
+	if resp == nil {
+		resp, err = doCredentialRequest(client, httpReq)
+		if err == nil {
+			resp, err = f.refreshResponse(ctx, client, httpReq, resp)
+		}
 	}
 	if err != nil {
 		return err
@@ -1803,6 +1814,8 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 				if policyErr := credentialPolicyError(fallbackErr); policyErr != nil {
 					return policyErr
 				}
+				var refresh *RecoveryPublicRefreshRequired
+				if errors.As(fallbackErr,&refresh) { return fallbackErr }
 				return originalErr
 			}
 		} else {
@@ -2181,6 +2194,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 		}
 
 		if errors.Is(err, errSharedWaveDraining) {
+			continue
+		}
+		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
+			if refreshErr != nil { f.stopForCredentialFailure(conn,refreshErr);return }
 			continue
 		}
 		if err == nil {

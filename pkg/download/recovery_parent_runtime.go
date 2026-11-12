@@ -28,7 +28,7 @@ func (d *Downloader) captureParentRecoveryContext(task *Task) (*transfer.Protoco
 func (o *taskRecoveryOwner) parentResultLease(lease *transfer.RecoveryLease) (*transfer.RecoveryLease,error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if lease == nil || o.parentRun == nil || lease.Token.TaskID != o.token.TaskID ||
+	if lease == nil || lease.Token.TaskID != o.token.TaskID ||
 		lease.Token.Episode != o.token.Episode || lease.Token.Generation != o.token.Generation ||
 		o.runContext == nil || o.runContext.Err() != nil {
 		return nil,transfer.ErrRecoveryStale
@@ -43,6 +43,7 @@ type parentRecoveryRun struct {
 	protocol string
 	children map[string]string
 	committing bool
+	childWaves map[string]*parentRecoveryChildWave
 }
 
 func parentRecoveryWork(protocol, work string) bool {
@@ -101,6 +102,10 @@ func (o *taskRecoveryOwner) CommitRecoverySource(ctx context.Context, token tran
 		o.mu.Unlock();return nil,transfer.ErrRecoveryWork
 	}
 	if o.parentRun != nil { o.parentRun.committing = true }
+	if o.parentContext == nil {
+		checkpoint,err = o.ownedHTTPRefreshCheckpoint(ctx,expected,checkpoint)
+		if err != nil { o.sharedUnknownLocked();o.mu.Unlock();return nil,err }
+	}
 	record, err := commitSharedRecoveryRefresh(o.store,o.sharedDataset,expected,actionID,checkpoint)
 	if err != nil { o.sharedUnknownLocked();o.mu.Unlock();return nil,err }
 	// Keep the sealed old token just long enough to verify its physical epoch
@@ -115,6 +120,7 @@ func (o *taskRecoveryOwner) CommitRecoverySource(ctx context.Context, token tran
 		return nil,transfer.ErrRecoveryStale
 	}
 	o.record = record
+	o.sharedInitialMembers = append([]string{},snapshot.Members...)
 	newToken := token;newToken.SourceRevision = record.SourceRevision
 	o.token = newToken
 	o.sharedActionPermit = nil
@@ -142,11 +148,42 @@ func (o *taskRecoveryOwner) BindRecoveryChild(ctx context.Context, token transfe
 	if o.parentRun == nil || o.parentRun.committing || o.parentRun.token != token || !parentRecoveryWork(o.parentRun.protocol,work) || o.parentContext == nil || snapshot.ProxyID() != o.parentContext.ProxyID() { return nil,transfer.ErrRecoveryWork }
 	if _, err := o.observeSharedActionLocked(ctx,token,o.record); err != nil { return nil,err }
 	lease := o.sharedLeaseLocked()
+	if o.parentRun.childWaves == nil { o.parentRun.childWaves = map[string]*parentRecoveryChildWave{} }
+	wave := o.parentRun.childWaves[work]
+	if wave == nil {
+		wave = &parentRecoveryChildWave{source:snapshot.SourceHash()}
+		o.parentRun.childWaves[work] = wave
+	}
+	// One metadata probe plus one actual child is the closed provider plan.
+	// Another URL/source in this work requires a paid source handoff first.
+	if wave.source != snapshot.SourceHash() || wave.bindings >= 2 { return nil,transfer.ErrRecoveryWork }
+	wave.bindings++
+	lease.InitialMembers = []string{"start"}
 	if o.parentRun.children == nil { o.parentRun.children = map[string]string{} }
 	o.parentRun.children[snapshot.SourceHash()] = work
 	lease.SourceHash = snapshot.SourceHash()
 	lease.Owner = &parentHTTPRecoveryOwner{parent:o,token:token,work:work,source:snapshot.SourceHash()}
 	return lease,nil
+}
+
+type parentRecoveryChildWave struct { source string; bindings, limit int; started bool }
+
+func (p *parentHTTPRecoveryOwner) BeginRecoveryChildWave(ctx context.Context,t transfer.RecoveryToken,limit int)(bool,error) {
+	if t != p.token || limit < 1 || limit > 1024 { return false,transfer.ErrRecoveryWork }
+	o := p.parent
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err := o.sharedCurrentLocked(ctx,t);err != nil { return false,err }
+	if o.parentRun == nil || o.parentRun.committing { return false,transfer.ErrRecoveryStale }
+	wave := o.parentRun.childWaves[p.work]
+	if wave == nil || wave.source != p.source { return false,transfer.ErrRecoveryStale }
+	if _,err := o.observeSharedActionLocked(ctx,t,o.record);err != nil { return false,err }
+	if wave.started {
+		if wave.limit != limit { return false,transfer.ErrRecoveryWork }
+		return false,nil // The child's existing Retry path must charge this replacement.
+	}
+	wave.started,wave.limit = true,limit
+	return true,nil
 }
 
 type parentHTTPRecoveryOwner struct { parent *taskRecoveryOwner;token transfer.RecoveryToken;work,source string }
@@ -156,3 +193,43 @@ func (p *parentHTTPRecoveryOwner) FinishRecovery(ctx context.Context,t transfer.
 func (p *parentHTTPRecoveryOwner) ReserveRecoveryAction(ctx context.Context,t transfer.RecoveryToken,seen uint64,kind transfer.RecoveryActionKind,work string,members []string,until time.Time)(*transfer.RecoveryActionPermit,error){return p.parent.ReserveRecoveryAction(ctx,t,seen,kind,work,members,until)}
 func (p *parentHTTPRecoveryOwner) ExtendRecoveryDeferral(ctx context.Context,t transfer.RecoveryToken,id uint64,work string,members []string,until time.Time)(time.Time,error){return p.parent.ExtendRecoveryDeferral(ctx,t,id,work,members,until)}
 func (p *parentHTTPRecoveryOwner) AdmitRecoveryWave(ctx context.Context,seal *httpProtocol.RecoveryWaveSeal,id uint64)(map[string]*transfer.RecoveryPermit,error){return p.parent.AdmitRecoveryWave(ctx,seal,id)}
+
+// Preserve CURRENT HTTP Store coordinates other than the explicit source
+// selection patch. The proposal may have been captured before Core drained a
+// pending startup/sampler Store. The kernel still CASes this exact checkpoint;
+// this is not a retry or permission to ignore a later real Store.
+func (o *taskRecoveryOwner) ownedHTTPRefreshCheckpoint(ctx context.Context, expected recoverySharedExpected, proposal json.RawMessage) (json.RawMessage,error) {
+	var patch map[string]json.RawMessage
+	if json.Unmarshal(proposal,&patch) != nil || patch == nil || len(patch["RedirectURL"]) == 0 { return nil,transfer.ErrRecoveryHeld }
+	o.mu.Unlock()
+	var owned json.RawMessage
+	err := withDatasetReadView(o.sharedReadStore(),o.sharedDataset,func(reader datasetReader) error {
+		_,record,required,e := readSharedRecovery(reader,o.taskID)
+		if e != nil { return e }
+		if !reflect.DeepEqual(record,expected.Record) || !reflect.DeepEqual(required,expected.Required) { return transfer.ErrRecoveryStale }
+		var current json.RawMessage
+		present,e := reader.Get(bucketSave,o.taskID,&current)
+		if e != nil { return transfer.ErrRecoveryUnavailable }
+		if present != expected.CheckpointPresent { return transfer.ErrRecoveryStale }
+		if present {
+			hash,e := checkpointDigest(current)
+			if e != nil || hash != expected.CheckpointHash { return transfer.ErrRecoveryStale }
+		}
+		base := map[string]json.RawMessage{}
+		if present {
+			if json.Unmarshal(current,&base) != nil || base == nil { return transfer.ErrRecoveryHeld }
+		} else {
+			// A genuinely absent initial Store may be installed, but no read
+			// error is absence and a present Store is never reconstructed.
+			for key,value := range patch { base[key] = append(json.RawMessage(nil),value...) }
+		}
+		base["RedirectURL"] = append(json.RawMessage(nil),patch["RedirectURL"]...)
+		if value,ok := patch["PublicSource"];ok { base["PublicSource"] = append(json.RawMessage(nil),value...) }
+		owned,e = json.Marshal(base)
+		return e
+	})
+	o.mu.Lock()
+	if err != nil { return nil,err }
+	if o.sharedCurrentLocked(ctx,expected.Token) != nil || !reflect.DeepEqual(o.record,expected.Record) { return nil,transfer.ErrRecoveryStale }
+	return owned,nil
+}

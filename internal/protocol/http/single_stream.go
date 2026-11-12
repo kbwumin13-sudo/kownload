@@ -33,6 +33,7 @@ func isLocalFileError(err error) bool {
 // A new full response starts at byte zero, including retries inside one run.
 // Reset under the file lock so Pause cannot close the file during truncation.
 func (f *Fetcher) resetSingleStreamAttempt(conn *connection, proofs ...*coverageResponseProof) error {
+	if err := f.checkFrozenPathWrite();err != nil { return err }
 	f.fileMu.Lock()
 	if f.file == nil {
 		f.fileMu.Unlock()
@@ -53,6 +54,7 @@ func (f *Fetcher) resetSingleStreamAttempt(conn *connection, proofs ...*coverage
 }
 
 func (f *Fetcher) writeDownloadAt(data []byte, offset int64, proofs ...*coverageResponseProof) error {
+	if err := f.checkFrozenPathWrite();err != nil { return err }
 	var proof *coverageResponseProof
 	if len(proofs) > 0 {
 		proof = proofs[0]

@@ -76,6 +76,8 @@ func (seal *RecoveryWaveSeal) Snapshot(ctx context.Context) (RecoveryWaveSnapsho
 		Epoch: seal.epoch, Members: append([]string{}, seal.members...)}, nil
 }
 
+type sharedIOContextKey struct{}
+
 func newRecoveryWaveBarrier(parent context.Context, lease *transfer.RecoveryLease) (*recoveryWaveBarrier, error) {
 	if parent == nil || lease == nil || lease.Owner == nil || lease.Token.TaskID == "" ||
 		lease.Token.Episode == "" || lease.Token.Generation == 0 || lease.Token.SourceRevision == 0 || lease.SourceHash == "" {
@@ -134,6 +136,7 @@ func (barrier *recoveryWaveBarrier) enter(ctx context.Context, workID string) (*
 		barrier.mu.Unlock()
 
 		ioContext, cancel := context.WithCancel(ctx)
+		ioContext = context.WithValue(ioContext,sharedIOContextKey{},true)
 		stop := context.AfterFunc(wave, cancel)
 		work := &recoveryWaveWork{Context: ioContext, barrier: barrier, epoch: epoch}
 		work.leave = func() {
