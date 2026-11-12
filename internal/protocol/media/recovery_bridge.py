@@ -1,10 +1,9 @@
 # Embedded by the Go media launcher only for a parent-managed process. No
 # listener, shared credential file, private budget or fallback transport.
-def install_recovery_bridge():
+def install_recovery_bridge(_urllib, _curlcffi, HTTPError, TransportError):
     import itertools
     import http.client
     import io
-    from yt_dlp.networking.exceptions import HTTPError, TransportError
 
     descriptor = context.get('recovery')
     if descriptor is None:

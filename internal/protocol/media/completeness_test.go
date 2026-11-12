@@ -26,6 +26,32 @@ case "$*" in
  esac`)
 	f := &Fetcher{}
 	f.Setup(configuredInspector(program))
+	t.Cleanup(func() { _ = f.Close() })
+	// Start is asynchronous: wait for the actual subprocess, which starts only
+	// after reinspection, before testing pause/resume metadata.
+	waitRunning := func() {
+		t.Helper()
+		deadline := time.NewTimer(3 * time.Second)
+		defer deadline.Stop()
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for {
+			f.mu.Lock()
+			running, starting := f.running, f.starting
+			f.mu.Unlock()
+			if running {
+				return
+			}
+			if !starting {
+				t.Fatal("media worker exited before starting after patch")
+			}
+			select {
+			case <-deadline.C:
+				t.Fatal("media worker did not start after patch")
+			case <-tick.C:
+			}
+		}
+	}
 	req := &base.Request{URL: "https://example.test/v?sig=one", Extra: &model.ReqExtra{Format: "a", Cookies: []model.Cookie{{Name: "one", Value: "first"}}}, Proxy: &base.RequestProxy{Mode: base.RequestProxyModeNone}}
 	opts := &base.Options{Path: t.TempDir()}
 	if err := f.Resolve(req, opts); err != nil {
@@ -53,7 +79,10 @@ case "$*" in
 	if err := f.Patch(&base.Request{URL: "https://example.test/other"}, nil); err == nil {
 		t.Fatal("active patch accepted")
 	}
-	_ = f.Pause()
+	waitRunning()
+	if err := f.Pause(); err != nil {
+		t.Fatal(err)
+	}
 	if f.identity != identity || f.workID != "" || f.downloaded != 50 {
 		t.Fatal("signed refresh lost resume state")
 	}
@@ -69,7 +98,10 @@ case "$*" in
 	if err := f.Start(); err != nil {
 		t.Fatal(err)
 	}
-	_ = f.Pause()
+	waitRunning()
+	if err := f.Pause(); err != nil {
+		t.Fatal(err)
+	}
 	if f.workPrefix == oldPrefix || f.workID == "" || f.downloaded != 0 || len(f.tracks) != 0 || f.meta.Res.Size != 200 || f.format != "b" {
 		t.Fatalf("stale resumed state: %+v %+v", f.Stats(), f.meta.Res)
 	}

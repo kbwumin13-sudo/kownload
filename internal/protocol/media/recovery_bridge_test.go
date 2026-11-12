@@ -7,15 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"strings"
+	"os/exec"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
-	"github.com/GopeedLab/gopeed/pkg/base"
-	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
 
 type mediaBridgeOwner struct {
@@ -54,25 +51,41 @@ func (o *mediaBridgeOwner) EnterRecoveryWork(ctx context.Context, _ transfer.Rec
 	o.active.Add(1)
 	return transfer.IssueRecoveryWorkScope(ctx, func(ctx context.Context) error { return ctx.Err() }, func() { o.active.Add(-1) }), nil
 }
-func mediaBridgeFixture(t *testing.T, ctx context.Context) (model.Config, context.Context, *mediaBridgeOwner) {
+
+// Exercise the embedded bridge against real stdlib HTTP connections in ordinary
+// CI. This requires Python, not a private yt-dlp/curl SDK. The packaged yt-dlp
+// adapters are covered separately by the controlled SDK/Core integration run.
+func mediaBridgeFixture(t *testing.T, ctx context.Context) (string, context.Context, *mediaBridgeOwner) {
 	t.Helper()
 	python := os.Getenv("GOPEED_MEDIA_PYTHON")
 	if python == "" {
-		t.Fatal("set GOPEED_MEDIA_PYTHON to the fixed release interpreter")
+		python = "python3"
 	}
-	if _, err := os.Stat(python); err != nil {
-		t.Fatal(err)
-	}
-	entry := filepath.Join(t.TempDir(), "yt-dlp")
-	if err := os.WriteFile(entry, []byte("#!"+python+"\n"), 0700); err != nil {
-		t.Fatal(err)
+	python, err := exec.LookPath(python)
+	if err != nil {
+		t.Fatalf("real Python interpreter required: %v", err)
 	}
 	owner := &mediaBridgeOwner{ctx: ctx}
 	lease := &transfer.RecoveryLease{Owner: owner, Token: transfer.RecoveryToken{TaskID: "media-fixture", Episode: "episode", Generation: 1, SourceRevision: 1}}
-	return model.Config{YtDlpPath: entry}, mediaWorkContext(transfer.WithRecoveryLease(ctx, lease), "media/download"), owner
+	return python, mediaWorkContext(transfer.WithRecoveryLease(ctx, lease), "media/download"), owner
 }
 
-const bridgeMain = "yt_dlp.main(context['args'] + ['--downloader', 'native'])"
+func mediaBridgeCommand(t *testing.T, ctx context.Context, python, url, script string) (*exec.Cmd, func()) {
+	t.Helper()
+	const prelude = `import json, os, sys, threading
+import urllib.request, urllib.error
+context = {'recovery': {'read': 3, 'write': 4}}
+`
+	const install = "\ninstall_recovery_bridge(urllib.request, None, urllib.error.HTTPError, urllib.error.URLError)\nopener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+	cmd := exec.CommandContext(ctx, python, "-c", prelude+recoveryWrapper+install+script, url)
+	bridge, err := newMediaRecoveryBridge(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	return cmd, bridge.Close
+}
 
 func TestMediaRecoveryBridgeRequests(t *testing.T) {
 	var requests atomic.Int64
@@ -92,27 +105,19 @@ func TestMediaRecoveryBridgeRequests(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cfg, ctx, owner := mediaBridgeFixture(t, ctx)
+	python, ctx, owner := mediaBridgeFixture(t, ctx)
 	run := func(script string, wantFailure bool) error {
-		cmd, cleanup, err := mediaCommand(ctx, cfg, &base.Request{URL: server.URL}, &model.ReqExtra{}, []string{server.URL + "/redirect"})
-		if err != nil {
-			t.Fatal(err)
-		}
+		cmd, cleanup := mediaBridgeCommand(t, ctx, python, server.URL+"/redirect", script)
 		defer cleanup()
-		cmd.Args[2] = strings.Replace(cmd.Args[2], bridgeMain, script, 1)
-		setProcessGroup(cmd)
-		cmd.Cancel = func() error { return killProcessGroup(cmd) }
 		out, err := cmd.CombinedOutput()
 		if err != nil && !wantFailure {
 			t.Fatalf("Python bridge: %v\n%s", err, out)
 		}
 		return err
 	}
-	script := `from yt_dlp.networking.impersonate import ImpersonateTarget
-for options in ({'quiet': True, 'proxy': ''}, {'quiet': True, 'proxy': '', 'impersonate': ImpersonateTarget()}):
-    with yt_dlp.YoutubeDL(options) as ydl:
-        with ydl.urlopen(context['args'][-1]) as response:
-            assert response.read() == b'data'
+	script := `for _ in range(2):
+    with opener.open(sys.argv[1]) as response:
+        assert response.read() == b'data'
 `
 	if err := run(script, false); err != nil {
 		t.Fatal(err)
@@ -128,12 +133,11 @@ for options in ({'quiet': True, 'proxy': ''}, {'quiet': True, 'proxy': '', 'impe
 		t.Fatal("denial performed IO or leaked scope")
 	}
 	owner.deny.Store(false)
-	failureScript := `with yt_dlp.YoutubeDL({'quiet': True, 'proxy': ''}) as ydl:
-    try:
-        ydl.urlopen(context['args'][-1].replace('/redirect', '/failure'))
-    except Exception:
-        pass
-    ydl.urlopen(context['args'][-1])
+	failureScript := `try:
+    opener.open(sys.argv[1].replace('/redirect', '/failure'))
+except Exception:
+    pass
+opener.open(sys.argv[1])
 `
 	if run(failureScript, true) == nil {
 		t.Fatal("failed hop was swallowed")
@@ -155,17 +159,10 @@ func TestMediaRecoveryBridgeCancel(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cfg, ctx, owner := mediaBridgeFixture(t, ctx)
-	cmd, cleanup, err := mediaCommand(ctx, cfg, &base.Request{URL: server.URL}, &model.ReqExtra{}, []string{server.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd.Args[2] = strings.Replace(cmd.Args[2], bridgeMain, `with yt_dlp.YoutubeDL({'quiet': True, 'proxy': ''}) as ydl:
-    with ydl.urlopen(context['args'][-1]) as response:
-        response.read()
-`, 1)
-	setProcessGroup(cmd)
-	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	python, ctx, owner := mediaBridgeFixture(t, ctx)
+	cmd, cleanup := mediaBridgeCommand(t, ctx, python, server.URL, `with opener.open(sys.argv[1]) as response:
+    response.read()
+`)
 	done := make(chan error, 1)
 	go func() { _, err := cmd.CombinedOutput(); done <- err }()
 	select {
