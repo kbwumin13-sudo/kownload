@@ -301,7 +301,12 @@ func (f *Fetcher) buildFastFailClient() *http.Client {
 // Clients share pooled transports when the downloader provides them; the
 // cookie jar and request/response policies always stay with this fetcher.
 func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
-	roundTripper := f.pooledTransport(timeout)
+	var roundTripper http.RoundTripper
+	if binding := f.mcpTransport.Load(); binding != nil {
+		roundTripper = &mcpHTTPConfiguredTransport{fetcher: f, binding: binding}
+	} else {
+		roundTripper = f.pooledTransport(timeout)
+	}
 	if roundTripper == nil {
 		roundTripper = &http.Transport{
 			DialContext: (&net.Dialer{

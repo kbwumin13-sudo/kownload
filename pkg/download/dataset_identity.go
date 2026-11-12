@@ -34,6 +34,18 @@ type datasetRecord struct {
 	DatasetID string `json:"datasetId"`
 }
 
+// This is a structural capability check only. A concrete store with missing,
+// invalid or unreadable metadata must still fail its authoritative read; that
+// error is never a reason to execute a previously declared v4 task as v1–3.
+func supportsSharedRecoveryDomain(storage Storage) bool {
+	switch storage.(type) {
+	case *MemStorage, *BoltStorage:
+		return true
+	default:
+		return false
+	}
+}
+
 func decodeDataset(raw []byte, persistent bool) (DatasetIdentity, error) {
 	if raw == nil {
 		return DatasetIdentity{}, ErrDatasetMissing

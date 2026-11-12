@@ -97,6 +97,10 @@ type Progress struct {
 }
 
 type Downloader struct {
+	mcpConfigMu       sync.Mutex
+	mcpConfigured     *mcpWriteHolder
+	mcpConfiguring    bool
+	mcpSetupStarted   bool
 	configSnapshotMu  sync.RWMutex
 	operationMu       sync.Mutex
 	handoffMu         sync.Mutex
@@ -179,11 +183,26 @@ func NewDownloader(cfg *DownloaderConfig) *Downloader {
 }
 
 func (d *Downloader) Setup() error {
+	if err := d.beginMCPSetup(); err != nil {
+		return err
+	}
 	if !d.startupTaskPolicy.Valid() {
 		return ErrStartupTaskPolicy
 	}
 	// setup storage
 	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage, bucketTaskOperations, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired, bucketTaskCompletion, bucketCompletionRequired}); err != nil {
+		return err
+	}
+	// Core's public NewDownloader+Setup path must establish the same domain
+	// before restoring or enrolling tasks as the REST startup path. Unknown
+	// Storage implementations keep their original managed recovery capability;
+	// they are not silently asserted to provide a trusted same-view domain.
+	if supportsSharedRecoveryDomain(d.storage) {
+		if err := InitializeDatasetIdentity(d.storage); err != nil {
+			return err
+		}
+	}
+	if err := d.checkMCPSetupDataset(); err != nil {
 		return err
 	}
 	// load config from storage
@@ -233,7 +252,7 @@ func (d *Downloader) Setup() error {
 			d.assignFetcherManager(task)
 			initTask(task)
 			task.creationBlocked = d.checkCreationAssociation(task) != nil
-			task.recoveryBlocked = d.checkTaskRecovery(task) != nil
+			task.recoveryBlocked = d.checkTaskRecoveryState(task) != nil
 			if task.getStatus() != base.DownloadStatusDone && task.getStatus() != base.DownloadStatusError {
 				task.updateStatus(base.DownloadStatusPause)
 			}
@@ -621,7 +640,10 @@ func (d *Downloader) saveActiveTask(task *Task) error {
 }
 
 func (d *Downloader) saveTask(task *Task) error {
-	if err := d.checkTaskRecovery(task); err != nil {
+	// A joined pause/shutdown must retain its checkpoint after execution
+	// authority has been revoked. This is declaration/association validation,
+	// not permission for a new request or writable output.
+	if err := d.checkTaskRecoveryState(task); err != nil {
 		return err
 	}
 	// Sealed verification deliberately has no protocol instance or new wire
@@ -1067,6 +1089,11 @@ func (d *Downloader) continueAll() (err error) {
 
 	for _, task := range continuedTasks {
 		if err = d.doStart(task); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				d.queueSharedUntil(task, deferred.Until)
+				err = nil
+				continue
+			}
 			return
 		}
 	}
@@ -1088,6 +1115,11 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 	continueTasks := creationEligible(handoffEligible(d.getTasksByFilter(filter)))
 	for _, task := range continueTasks {
 		if err = d.doStart(task); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				d.queueSharedUntil(task, deferred.Until)
+				err = nil
+				continue
+			}
 			return
 		}
 	}
@@ -1246,6 +1278,7 @@ func (d *Downloader) closeNetdiskFetchers() error {
 }
 
 func (d *Downloader) Close() error {
+	d.stopMCPWrites()
 	d.handoffMu.Lock()
 	d.operationMu.Lock()
 	d.closed.Store(true)
@@ -1263,6 +1296,7 @@ func (d *Downloader) Close() error {
 		// Pause persists resumable state; Close then releases netdisk Wait
 		// callers before its shared service and the storage backend are closed.
 		d.closeNetdiskFetchers,
+		d.closeMCPWrites,
 	}
 	for _, fm := range d.cfg.FetchManagers {
 		closeArr = append(closeArr, fm.Close)
@@ -1498,11 +1532,14 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	if len(leases) > 0 {
 		runLease = leases[0]
 	}
+	if runLease != nil && task.MCPWrite != nil {
+		defer d.releaseMCPTaskLease(task, runLease.Token)
+	}
 
 	if d.closed.Load() || d.getTask(task.ID) != task {
 		return
 	}
-	bound := task.Protocol == "http" && wait != nil
+	bound := wait != nil && (task.Protocol == "http" || parentRecoveryProtocol(task.Protocol))
 	registrationGeneration := generation
 	if !bound {
 		registrationGeneration = 0
@@ -1575,6 +1612,11 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	if bound {
 		if runLease != nil {
 			owner := task.recoveryOwner.Load()
+			if owner != nil && parentRecoveryProtocol(task.Protocol) {
+				var leaseErr error
+				runLease,leaseErr = owner.parentResultLease(runLease)
+				if leaseErr != nil { return }
+			}
 			if owner == nil || !owner.acceptsFailure(runLease.Token) || (err == nil && runLease.Check() != nil) {
 				return
 			}
@@ -1601,7 +1643,14 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	}
 	var committed bool
 	var completionErr error
-	if task.Completion != nil {
+	if task.MCPWrite != nil {
+		httpFetcher, ok := f.(*httpProtocol.Fetcher)
+		if !ok || runLease == nil {
+			completionErr = transfer.ErrRecoveryHeld
+		} else {
+			committed, completionErr = d.completeMCPHTTP(runLease.Context, task, httpFetcher, generation, runLease)
+		}
+	} else if task.Completion != nil {
 		committed, completionErr = d.completeVerifiedHTTP(task, f, generation, runLease)
 	} else {
 		committed, completionErr = d.commitTaskCompletion(task, f, expected...)
@@ -1645,7 +1694,7 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 			autoTorrentEnabled = cfg.AutoTorrent.Enable
 		}
 
-		if autoTorrentEnabled && strings.HasSuffix(downloadFilePath, ".torrent") {
+		if autoTorrentEnabled && d.MCPTaskEffectAllowed(task, "post_process") && strings.HasSuffix(downloadFilePath, ".torrent") {
 			// Determine if should delete torrent file after creating BT task
 			shouldDelete := false
 			if e.DeleteTorrentAfterDownload != nil {
@@ -1655,6 +1704,9 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 			}
 
 			go func() {
+				if !d.MCPTaskEffectAllowed(task, "post_process") {
+					return
+				}
 				_, err2 := d.CreateDirect(
 					&base.Request{
 						URL: downloadFilePath,
@@ -1684,7 +1736,7 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 
 		// Auto-extract archive files using the extraction queue
 		// This ensures only one extraction runs at a time to prevent resource exhaustion
-		if autoExtractEnabled && isArchiveFile(downloadFilePath) {
+		if autoExtractEnabled && d.MCPTaskEffectAllowed(task, "post_process") && isArchiveFile(downloadFilePath) {
 			d.enqueueExtraction(task, downloadFilePath, e)
 		}
 	}
@@ -1933,7 +1985,7 @@ func (d *Downloader) restoreTask(task *Task) error {
 			return err
 		}
 	}
-	if task.Protocol != "http" || (task.getStatus() == base.DownloadStatusDone && task.Uploading) {
+	if (task.Protocol != "http" && !parentRecoveryProtocol(task.Protocol)) || (task.getStatus() == base.DownloadStatusDone && task.Uploading) {
 		go d.watch(task)
 	}
 	return nil
@@ -1962,7 +2014,7 @@ func (d *Downloader) restoreFetcher(task *Task) error {
 	if task.fetcher == nil {
 		task.fetcher = task.fetcherManager.Build()
 	}
-	if initial && !checkpointPresent && task.Protocol == "http" && meta.Res == nil {
+	if initial && !checkpointPresent && (task.Protocol == "http" || parentRecoveryProtocol(task.Protocol)) && meta.Res == nil {
 		task.recoveryInitialEligible.Store(true)
 		// Keep the manager's Restore/precision semantics; only HTTP's narrow
 		// runtime handshake distinguishes a fresh M->Q from historical state.
@@ -1997,7 +2049,7 @@ func (d *Downloader) doCreate(f fetcher.Fetcher, opts *base.Options) (taskId str
 	task.fetcherManager = fm
 	task.fetcher = f
 	task.Protocol = fm.Name()
-	task.recoveryInitialEligible.Store(task.Protocol == "http")
+	task.recoveryInitialEligible.Store(task.Protocol == "http" || parentRecoveryProtocol(task.Protocol))
 	task.Meta = util.DeepClone(f.Meta())
 	task.Progress = &Progress{}
 	_, task.Uploading = f.(fetcher.Uploader)
@@ -2162,7 +2214,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		}
 		runCtx, runCancel = context.WithCancel(context.Background())
 		task.runCancel = runCancel
-		if task.Protocol == "http" {
+		if task.Protocol == "http" || parentRecoveryProtocol(task.Protocol) {
 			cancelSnapshot := runCancel
 			task.recoveryRunCancel.Store(&cancelSnapshot)
 		}
@@ -2230,8 +2282,14 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			}
 			output.RequireVerifiedOutput()
 		}
+		if task.MCPWrite != nil {
+			if err := d.configureMCPFetcher(task); err != nil {
+				return err
+			}
+		}
 
 		var recovery *taskRecoveryOwner
+		var parentSnapshot *transfer.ProtocolExecutionContext
 		task.dataLock.RLock()
 		sharedEligible := task.Recovery != nil || task.recoveryInitialEligible.Load()
 		task.dataLock.RUnlock()
@@ -2261,6 +2319,23 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 				}
 			}
 		}
+		if parentRecoveryProtocol(task.Protocol) {
+			_, canBind := task.fetcher.(interface { SetParentRecoveryContext(context.Context) error })
+			if !canBind || !supportsSharedRecoveryDomain(d.storage) {
+				if task.Recovery != nil { return transfer.ErrRecoveryHeld }
+			} else {
+				var supported bool
+				var captureErr error
+				parentSnapshot,supported,captureErr = d.captureParentRecoveryContext(task)
+				if captureErr != nil { return captureErr }
+				if !supported {
+					if task.Recovery != nil { return transfer.ErrRecoveryHeld }
+				} else {
+					recovery,captureErr = d.ensureTaskRecovery(task,parentSnapshot.DefaultsHash())
+					if captureErr != nil { return captureErr }
+				}
+			}
+		}
 		if runCtx.Err() != nil {
 			invalidateTaskRecovery(task)
 			return nil
@@ -2269,7 +2344,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		d.triggerOnStart(startTask)
 		task.statusLock.Lock()
 		obsoleteAfterStart := runCtx.Err() != nil || task.runGeneration != generation || task.getStatus() != base.DownloadStatusRunning
-		if obsoleteAfterStart && task.Protocol == "http" {
+		if obsoleteAfterStart && (task.Protocol == "http" || parentRecoveryProtocol(task.Protocol)) {
 			task.statusLock.Unlock()
 			invalidateTaskRecovery(task)
 			return nil
@@ -2283,38 +2358,45 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		// PrepareContext sees this run's canceled context, and never Start.
 		task.statusLock.Unlock()
 		if recovery != nil {
-			snapshot, supported, captureErr := capture.CaptureRecoveryContext(task.Meta.Req)
-			if captureErr != nil {
-				return captureErr
+			var httpSnapshot *transfer.HTTPExecutionContext
+			var defaults string
+			if parentRecoveryProtocol(task.Protocol) {
+				var supported bool
+				var captureErr error
+				parentSnapshot,supported,captureErr = d.captureParentRecoveryContext(task)
+				if captureErr != nil { return captureErr }
+				if !supported { return transfer.ErrRecoveryHeld }
+				defaults = parentSnapshot.DefaultsHash()
+			} else {
+				var supported bool
+				var captureErr error
+				httpSnapshot,supported,captureErr = capture.CaptureRecoveryContext(task.Meta.Req)
+				if captureErr != nil { return captureErr }
+				if !supported { return transfer.ErrRecoveryHeld }
+				defaults = httpSnapshot.DefaultsHash()
 			}
-			if !supported {
-				return transfer.ErrRecoveryHeld
-			}
-			if err := recovery.persistSnapshot(task.clone(), nil, false, snapshot.DefaultsHash()); err != nil {
-				return err
-			}
-			if sharedEligible {
+			if err := recovery.persistSnapshot(task.clone(), nil, false, defaults); err != nil { return err }
+			if (sharedEligible || parentSnapshot != nil) && supportsSharedRecoveryDomain(d.storage) {
 				task.lock.Unlock()
 				sharedErr := d.prepareSharedRecovery(runCtx, task, recovery, generation)
 				task.lock.Lock()
-				if sharedErr != nil {
-					return sharedErr
-				}
+				if sharedErr != nil { return sharedErr }
 			}
-			if _, err := recovery.begin(generation, "", runCtx); err != nil {
-				return err
-			}
+			recovery.mu.Lock()
+			recovery.parentContext = parentSnapshot
+			recovery.mu.Unlock()
+			if _, err := recovery.begin(generation, "", runCtx); err != nil { return err }
 			lease, err := recovery.currentLease(runCtx)
-			if err != nil {
-				return err
-			}
-			setter, ok := task.fetcher.(interface{ SetRecoveryLease(*transfer.RecoveryLease) })
-			if !ok {
-				return transfer.ErrRecoveryHeld
-			}
-			capture.SetRecoveryContext(snapshot)
-			setter.SetRecoveryLease(lease)
+			if err != nil { return err }
 			runCtx = transfer.WithRecoveryLease(runCtx, lease)
+			if parentSnapshot != nil {
+				if err := task.fetcher.(interface{ SetParentRecoveryContext(context.Context) error }).SetParentRecoveryContext(runCtx); err != nil { return err }
+			} else {
+				setter,ok := task.fetcher.(interface{SetRecoveryLease(*transfer.RecoveryLease)})
+				if !ok { return transfer.ErrRecoveryHeld }
+				capture.SetRecoveryContext(httpSnapshot)
+				setter.SetRecoveryLease(lease)
+			}
 		}
 		if task.Completion != nil && recovery == nil {
 			// New recovery-managed output must never resolve through the legacy
@@ -2325,7 +2407,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			task.recoveryInitialEligible.Store(false)
 		}
 		var boundWait func() error
-		if task.Protocol == "http" {
+		if task.Protocol == "http" || recovery != nil && parentRecoveryProtocol(task.Protocol) {
 			if binder, ok := task.fetcher.(interface {
 				BindRunWait(context.Context) func() error
 			}); ok {
@@ -2339,6 +2421,14 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if err := d.observeTaskRecoveryCoverage(task, transfer.RecoveryLeaseFromContext(runCtx)); err != nil {
 				return err
 			}
+		}
+		mcpOutputBound := false
+		if task.MCPWrite != nil && task.Meta.Res != nil {
+			if err := d.bindMCPOutputForRun(runCtx, task, transfer.RecoveryLeaseFromContext(runCtx)); err != nil {
+				return err
+			}
+			mcpOutputBound = true
+			defer task.fetcher.(*httpProtocol.Fetcher).ReleaseVerifiedOutput()
 		}
 		// Resolve owns its request/options. Keep the published task view detached
 		// so Pause can cancel resolution without waiting for a snapshot lock.
@@ -2373,7 +2463,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}
 		// Keep rename reservation until Start has created the target file.
-		if needCreate && task.fetcherManager.AutoRename() {
+		if needCreate && task.MCPWrite == nil && task.fetcherManager.AutoRename() {
 			d.checkDuplicateLock.Lock()
 			defer d.checkDuplicateLock.Unlock()
 		}
@@ -2387,7 +2477,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			}
 
 			if needCreate {
-				if task.fetcherManager.AutoRename() {
+				if task.MCPWrite == nil && task.fetcherManager.AutoRename() {
 					task.Meta.Opts.Name = util.SafeFilename(task.Meta.Opts.Name)
 					// check if the download file is duplicated and rename it automatically.
 					if task.Meta.Res.Name != "" {
@@ -2429,6 +2519,35 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if coverageErr != nil {
 				return coverageErr
 			}
+		}
+		if task.MCPWrite != nil && !mcpOutputBound {
+			lease := transfer.RecoveryLeaseFromContext(runCtx)
+			if lease == nil {
+				return transfer.ErrRecoveryHeld
+			}
+			if err := d.saveTask(task); err != nil {
+				return err
+			}
+			task.lock.Unlock()
+			file, outputErr := d.prepareMCPOutput(runCtx, task, lease)
+			task.lock.Lock()
+			if outputErr != nil {
+				return outputErr
+			}
+			if runCtx.Err() != nil {
+				file.Close()
+				return runCtx.Err()
+			}
+			output, ok := task.fetcher.(*httpProtocol.Fetcher)
+			if !ok {
+				file.Close()
+				return transfer.ErrRecoveryHeld
+			}
+			if err := output.SetVerifiedOutput(file); err != nil {
+				file.Close()
+				return err
+			}
+			defer output.ReleaseVerifiedOutput()
 		}
 		if task.Completion != nil {
 			lease := transfer.RecoveryLeaseFromContext(runCtx)
@@ -2554,6 +2673,13 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 }
 
 func (d *Downloader) doPause(task *Task) (err error) {
+	task.dataLock.RLock()
+	mcp := mcpTaskPresence(task)
+	task.dataLock.RUnlock()
+	if mcp {
+		d.operationMu.Lock()
+		defer d.operationMu.Unlock()
+	}
 	var pauseDone chan struct{}
 	var previousPauseDone chan struct{}
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
@@ -2600,10 +2726,14 @@ func (d *Downloader) doPause(task *Task) (err error) {
 			<-previousPauseDone
 		}
 		pauseErr := func() error {
+			parent := parentRecoveryProtocol(task.Protocol)
+			if parent && task.fetcher != nil {
+				if err := task.fetcher.Pause(); err != nil { return err }
+			}
 			task.lock.Lock()
 			defer task.lock.Unlock()
 
-			if task.fetcher != nil {
+			if !parent && task.fetcher != nil {
 				if err := task.fetcher.Pause(); err != nil {
 					return err
 				}
@@ -2618,6 +2748,7 @@ func (d *Downloader) doPause(task *Task) (err error) {
 			}
 			return nil
 		}()
+		d.releaseMCPTaskLease(task)
 		// Callbacks may invoke Close themselves. Publish persistence completion
 		// and release operation locks before delivering the event.
 		close(pauseDone)

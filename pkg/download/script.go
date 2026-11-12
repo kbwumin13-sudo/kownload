@@ -56,6 +56,9 @@ func (d *Downloader) getScriptPaths() []string {
 // executeScriptAtPath executes a single script with the given data
 // Returns any error that occurred during execution
 func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData, permits ...*verifiedSuccessPermit) error {
+	if data == nil || data.Payload == nil || !d.MCPTaskEffectAllowed(data.Payload.Task, "script") {
+		return context.Canceled
+	}
 	ctx := context.Background()
 	if len(permits) > 0 {
 		if !d.verifiedSuccessAllowed(permits[0]) {
@@ -136,6 +139,9 @@ func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData, pe
 
 // triggerScripts executes all configured scripts
 func (d *Downloader) triggerScripts(event ScriptEvent, task *Task, err error, permits ...*verifiedSuccessPermit) {
+	if !d.MCPTaskEffectAllowed(task, "script") {
+		return
+	}
 	paths := d.getScriptPaths()
 	if len(paths) == 0 {
 		return

@@ -220,6 +220,8 @@ type taskRecoveryOwner struct {
 	sharedActionPermit              *transfer.RecoveryActionPermit                      // mu; one waiting transition per confirmed debit
 	sharedInitialMembers            []string                                            // mu; frozen continuation workset, not durable authority
 	sharedCheckpoint                func(context.Context, transfer.RecoveryToken) error // mu; Core drains pending Store before the lock-free owned capture
+	parentRun                       *parentRecoveryRun
+	parentContext                   *transfer.ProtocolExecutionContext
 	sharedAdmission                 sharedWaveAdmission                                 // mu; bound once to the owning Core lifecycle
 }
 
@@ -298,6 +300,10 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 		}
 		if r || q || saved.Recovery != nil {
 			_, record, err = readRecovery(tx, task.ID)
+			// Only Core's known, in-process new-M evidence can survive the
+			// initial durable record. Reload/query/history do not set this bit.
+			freshEnrollment = err == nil && freshInitial && record.Version == recoverySharedVersion &&
+				record.Generation == 0 && record.InitialAttempt.State == "ungranted"
 			return err
 		}
 		if saved.Meta == nil || saved.Meta.Req == nil {

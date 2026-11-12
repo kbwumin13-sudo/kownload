@@ -306,6 +306,9 @@ func (d *Downloader) triggerOnResolve(req *base.Request) (res *base.Resource, er
 }
 
 func (d *Downloader) triggerOnStart(task *Task) {
+	if !d.MCPTaskEffectAllowed(task, "script") {
+		return
+	}
 	doTrigger(d,
 		EventOnStart,
 		task.Meta.Req,
@@ -326,6 +329,9 @@ func (d *Downloader) triggerOnStart(task *Task) {
 }
 
 func (d *Downloader) triggerOnError(task *Task, err error) {
+	if !d.MCPTaskEffectAllowed(task, "script") {
+		return
+	}
 	doTrigger(d,
 		EventOnError,
 		task.Meta.Req,
@@ -338,6 +344,9 @@ func (d *Downloader) triggerOnError(task *Task, err error) {
 }
 
 func (d *Downloader) triggerOnDone(task *Task, permits ...*verifiedSuccessPermit) {
+	if !d.MCPTaskEffectAllowed(task, "script") {
+		return
+	}
 	var allowed []func() bool
 	if len(permits) > 0 {
 		allowed = []func() bool{func() bool { return d.verifiedSuccessAllowed(permits[0]) }}
