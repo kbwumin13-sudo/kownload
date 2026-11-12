@@ -207,7 +207,11 @@ func inspectInfo(ctx context.Context, req *base.Request, ctl *controller.Control
 	}
 	if transfer.RecoveryLeaseFromContext(ctx) != nil {
 		// A funded Task never joins another Task's background extraction.
-		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, ctl, cfg)
+		frozenCtl, frozenCfg, err := mediaExecutionContext(ctx, ctl, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, frozenCtl, frozenCfg)
 	}
 	baseKey := baseInspectionKey(&requestCopy, extra, cfg)
 	if extra.Format != "" {
@@ -500,7 +504,7 @@ func Inspect(ctx context.Context, req *base.Request, ctl *controller.Controller)
 	}
 	_, result, err := inspectInfo(ctx, snapshot, ctl, configFor(ctl))
 	if err == nil && result.Supported && snapshot.Extra.(*model.ReqExtra).CollectContext {
-		result.ContextURLs = discoverContext(ctx, snapshot, ctl, result)
+		result.ContextURLs, err = discoverContextChecked(ctx, snapshot, ctl, result)
 	}
 	return result, err
 }

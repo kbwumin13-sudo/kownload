@@ -6,11 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sync"
 
+	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/transfer"
+	"github.com/GopeedLab/gopeed/pkg/base"
+	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
 
 // The child never chooses its workset, token, owner or budget. The caller binds
@@ -57,6 +62,43 @@ func mediaRecoveryCheck(ctx context.Context) error {
 	}
 	return nil
 }
+
+// A managed run uses only the values captured by its durable parent. Copy the
+// controller so legacy GUI operations retain their original callbacks.
+func mediaExecutionContext(ctx context.Context, ctl *controller.Controller, cfg model.Config) (*controller.Controller, model.Config, error) {
+	lease := transfer.RecoveryLeaseFromContext(ctx)
+	if lease == nil {
+		return ctl, cfg, nil
+	}
+	if err := lease.Check(); err != nil {
+		return nil, model.Config{}, err
+	}
+	snapshot := lease.ParentContext
+	if snapshot == nil || snapshot.SourceHash() != lease.SourceHash || snapshot.ProxyID() == "" {
+		return nil, model.Config{}, transfer.ErrRecoveryHeld
+	}
+	var frozen model.Config
+	if err := snapshot.Config(&frozen); err != nil {
+		return nil, model.Config{}, err
+	}
+	owned := controller.Controller{}
+	if ctl != nil {
+		owned = *ctl
+	}
+	owned.GetConfig = func(out any) { _ = snapshot.Config(out) }
+	owned.GetProxy = func(*base.RequestProxy) func(*http.Request) (*url.URL, error) { return snapshot.Proxy() }
+	owned.GetProxyPolicy = func(*base.RequestProxy) (func(*http.Request) (*url.URL, error), string) {
+		return snapshot.Proxy(), snapshot.ProxyID()
+	}
+	owned.GetRecoveryProxySnapshot = func(*base.RequestProxy) (func(*http.Request) (*url.URL, error), string, bool) {
+		return snapshot.Proxy(), snapshot.ProxyID(), true
+	}
+	// Existing platform/tool defaults are deterministic and do not consult global
+	// configuration after the snapshot callback replaces GetConfig.
+	frozen = configFor(&owned)
+	return &owned, frozen, nil
+}
+
 func newMediaRecoveryBridge(ctx context.Context, cmd *exec.Cmd) (*mediaRecoveryBridge, error) {
 	lease := transfer.RecoveryLeaseFromContext(ctx)
 	if lease == nil {

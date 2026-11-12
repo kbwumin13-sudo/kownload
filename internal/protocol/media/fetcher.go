@@ -132,6 +132,10 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 
 func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Options, ctl *controller.Controller, cfg model.Config) error {
 	var err error
+	ctl, cfg, err = mediaExecutionContext(ctx, ctl, cfg)
+	if err != nil {
+		return err
+	}
 	req, err = cloneRequest(req)
 	if err != nil {
 		return err
@@ -381,6 +385,11 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	}()
 	if err := mediaRecoveryCheck(ctx); err != nil {
 		return err
+	}
+	var executionErr error
+	ctl, cfg, executionErr = mediaExecutionContext(ctx, ctl, cfg)
+	if executionErr != nil {
+		return executionErr
 	}
 	if needsResolve {
 		inspectCtx, stopInspect := context.WithTimeout(ctx, 45*time.Second)
