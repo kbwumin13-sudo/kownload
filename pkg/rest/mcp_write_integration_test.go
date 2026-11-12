@@ -119,7 +119,7 @@ func TestMCPWriteBuildServerUDSCreatePauseResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if !t.Failed() {
+		if !t.Failed() && os.Getenv("KOWNLOAD_MCP_CLIENT_HANDOFF") == "" {
 			_ = os.RemoveAll(root)
 		} else {
 			t.Log("retained", root)
