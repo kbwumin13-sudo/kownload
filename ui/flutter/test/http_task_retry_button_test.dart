@@ -94,6 +94,106 @@ void main() {
     expect(q['actionId'], body['actionId']);
     expect(q['expectedEpisode'], 'ep-a');
   });
+  widgetTest('cooldown sends zero POST until a fresh explicit click preflights',
+      (t) async {
+    var cooling = true;
+    f.override = (q) async {
+      if (cooling && q.uri.path.contains('/recovery/v1')) {
+        return f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'recovery': f.view()
+            ..['reason'] = 'cooldown'
+            ..['retryAllowed'] = false
+        });
+      }
+      await f.handle(q);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => messages.isNotEmpty);
+    expect(messages.single, contains('冷却期'));
+    expect(f.posts, 0);
+    expect(legacy, 0);
+    expect(find.byTooltip('重试'), findsOneWidget);
+    cooling = false;
+    await t.pump(const Duration(seconds: 2));
+    expect(f.posts, 0);
+    expect(refresh, 0);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    expect(f.posts, 1);
+    expect(legacy, 0);
+    final body =
+        f.requests.singleWhere((r) => r['method'] == 'POST')['body'] as Map;
+    expect(body['expectedEpisode'], 'ep-a');
+    expect(body['expectedSourceRevision'], 1);
+    expect(messages.last, contains('已受理'));
+  });
+  widgetTest('unknown recovery reason sends no POST or legacy Continue',
+      (t) async {
+    f.override = (q) async {
+      if (q.uri.path.contains('/recovery/v1')) {
+        return f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'recovery': f.view()
+            ..['reason'] = 'future_cooldown'
+            ..['retryAllowed'] = false
+        });
+      }
+      await f.handle(q);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => messages.isNotEmpty);
+    expect(f.posts, 0);
+    expect(legacy, 0);
+    expect(messages.single, isNot(contains('冷却期')));
+  });
+  widgetTest('cooldown after unknown ACK keeps the original query-only tuple',
+      (t) async {
+    f.override = (q) async {
+      if (q.method == 'POST') f.replyMode = 'lostAck';
+      await f.handle(q);
+    };
+    await mount(t);
+    await click(t, '重试');
+    await spin(t, () => refresh == 1);
+    final original =
+        f.requests.singleWhere((r) => r['method'] == 'POST')['body'] as Map;
+    f.replyMode = 'not_recorded';
+    f.override = (q) async {
+      if (q.uri.path.contains('/recovery/v1')) {
+        return f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'recovery': f.view(action: q.uri.queryParameters)
+            ..['reason'] = 'cooldown'
+            ..['retryAllowed'] = false
+        });
+      }
+      await f.handle(q);
+    };
+    await t.pumpWidget(const SizedBox());
+    await mount(t);
+    await click(t, '查询原重试');
+    await spin(t, () => refresh == 2);
+    expect(messages.last, contains('冷却期'));
+    expect(find.byTooltip('查询原重试'), findsOneWidget);
+    expect(f.posts, 1);
+    expect(legacy, 0);
+    expect((f.requests.last['uri'] as Uri).queryParameters, {
+      'actionId': original['actionId'],
+      'expectedEpisode': original['expectedEpisode'],
+      'expectedSourceRevision': '${original['expectedSourceRevision']}'
+    });
+    f.override = null;
+    await click(t, '查询原重试');
+    await spin(t, () => refresh == 3);
+    expect(f.posts, 1);
+    expect(find.byTooltip('查询原重试'), findsOneWidget);
+  });
   widgetTest('remount after lost ACK queries original action instead of POST',
       (t) async {
     f.override = (request) async {

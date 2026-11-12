@@ -157,7 +157,9 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
   void _message(HttpRecoveryReply reply) {
     final r = reply.recovery;
     final state = r?.receipt?.state;
-    if ((state == 'accepted' || state == 'replayed') &&
+    if (r?.management == 'managed' && r?.reason == 'cooldown') {
+      widget.notice('任务仍在冷却期，当前不能重试；请稍后主动查询任务状态。');
+    } else if ((state == 'accepted' || state == 'replayed') &&
         _attempt?.acknowledged == true) {
       widget.notice('重试已受理；下载进度以任务状态为准。');
     } else if (state == 'stale') {
