@@ -61,7 +61,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		if snapshot.ID != o.taskID || !recoveryProtocolCompatible(snapshot.Protocol, record.Version) || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
 		}
-		if err := guardPathSnapshot(current, snapshot); err != nil {
+		if err := guardPathSnapshot(&current, snapshot); err != nil {
 			return err
 		}
 		if err := guardCompletionSnapshot(tx, snapshot); err != nil {

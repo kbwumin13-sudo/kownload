@@ -711,10 +711,10 @@ func (d *Downloader) saveTask(task *Task) error {
 			if e = guardPathSnapshot(current, snapshot); e != nil {
 				return e
 			}
+			// Native ED2K has no wire checkpoint; its resume state belongs to
+			// the existing protocol store. A nil Store preserves CURRENT here.
 			if data != nil {
 				e = tx.Put(bucketSave, task.ID, data)
-			} else {
-				e = tx.Delete(bucketSave, task.ID)
 			}
 			if e != nil {
 				return e
