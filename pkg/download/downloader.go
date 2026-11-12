@@ -186,6 +186,15 @@ func (d *Downloader) Setup() error {
 	if err := d.storage.Setup([]string{bucketTask, bucketSave, bucketProtocolState, bucketConfig, bucketExtension, bucketExtensionStorage, bucketTaskOperations, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired, bucketTaskCompletion, bucketCompletionRequired}); err != nil {
 		return err
 	}
+	// Core's public NewDownloader+Setup path must establish the same domain
+	// before restoring or enrolling tasks as the REST startup path. Unknown
+	// Storage implementations keep their original managed recovery capability;
+	// they are not silently asserted to provide a trusted same-view domain.
+	if supportsSharedRecoveryDomain(d.storage) {
+		if err := InitializeDatasetIdentity(d.storage); err != nil {
+			return err
+		}
+	}
 	// load config from storage
 	var cfg base.DownloaderStoreConfig
 	exist, err := d.storage.Get(bucketConfig, "config", &cfg)
@@ -2303,7 +2312,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if err := recovery.persistSnapshot(task.clone(), nil, false, snapshot.DefaultsHash()); err != nil {
 				return err
 			}
-			if sharedEligible {
+			if sharedEligible && supportsSharedRecoveryDomain(d.storage) {
 				task.lock.Unlock()
 				sharedErr := d.prepareSharedRecovery(runCtx, task, recovery, generation)
 				task.lock.Lock()
