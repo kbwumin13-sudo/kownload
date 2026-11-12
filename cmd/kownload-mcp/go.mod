@@ -5,6 +5,7 @@ go 1.25.0
 toolchain go1.25.4
 
 require (
+	github.com/GopeedLab/gopeed v0.0.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	golang.org/x/sys v0.41.0
@@ -18,3 +19,5 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+replace github.com/GopeedLab/gopeed => ../..
