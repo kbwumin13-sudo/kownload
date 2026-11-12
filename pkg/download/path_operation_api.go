@@ -350,6 +350,24 @@ func (d *Downloader) capturePathDefaults(task *Task) (string, error) {
 		if err != nil || !supported || snapshot == nil {
 			return "", ErrPathFreezeHeld
 		}
+		if task.Protocol == "media" {
+			// Use the same actual fetcher and frozen interpreter/configuration
+			// check as execution. Standalone/no-bridge cannot enter managed R/M.
+			f, err := d.buildFetcher(task.Meta.Req)
+			if err != nil {
+				return "", ErrPathFreezeHeld
+			}
+			bridge, ok := f.(interface {
+				SupportsParentRecovery(*transfer.ProtocolExecutionContext) (bool, error)
+			})
+			if !ok {
+				return "", ErrPathFreezeHeld
+			}
+			supported, err = bridge.SupportsParentRecovery(snapshot)
+			if err != nil || !supported {
+				return "", ErrPathFreezeHeld
+			}
+		}
 		return snapshot.DefaultsHash(), nil
 	}
 	f, err := d.buildFetcher(task.Meta.Req)
