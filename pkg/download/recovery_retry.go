@@ -88,7 +88,11 @@ func (s RecoveryTaskState) MarshalJSON() ([]byte, error) {
 func recoveryReceipt(state RecoveryTaskState, request RecoveryRetryRequest, outcome string) RecoveryTaskState {
 	receipt := &RecoveryRetryReceipt{Version: 1, ActionID: request.ActionID, ExpectedEpisode: request.ExpectedEpisode, ExpectedSourceRevision: request.ExpectedSourceRevision, Decision: request.Decision, State: outcome}
 	if outcome == "accepted" || outcome == "replayed" {
-		receipt.NewEpisode = state.Episode
+		// A later earned settlement may have advanced the current episode.
+		// The receipt describes the original explicit action, never that new run.
+		if last := state.LastExplicitRetry; last != nil && last.ActionID == request.ActionID && last.FromEpisode == request.ExpectedEpisode && last.SourceRevision == request.ExpectedSourceRevision {
+			receipt.NewEpisode = last.ToEpisode
+		}
 	}
 	if outcome == "not_recorded" {
 		receipt.QueryRequired = true
@@ -345,7 +349,7 @@ func (d *Downloader) RetryRecoveryForDataset(ctx context.Context, dataset, id st
 		fresh = accepted
 		if fresh {
 			task.dataLock.Lock()
-			task.Recovery = &TaskRecoveryRef{Version: 2}
+			task.Recovery = &TaskRecoveryRef{Version: record.Version}
 			task.dataLock.Unlock()
 		}
 		task.dataLock.RLock()
@@ -450,7 +454,11 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		if generation == 0 {
 			generation = 1
 		}
-		record.Version = 2
+		// Explicit Retry preserves an already-enrolled coverage baseline.
+		// Ordinary v1 still advances only to the original Retry v2 schema.
+		if record.Version != 3 {
+			record.Version = 2
+		}
 		record.LastExplicitRetry = &recoveryExplicitRetry{Version: 1, ActionID: request.ActionID, FromEpisode: record.Episode, ToEpisode: episode, SourceRevision: record.SourceRevision}
 		record.Episode = episode
 		record.Generation = generation
@@ -458,7 +466,7 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		record.Actions = []recoveryAction{}
 		record.NextAction = 0
 		record.InitialAttempt = recoveryInitialAttempt{State: "issued", Generation: generation}
-		task.Recovery = &TaskRecoveryRef{Version: 2}
+		task.Recovery = &TaskRecoveryRef{Version: record.Version}
 		if !record.valid(task.ID) {
 			return transfer.ErrRecoveryHeld
 		}
@@ -468,7 +476,7 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		if err := tx.Put(bucketTaskRecovery, task.ID, &record); err != nil {
 			return err
 		}
-		if err := tx.Put(bucketRecoveryRequired, task.ID, &recoveryRequirement{2, recoveryCapability}); err != nil {
+		if err := tx.Put(bucketRecoveryRequired, task.ID, &recoveryRequirement{record.Version, recoveryCapability}); err != nil {
 			return err
 		}
 		result, fresh = record, true
