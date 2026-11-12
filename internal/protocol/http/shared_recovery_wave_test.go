@@ -297,3 +297,118 @@ func TestSharedRecoveryWaveRealHTTPBodyCancellationLeavesRunAlive(t *testing.T) 
 		t.Fatalf("next wave: body=%q hits=%d err=%v", body, hits.Load(), readErr)
 	}
 }
+
+func TestSharedRecoveryWaveDrainCancellationClosesWaiters(t *testing.T) {
+	parent, cancelParent, barrier := sharedWaveFixture(t)
+	work, err := barrier.enter(parent, "worker/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainCtx, cancelDrain := context.WithCancel(parent)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancelDrain(); cancelParent(); work.Leave(); wg.Wait() })
+	drainResult := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seal, err := barrier.drain(drainCtx, []string{"worker/0"})
+		if seal != nil {
+			drainResult <- errors.New("cancelled drain issued a seal")
+			return
+		}
+		drainResult <- err
+	}()
+	select {
+	case <-work.Context.Done(): // drain has closed the gate and cancelled IO
+	case <-parent.Done():
+		t.Fatal("drain did not close its wave")
+	}
+	waiter := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		other, err := barrier.enter(parent, "worker/1")
+		if other != nil {
+			other.Leave()
+		}
+		waiter <- err
+	}()
+	cancelDrain()
+	select {
+	case err := <-drainResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("drain cancellation: %v", err)
+		}
+	case <-parent.Done():
+		t.Fatal("cancelled drain did not return")
+	}
+	barrier.mu.Lock()
+	active, failed, sealed := len(barrier.active), barrier.failure, barrier.sealed
+	barrier.mu.Unlock()
+	if active != 1 || sealed {
+		t.Fatalf("cancellation forged quiescence: active=%d sealed=%v", active, sealed)
+	}
+	if !errors.Is(failed, context.Canceled) {
+		t.Errorf("cancelled drain left no terminal failure: %v", failed)
+	}
+	work.Leave()
+	select {
+	case err := <-waiter:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("parked work did not observe the original drain failure: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("parked worker remained blocked after drain cancellation and IO Leave")
+	}
+	if parent.Err() != nil {
+		t.Fatal("drain failure cancelled the parent run")
+	}
+	if seal, err := barrier.drain(parent, []string{"worker/1"}); seal != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("failed barrier allowed a new drain or lost its error: seal=%v err=%v", seal != nil, err)
+	}
+}
+
+func TestSharedRecoveryWaveCloseInterruptsDrain(t *testing.T) {
+	parent, cancel, barrier := sharedWaveFixture(t)
+	work, err := barrier.enter(parent, "worker/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); work.Leave(); wg.Wait() })
+	drainResult := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seal, err := barrier.drain(parent, []string{"worker/0"})
+		if seal != nil {
+			drainResult <- errors.New("closed drain issued a seal")
+			return
+		}
+		drainResult <- err
+	}()
+	select {
+	case <-work.Context.Done():
+	case <-parent.Done():
+		t.Fatal("drain did not cancel its IO")
+	}
+	barrier.close(transfer.ErrRecoveryUnavailable)
+	select {
+	case err := <-drainResult:
+		if !errors.Is(err, transfer.ErrRecoveryUnavailable) {
+			t.Fatalf("drain did not return the explicit close failure: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("close did not wake a drain waiting for a live IO scope")
+	}
+	barrier.mu.Lock()
+	active, sealed := len(barrier.active), barrier.sealed
+	barrier.mu.Unlock()
+	if active != 1 || sealed {
+		t.Fatalf("close forged quiescence: active=%d sealed=%v", active, sealed)
+	}
+	if parent.Err() != nil {
+		t.Fatal("wave close cancelled its parent")
+	}
+	work.Leave()
+}

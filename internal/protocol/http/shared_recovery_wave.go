@@ -171,7 +171,7 @@ func waveMembers(input []string) ([]string, error) {
 
 // drain closes admission and cancels only child IO. It waits without holding
 // any fetcher/connection/Task/owner/DB lock, and never waits for the whole run.
-func (barrier *recoveryWaveBarrier) drain(ctx context.Context, input []string) (*RecoveryWaveSeal, error) {
+func (barrier *recoveryWaveBarrier) drain(ctx context.Context, input []string) (_ *RecoveryWaveSeal, err error) {
 	if ctx == nil {
 		return nil, transfer.ErrRecoveryWork
 	}
@@ -180,13 +180,29 @@ func (barrier *recoveryWaveBarrier) drain(ctx context.Context, input []string) (
 		return nil, err
 	}
 	barrier.mu.Lock()
-	if barrier.failure != nil || barrier.blocked || ctx.Err() != nil || barrier.parent.Err() != nil {
+	if barrier.failure != nil {
+		failure := barrier.failure
+		barrier.mu.Unlock()
+		return nil, failure
+	}
+	if barrier.blocked || ctx.Err() != nil || barrier.parent.Err() != nil {
 		barrier.mu.Unlock()
 		return nil, transfer.ErrRecoveryStale
 	}
 	barrier.blocked = true
-	cancel, idle, epoch := barrier.cancel, barrier.idle, barrier.epoch
+	cancel, idle, epoch, changed := barrier.cancel, barrier.idle, barrier.epoch, barrier.changed
 	barrier.mu.Unlock()
+	// Once this call closes admission, every unsuccessful exit owns failure
+	// cleanup. Preserve the first close error and wake both enter and drain;
+	// never manufacture quiescence or leave an ownerless blocked gate.
+	defer func() {
+		if err != nil {
+			barrier.close(err)
+			barrier.mu.Lock()
+			err = barrier.failure
+			barrier.mu.Unlock()
+		}
+	}()
 	cancel()
 	select {
 	case <-ctx.Done():
@@ -194,10 +210,27 @@ func (barrier *recoveryWaveBarrier) drain(ctx context.Context, input []string) (
 	case <-barrier.parent.Done():
 		return nil, barrier.parent.Err()
 	case <-idle:
+	case <-changed:
+		barrier.mu.Lock()
+		failure := barrier.failure
+		barrier.mu.Unlock()
+		if failure == nil {
+			failure = transfer.ErrRecoveryStale
+		}
+		return nil, failure
 	}
 	barrier.mu.Lock()
 	defer barrier.mu.Unlock()
-	if barrier.failure != nil || ctx.Err() != nil || barrier.parent.Err() != nil || barrier.epoch != epoch || len(barrier.active) != 0 {
+	if barrier.failure != nil {
+		return nil, barrier.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := barrier.parent.Err(); err != nil {
+		return nil, err
+	}
+	if barrier.epoch != epoch || len(barrier.active) != 0 {
 		return nil, transfer.ErrRecoveryStale
 	}
 	barrier.sealed = true
