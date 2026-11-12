@@ -1564,9 +1564,8 @@ func (f *Fetcher) runConnection(conn *connection) {
 		if f.dropSteal(conn) {
 			f.diag.failure(err)
 			if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
-				wait, deferred, giveUp := f.rateLimit(re, 1)
-				if !giveUp {
-					if handled, e := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled && e != nil {
+				if handled, e := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, 1); handled {
+					if e != nil {
 						if conn.ctx.Err() == nil {
 							if _, deferred := transfer.AsDeferred(e); !deferred {
 								f.stopForCredentialFailure(conn, e)
@@ -1574,8 +1573,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 						}
 						return
 					}
-				}
-				if giveUp {
+				} else if _, _, giveUp := f.rateLimit(re, 1); giveUp {
 					// A wait too long to honour must end the task, as on any
 					// other stream, not leave it deferred for days.
 					f.connMu.Lock()
@@ -1613,18 +1611,12 @@ func (f *Fetcher) runConnection(conn *connection) {
 		// server-requested wait releases the task's running slot.
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
 			rateLimits++
-			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
-			f.connMu.Lock()
-			conn.State = connFailed
-			conn.failed = giveUp
-			f.connMu.Unlock()
-			if giveUp {
-				if f.slowStart != nil {
-					f.slowStart.onConnectFailed()
-				}
-				return
+			if f.sharedRun() != nil {
+				f.connMu.Lock()
+				conn.State = connFailed
+				f.connMu.Unlock()
 			}
-			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+			if handled, sharedErr := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, rateLimits); handled {
 				if sharedErr != nil {
 					if conn.ctx.Err() == nil {
 						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
@@ -1635,6 +1627,17 @@ func (f *Fetcher) runConnection(conn *connection) {
 				}
 				retries++
 				continue
+			}
+			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
+			f.connMu.Lock()
+			conn.State = connFailed
+			conn.failed = giveUp
+			f.connMu.Unlock()
+			if giveUp {
+				if f.slowStart != nil {
+					f.slowStart.onConnectFailed()
+				}
+				return
 			}
 			if deferred != nil {
 				f.deferRun(deferred)
@@ -2197,15 +2200,12 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
 			rateLimits++
-			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
-			f.connMu.Lock()
-			conn.State = connFailed
-			conn.failed = giveUp
-			f.connMu.Unlock()
-			if giveUp {
-				return
+			if f.sharedRun() != nil {
+				f.connMu.Lock()
+				conn.State = connFailed
+				f.connMu.Unlock()
 			}
-			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+			if handled, sharedErr := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, rateLimits); handled {
 				if sharedErr != nil {
 					if conn.ctx.Err() == nil {
 						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
@@ -2216,6 +2216,14 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				}
 				retries++
 				continue
+			}
+			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
+			f.connMu.Lock()
+			conn.State = connFailed
+			conn.failed = giveUp
+			f.connMu.Unlock()
+			if giveUp {
+				return
 			}
 			if deferred != nil {
 				f.deferRun(deferred)
