@@ -80,6 +80,10 @@ func (d *Downloader) browserPathHandoff(r BrowserHandoffRequest, live *Task) (Br
 	if r.DatasetID == "" {
 		return result, ErrHandoffInvalid
 	}
+	store, atomic := d.storage.(AtomicStorage)
+	if !atomic {
+		return result, ErrPathFreezeUnavailable
+	}
 	if r.Action == "prepare" {
 		request := r.PathCreate
 		if request == nil || request.OperationID != r.OperationID || request.Request == nil || mcpWriteHash(r.Req) != mcpWriteHash(request.Request.Req) || mcpWriteHash(r.Opts) != mcpWriteHash(request.Request.Opts) {
@@ -122,7 +126,7 @@ func (d *Downloader) browserPathHandoff(r BrowserHandoffRequest, live *Task) (Br
 		if err != nil {
 			return result, err
 		}
-		recordValue, freshR, err := reserveBrowserPathOperation(d.storage.(AtomicStorage), r.DatasetID, *request, snapshot, options[0], handoff)
+		recordValue, freshR, err := reserveBrowserPathOperation(store, r.DatasetID, *request, snapshot, options[0], handoff)
 		if err != nil {
 			return result, err
 		}
@@ -140,7 +144,7 @@ func (d *Downloader) browserPathHandoff(r BrowserHandoffRequest, live *Task) (Br
 			return result, err
 		}
 		initial := recoveryRecord{Version: 4, TaskID: candidate.ID, Episode: episode, SourceRevision: 1, SourceHash: source, ExecutionDefaultsHash: defaults, InitialAttempt: recoveryInitialAttempt{State: "ungranted"}, Actions: []recoveryAction{}}
-		owned, freshM, err := createPathOperationTask(d.storage.(AtomicStorage), r.DatasetID, recordValue, candidate, initial)
+		owned, freshM, err := createPathOperationTask(store, r.DatasetID, recordValue, candidate, initial)
 		if err != nil || !freshM {
 			return result, err
 		}
@@ -175,7 +179,7 @@ func (d *Downloader) browserPathHandoff(r BrowserHandoffRequest, live *Task) (Br
 	}
 	d.operationMu.Lock()
 	defer d.operationMu.Unlock()
-	owned, fresh, err := transitionBrowserPathHandoff(d.storage.(AtomicStorage), r.DatasetID, *stored.Handoff, phase, reason)
+	owned, fresh, err := transitionBrowserPathHandoff(store, r.DatasetID, *stored.Handoff, phase, reason)
 	if err != nil {
 		if live != nil {
 			live.initialHTTPExecution.Store(false)
