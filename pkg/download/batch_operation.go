@@ -122,7 +122,7 @@ func (d *Downloader) initOperationOptions(input *base.Options) (*base.Options, e
 
 // Caller owns the task's metadata lock when it may change concurrently.
 func (t *Task) cloneExecutionMeta() (*fetcher.FetcherMeta, error) {
-	if t.CreationOperation != nil {
+	if t.CreationOperation != nil || t.Recovery != nil {
 		return cloneOperationJSON(t.Meta)
 	}
 	return util.DeepClone(t.Meta), nil
@@ -689,17 +689,20 @@ func (d *Downloader) cancelBatchOperationInDataset(id, dataset string, requireIn
 	return d.QueryBatchOperation(id)
 }
 
-// UnmarshalJSON keeps arbitrary-precision Extra numbers for new operation tasks,
-// while preserving the legacy decoder behavior for tasks without the new link.
+// UnmarshalJSON preserves opaque Extra numbers when a durable operation or
+// recovery declaration requires exact owned snapshots. Undeclared legacy tasks
+// retain their original decoder behavior; precision never grants execution.
 func (t *Task) UnmarshalJSON(raw []byte) error {
 	type taskJSON Task
 	var marker struct {
 		CreationOperation json.RawMessage `json:"creationOperation"`
+		Recovery          json.RawMessage `json:"recovery"`
 	}
 	if err := json.Unmarshal(raw, &marker); err != nil {
 		return err
 	}
-	if len(marker.CreationOperation) > 0 && !bytes.Equal(marker.CreationOperation, []byte("null")) {
+	if (len(marker.CreationOperation) > 0 && !bytes.Equal(marker.CreationOperation, []byte("null"))) ||
+		(len(marker.Recovery) > 0 && !bytes.Equal(marker.Recovery, []byte("null"))) {
 		return decodeStoredJSON(raw, (*taskJSON)(t))
 	}
 	return json.Unmarshal(raw, (*taskJSON)(t))

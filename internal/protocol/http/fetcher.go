@@ -329,6 +329,7 @@ type Fetcher struct {
 	redirectDropBody     bool
 	redirectLock         sync.Mutex
 	readPublished        atomic.Pointer[PublishedReadStats]
+	coverage             atomic.Pointer[httpCoverageObserver]
 
 	// Lifecycle control
 	ctx    context.Context
@@ -641,6 +642,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	res.Files = append(res.Files, file)
 	f.meta.Res = res
 	f.rememberRepresentation(resp, res.Size)
+	f.rememberCoverageResolve(resp, res.Size)
 
 	// Save redirect URL for later connections
 	f.updateRedirectResponse(resp.Request)
@@ -842,7 +844,7 @@ func (f *Fetcher) stopPrefetchAndCopyData() (int64, error) {
 	if f.prefetchFile == nil || f.file == nil {
 		return 0, fmt.Errorf("prefetch copy requires source and target files")
 	}
-	return copyPrefetchData(f.file, f.prefetchFile, prefetched)
+	return copyPrefetchData(coverageWriterAt{f, f.file, f.resolveCoverageProof()}, f.prefetchFile, prefetched)
 }
 
 func copyPrefetchData(target io.WriterAt, source io.ReadSeeker, size int64) (int64, error) {
@@ -1126,6 +1128,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 				result = failure.err
 				f.deferred.Store(nil)
 			}
+			f.sealCoverageBeforeClose(false)
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1138,6 +1141,11 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 			default:
 			}
 		}
+
+		// Cancellation/error exits that leave the fd for Pause also seal here,
+		// on the protocol loop goroutine. Core's Pause handler holds task.lock;
+		// it must never become the caller performing coverage join/Sync.
+		f.sealCoverageBeforeClose(false)
 
 		// Update file last modified time before closing
 		if !f.verifiedOutputPolicy.Load() && f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
@@ -1320,6 +1328,7 @@ func (f *Fetcher) expandConnections() {
 			f.connMu.Unlock()
 
 			// Close the file before signaling completion
+			f.sealCoverageBeforeClose(true)
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1742,8 +1751,9 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		}
 	}
 
+	coverageProof := f.captureCoverageResponse(resp, f.meta.Res.Size)
 	if !f.usesRanges() {
-		if err := f.resetSingleStreamAttempt(conn); err != nil {
+		if err := f.resetSingleStreamAttempt(conn, coverageProof); err != nil {
 			return err
 		}
 	}
@@ -1806,7 +1816,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 			writeOffset = conn.Chunk.Begin + conn.Chunk.Downloaded
 			f.connMu.Unlock()
 
-			if err := f.writeDownloadAt(buf[:n], writeOffset); err != nil {
+			if err := f.writeDownloadAt(buf[:n], writeOffset, coverageProof); err != nil {
 				return err
 			}
 
@@ -1890,7 +1900,8 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 	}
 
 	defer resp.Body.Close()
-	if err := f.resetSingleStreamAttempt(conn); err != nil {
+	coverageProof := f.captureCoverageResponse(resp, f.meta.Res.Size)
+	if err := f.resetSingleStreamAttempt(conn, coverageProof); err != nil {
 		f.failSingleStream(conn, err)
 		return
 	}
@@ -1917,7 +1928,7 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 
 		n, err := reader.Read(buf)
 		if n > 0 {
-			if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded); err != nil {
+			if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded, coverageProof); err != nil {
 				f.failSingleStream(conn, err)
 				return
 			}
@@ -2009,7 +2020,8 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			if err := f.validateRepresentation(resp); err != nil {
 				return err
 			}
-			if err := f.resetSingleStreamAttempt(conn); err != nil {
+			coverageProof := f.captureCoverageResponse(resp, f.meta.Res.Size)
+			if err := f.resetSingleStreamAttempt(conn, coverageProof); err != nil {
 				return err
 			}
 
@@ -2033,7 +2045,7 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 				n, err := reader.Read(buf)
 				if n > 0 {
-					if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded); err != nil {
+					if err := f.writeDownloadAt(buf[:n], conn.Chunk.Downloaded, coverageProof); err != nil {
 						return err
 					}
 
@@ -2435,6 +2447,7 @@ func (f *Fetcher) onDownloadComplete() {
 
 	// Close the file before signaling completion
 	// This ensures the file handle is released before Wait() returns
+	f.sealCoverageBeforeClose(finalErr == nil)
 	f.fileMu.Lock()
 	if f.file != nil {
 		f.file.Close()

@@ -72,6 +72,11 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 			return err
 		}
 		if hash != record.SourceHash {
+			if record.Version == 3 && record.Coverage != nil {
+				record.Coverage.Status = "unprovable"
+			}
+			o.coverageInstallAuthorization.Store(nil)
+			o.coverageSettlementAuthorization.Store(nil)
 			record.SourceRevision++
 			record.SourceHash = hash
 			record.ExecutionDefaultsHash = digest
@@ -100,7 +105,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		return nil
 	})
 	if err != nil {
-		o.observeUnknownWrite()
+		o.observeUnknownWrite(err)
 		return recoveryStorageError(err)
 	}
 	if committed.SourceRevision != o.record.SourceRevision {
@@ -198,7 +203,7 @@ func (o *taskRecoveryOwner) markCleanPaused() error {
 		return nil
 	})
 	if err != nil {
-		o.observeUnknownWrite()
+		o.observeUnknownWrite(err)
 		return recoveryStorageError(err)
 	}
 	if committed.Version != 0 {
