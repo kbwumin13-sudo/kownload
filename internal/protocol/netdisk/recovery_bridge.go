@@ -133,9 +133,6 @@ func (f *Fetcher) SetParentRecoveryContext(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := lease.Check(); err != nil {
-		return err
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.running || f.resolving || f.closed {
