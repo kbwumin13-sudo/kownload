@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/controller"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
@@ -181,6 +182,10 @@ func invalidateInspection(req *base.Request, cfg model.Config) {
 		return
 	}
 	exactKey := inspectionKey(&requestCopy, extra, cfg)
+	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+		// A funded Task never joins another Task's background extraction.
+		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, ctl, cfg)
+	}
 	baseKey := baseInspectionKey(&requestCopy, extra, cfg)
 	inspections.Lock()
 	delete(inspections.items, exactKey)
@@ -437,7 +442,10 @@ func extractInfo(ctx context.Context, req *base.Request, extra *model.ReqExtra, 
 		return nil, nil, err
 	}
 	defer commandCleanup()
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	out, err := cmd.Output()
+	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil { return nil, nil, checkErr }
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
