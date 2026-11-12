@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
 )
@@ -72,7 +73,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 			return err
 		}
 		if hash != record.SourceHash {
-			if record.Version == 3 && record.Coverage != nil {
+			if record.Coverage != nil {
 				record.Coverage.Status = "unprovable"
 			}
 			o.coverageInstallAuthorization.Store(nil)
@@ -132,6 +133,12 @@ func (o *taskRecoveryOwner) currentLease(ctx context.Context) (*transfer.Recover
 		o.runContext = ctx
 	} else if o.runContext.Err() != nil {
 		return nil, transfer.ErrRecoveryStale
+	}
+	if o.record.Version == recoverySharedVersion && !o.verificationOnly {
+		if err := checkSharedRecoveryUntil(o.record, time.Now()); err != nil {
+			return nil, err
+		}
+		return o.sharedLeaseLocked(), nil
 	}
 	return &transfer.RecoveryLease{Token: o.token, Round: o.record.NextAction, Owner: o, SourceHash: o.record.SourceHash}, nil
 }

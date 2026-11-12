@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -103,10 +104,18 @@ func recoveryReceipt(state RecoveryTaskState, request RecoveryRetryRequest, outc
 
 func recoveryTaskState(task Task, record recoveryRecord) RecoveryTaskState {
 	allowed := task.Status == base.DownloadStatusError && !task.handoffHeld() && !task.creationHeld()
+	cooldown := record.Version == recoverySharedVersion && checkSharedRecoveryUntil(record, time.Now()) != nil
+	if cooldown {
+		allowed = false
+	}
 	reason := "not_error"
 	if allowed {
 		reason = "explicit_retry_available"
 	}
+	if cooldown {
+		reason = "cooldown"
+	}
+
 	return RecoveryTaskState{Version: 1, TaskID: task.ID, Status: task.Status, Management: "managed", RetryAllowed: allowed, Reason: reason, Episode: record.Episode, Generation: record.Generation, SourceRevision: record.SourceRevision, TotalUsed: record.TotalUsed, TransportUsed: record.TransportUsed, LastExplicitRetry: record.LastExplicitRetry}
 }
 
@@ -433,6 +442,11 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		if record.SourceRevision != request.ExpectedSourceRevision || (record.LastExplicitRetry != nil && record.LastExplicitRetry.ActionID == request.ActionID) {
 			return ErrRecoveryRetryConflict
 		}
+		if record.Version == recoverySharedVersion {
+			if err := checkSharedRecoveryUntil(record, time.Now()); err != nil {
+				return err
+			}
+		}
 		if task.Status != base.DownloadStatusError || task.handoffHeld() || task.creationHeld() {
 			return transfer.ErrRecoveryHeld
 		}
@@ -456,7 +470,7 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		}
 		// Explicit Retry preserves an already-enrolled coverage baseline.
 		// Ordinary v1 still advances only to the original Retry v2 schema.
-		if record.Version != 3 {
+		if record.Version != 3 && record.Version != recoverySharedVersion {
 			record.Version = 2
 		}
 		record.LastExplicitRetry = &recoveryExplicitRetry{Version: 1, ActionID: request.ActionID, FromEpisode: record.Episode, ToEpisode: episode, SourceRevision: record.SourceRevision}
@@ -476,7 +490,11 @@ func (o *taskRecoveryOwner) commitExplicitRetry(ctx context.Context, dataset str
 		if err := tx.Put(bucketTaskRecovery, task.ID, &record); err != nil {
 			return err
 		}
-		if err := tx.Put(bucketRecoveryRequired, task.ID, &recoveryRequirement{record.Version, recoveryCapability}); err != nil {
+		required, err := recoveryRequirementFor(record)
+		if err != nil {
+			return err
+		}
+		if err := tx.Put(bucketRecoveryRequired, task.ID, &required); err != nil {
 			return err
 		}
 		result, fresh = record, true

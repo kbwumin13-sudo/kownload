@@ -75,6 +75,25 @@ void main() {
       expect(r.generation, isNull);
     }
   });
+  test('cooldown wire is managed read-only and unknown reason stays rejected',
+      () {
+    final cooling = f.view()
+      ..['reason'] = 'cooldown'
+      ..['retryAllowed'] = false;
+    final r = HttpRecovery.parse(cooling, f.taskId);
+    expect(r.management, 'managed');
+    expect(r.retryAllowed, false);
+    expect(r.episode, 'ep-a');
+    for (final invalid in [
+      {...cooling, 'retryAllowed': true},
+      {...cooling, 'reason': 'future_cooldown'},
+      {...f.view(management: 'legacy'), 'reason': 'cooldown'},
+      {...f.view(management: 'held'), 'reason': 'cooldown'}
+    ]) {
+      expect(
+          () => HttpRecovery.parse(invalid, f.taskId), throwsFormatException);
+    }
+  });
   test('raw whitelist rejects bad method/path/body/query before any IO',
       () async {
     final root = '/api/v1/datasets/${f.dataset}/tasks/${f.taskId}/recovery/v1';

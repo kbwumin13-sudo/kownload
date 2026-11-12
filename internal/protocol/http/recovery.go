@@ -104,11 +104,16 @@ type httpRecoveryRun struct {
 	initialLimit  int
 	initialClaims map[int]bool
 	hadFailure    atomic.Bool
+	shared        *httpSharedRecovery
 }
 
 // Core calls this only after durable authorization and after the previous
 // pause joined. Join old cleanup before giving this run a new result channel.
 func (f *Fetcher) SetRecoveryLease(lease *transfer.RecoveryLease) {
+	copy := *lease
+	copy.InitialMembers = append([]string(nil), lease.InitialMembers...)
+	lease = &copy
+
 	if f.downloadLoopDone != nil {
 		<-f.downloadLoopDone
 	}
@@ -129,7 +134,17 @@ func (f *Fetcher) SetRecoveryLease(lease *transfer.RecoveryLease) {
 	clear(f.resolveConn)
 	f.connMu.Unlock()
 	f.doneCh = make(chan error, 1)
-	f.recovery.Store(&httpRecoveryRun{lease: lease, round: lease.Round, base: lease.Round})
+	next := &httpRecoveryRun{lease: lease, round: lease.Round, base: lease.Round}
+	if lease.ActionVersion == 4 {
+		next.shared = newHTTPSharedRecovery(f, next, lease)
+	}
+	old := f.recovery.Load()
+	if old != nil {
+		old.mu.Lock()
+		defer old.mu.Unlock()
+	}
+	f.deferred.Store(nil)
+	f.recovery.Store(next)
 }
 func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 	if f.downloadLoopDone != nil {
@@ -212,6 +227,21 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	defer run.mu.Unlock()
 	run.initialLimit = limit
 	run.initialClaims = make(map[int]bool)
+	if run.lease.ActionVersion == 4 && len(run.lease.InitialMembers) > 0 {
+		start := len(run.lease.InitialMembers) == 1 && run.lease.InitialMembers[0] == "start"
+		if !start {
+			for id := 0; id < limit; id++ {
+				run.initialClaims[id] = true
+			}
+			for _, work := range run.lease.InitialMembers {
+				for id := 0; id < limit; id++ {
+					if work == fmt.Sprintf("worker/%d", id) {
+						run.initialClaims[id] = false
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
@@ -227,6 +257,15 @@ func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
 		return transfer.ErrRecoveryStale
 	}
 	run.mu.Lock()
+	if run.shared != nil && conn.recoveryInitialized && conn.recoveryRound == run.round {
+		run.shared.mu.Lock()
+		admitted := run.shared.completed[f.recoveryWork(conn)]
+		run.shared.mu.Unlock()
+		if admitted {
+			run.mu.Unlock()
+			return lease.Check()
+		}
+	}
 	if conn.ID < 0 || conn.ID >= run.initialLimit {
 		run.mu.Unlock()
 		return transfer.ErrRecoveryWork
@@ -415,9 +454,29 @@ func (f *Fetcher) RecoveryCleanPause() bool {
 	return true
 }
 
-type recoveryGuardTransport struct{ transport http.RoundTripper }
+type recoveryGuardTransport struct {
+	transport http.RoundTripper
+	fetcher   *Fetcher
+}
 
 func (t *recoveryGuardTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var work *recoveryWaveWork
+	if t.fetcher != nil {
+		var err error
+		work, err = t.fetcher.enterSharedRequest(req.Context())
+		if err != nil {
+			return nil, err
+		}
+		if work != nil {
+			req = req.Clone(work.Context)
+		}
+	}
+	keep := false
+	defer func() {
+		if !keep && work != nil {
+			work.Leave()
+		}
+	}()
 	if err := recoveryContextError(req.Context()); err != nil {
 		return nil, err
 	}
@@ -427,6 +486,10 @@ func (t *recoveryGuardTransport) RoundTrip(req *http.Request) (*http.Response, e
 			response.Body.Close()
 			return nil, obsolete
 		}
+	}
+	if err == nil && work != nil {
+		response.Body = wrapSharedWaveBody(response.Body, work)
+		keep = true
 	}
 	return response, err
 }

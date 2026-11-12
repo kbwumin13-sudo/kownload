@@ -685,6 +685,16 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 // asyncPrefetch downloads data in background during resolve phase
 // This data can be reused when Start is called to save time
 func (f *Fetcher) asyncPrefetch() {
+	if f.sharedRun() != nil {
+		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "prefetch")
+		if err != nil {
+			f.prefetchErr = err
+			close(f.prefetchDoneCh)
+			return
+		}
+		defer scope.Leave()
+	}
+
 	defer func() {
 		close(f.prefetchDoneCh)
 	}()
@@ -832,6 +842,14 @@ func (f *Fetcher) stopPrefetch() {
 
 // stopPrefetchAndCopyData joins prefetch, then copies its bytes to the target.
 func (f *Fetcher) stopPrefetchAndCopyData() (int64, error) {
+	if f.sharedRun() != nil {
+		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "prefetch-copy")
+		if err != nil {
+			return 0, err
+		}
+		defer scope.Leave()
+	}
+
 	f.stopPrefetch()
 	defer f.cleanupPrefetchFile()
 
@@ -940,6 +958,14 @@ func (f *Fetcher) resetUnavailableResumeData() error {
 }
 
 func (f *Fetcher) doStart() error {
+	if f.sharedRun() != nil {
+		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "startup")
+		if err != nil {
+			return err
+		}
+		defer scope.Leave()
+	}
+
 	// Wait for resolve to complete
 	<-f.resolvedCh
 
@@ -1461,6 +1487,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 	conn.State = connConnecting
 	f.connMu.Unlock()
 
+	if err := f.waitSharedWorker(conn); err != nil {
+		f.stopForCredentialFailure(conn, err)
+		return
+	}
 	if err := f.authorizeInitialRecoveryWork(conn); err != nil {
 		f.stopForCredentialFailure(conn, err)
 		return
@@ -1500,6 +1530,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 			f.stopForCredentialFailure(conn, finishErr)
 			return
 		}
+		if errors.Is(err, errSharedWaveDraining) {
+			continue
+		}
 		if err == nil {
 			rateLimits = 0
 			f.connMu.Lock()
@@ -1531,7 +1564,18 @@ func (f *Fetcher) runConnection(conn *connection) {
 		if f.dropSteal(conn) {
 			f.diag.failure(err)
 			if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
-				if _, _, giveUp := f.rateLimit(re, 1); giveUp {
+				wait, deferred, giveUp := f.rateLimit(re, 1)
+				if !giveUp {
+					if handled, e := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled && e != nil {
+						if conn.ctx.Err() == nil {
+							if _, deferred := transfer.AsDeferred(e); !deferred {
+								f.stopForCredentialFailure(conn, e)
+							}
+						}
+						return
+					}
+				}
+				if giveUp {
 					// A wait too long to honour must end the task, as on any
 					// other stream, not leave it deferred for days.
 					f.connMu.Lock()
@@ -1579,6 +1623,18 @@ func (f *Fetcher) runConnection(conn *connection) {
 					f.slowStart.onConnectFailed()
 				}
 				return
+			}
+			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+				if sharedErr != nil {
+					if conn.ctx.Err() == nil {
+						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
+							f.stopForCredentialFailure(conn, sharedErr)
+						}
+					}
+					return
+				}
+				retries++
+				continue
 			}
 			if deferred != nil {
 				f.deferRun(deferred)
@@ -1654,9 +1710,18 @@ func (f *Fetcher) runConnection(conn *connection) {
 // downloadChunkOnce performs a single HTTP request for the current chunk without retrying.
 // If the redirect URL fails with an expiration-related error (401, 403, 410),
 // it will automatically retry with the original URL and update the redirect URL on success.
-func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf []byte) error {
-	if conn.ctx.Err() != nil {
-		return conn.ctx.Err()
+func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf []byte) (err error) {
+	scope, err := f.enterSharedIO(conn.ctx, f.recoveryWork(conn))
+	if err != nil {
+		return err
+	}
+	defer func() { err = sharedScopeResult(scope, conn.ctx, err); scope.Leave() }()
+	return f.downloadChunkAttempt(conn, client, buf, scope.Context)
+}
+
+func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, buf []byte, ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	// Read chunk boundaries under lock to get a consistent snapshot
@@ -1678,7 +1743,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 	}
 	f.connMu.Unlock()
 
-	httpReq, err := f.buildRequest(f.requestContext(conn.ctx), f.meta.Req)
+	httpReq, err := f.buildRequest(f.requestContext(ctx), f.meta.Req)
 	if err != nil {
 		return err
 	}
@@ -1694,7 +1759,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 
 	resp, err := doCredentialRequest(client, httpReq)
 	if err == nil {
-		resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
+		resp, err = f.refreshResponse(ctx, client, httpReq, resp)
 	}
 	if err != nil {
 		return err
@@ -1707,7 +1772,7 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 		// Check if this might be a redirect URL expiration error
 		// If so, try falling back to the original URL
 		if f.publicSourceSnapshot() == nil && f.hasRedirectURL() && isRedirectExpiredError(originalErr) {
-			fallbackResp, fallbackErr := f.tryFallbackToOriginalURL(conn.ctx, client, rangeStart, rangeEnd)
+			fallbackResp, fallbackErr := f.tryFallbackToOriginalURL(ctx, client, rangeStart, rangeEnd)
 			if fallbackErr == nil && fallbackResp != nil {
 				// Fallback succeeded, use this response instead
 				resp = fallbackResp
@@ -1788,8 +1853,8 @@ func (f *Fetcher) downloadChunkOnce(conn *connection, client *http.Client, buf [
 
 	reader := NewTimeoutReader(resp.Body, readTimeout)
 	for {
-		if conn.ctx.Err() != nil {
-			return conn.ctx.Err()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		n, err := reader.Read(buf)
@@ -1899,6 +1964,15 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 		return
 	}
 
+	scope, scopeErr := f.enterSharedIO(conn.ctx, f.recoveryWork(conn))
+	if scopeErr != nil {
+		resp.Body.Close()
+		if conn.ctx.Err() == nil {
+			f.failSingleStream(conn, scopeErr)
+		}
+		return
+	}
+	defer scope.Leave()
 	defer resp.Body.Close()
 	coverageProof := f.captureCoverageResponse(resp, f.meta.Res.Size)
 	if err := f.resetSingleStreamAttempt(conn, coverageProof); err != nil {
@@ -1942,6 +2016,12 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 			}
 			f.diag.data(time.Now())
 		}
+		if err != nil && errors.Is(sharedScopeResult(scope, conn.ctx, err), errSharedWaveDraining) {
+			scope.Leave()
+			resp.Body.Close()
+			f.runConnectionFallback(conn)
+			return
+		}
 		if err != nil {
 			if err == io.EOF {
 				f.connMu.Lock()
@@ -1959,6 +2039,10 @@ func (f *Fetcher) runConnectionWithResolveResp(conn *connection) {
 
 // runConnectionFallback is used when resolve response is not available
 func (f *Fetcher) runConnectionFallback(conn *connection) {
+	if err := f.waitSharedWorker(conn); err != nil {
+		f.stopForCredentialFailure(conn, err)
+		return
+	}
 	if err := f.authorizeInitialRecoveryWork(conn); err != nil {
 		f.stopForCredentialFailure(conn, err)
 		return
@@ -1987,8 +2071,15 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 		conn.State = connConnecting
 		f.connMu.Unlock()
 
+		scope, scopeErr := f.enterSharedIO(conn.ctx, f.recoveryWork(conn))
+		if scopeErr != nil {
+			if conn.ctx.Err() == nil {
+				f.stopForCredentialFailure(conn, scopeErr)
+			}
+			return
+		}
 		err := func() error {
-			httpReq, err := f.buildRequest(f.requestContext(conn.ctx), f.meta.Req)
+			httpReq, err := f.buildRequest(f.requestContext(scope.Context), f.meta.Req)
 			if err != nil {
 				return err
 			}
@@ -1998,7 +2089,7 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 			resp, err := doCredentialRequest(client, httpReq)
 			if err == nil {
-				resp, err = f.refreshResponse(conn.ctx, client, httpReq, resp)
+				resp, err = f.refreshResponse(scope.Context, client, httpReq, resp)
 			}
 			if err != nil {
 				return err
@@ -2039,8 +2130,8 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 			reader := NewTimeoutReader(resp.Body, readTimeout)
 			for {
-				if conn.ctx.Err() != nil {
-					return conn.ctx.Err()
+				if scope.Context.Err() != nil {
+					return scope.Context.Err()
 				}
 
 				n, err := reader.Read(buf)
@@ -2066,12 +2157,17 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				}
 			}
 		}()
+		err = sharedScopeResult(scope, conn.ctx, err)
+		scope.Leave()
 		f.observeManagedFailure(conn.ctx, err)
 		if finishErr := f.finishManagedConnection(conn); finishErr != nil {
 			f.stopForCredentialFailure(conn, finishErr)
 			return
 		}
 
+		if errors.Is(err, errSharedWaveDraining) {
+			continue
+		}
 		if err == nil {
 			f.connMu.Lock()
 			conn.Completed = true
@@ -2108,6 +2204,18 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			f.connMu.Unlock()
 			if giveUp {
 				return
+			}
+			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+				if sharedErr != nil {
+					if conn.ctx.Err() == nil {
+						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
+							f.stopForCredentialFailure(conn, sharedErr)
+						}
+					}
+					return
+				}
+				retries++
+				continue
 			}
 			if deferred != nil {
 				f.deferRun(deferred)

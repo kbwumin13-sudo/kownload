@@ -52,12 +52,12 @@ func (d *Downloader) observeTaskRecoveryCoverage(task *Task, lease *transfer.Rec
 	if err != nil {
 		return err
 	}
-	if record.Version != 3 && owner.coverageInstallAuthorization.Load() == nil {
+	if record.Coverage == nil && owner.coverageInstallAuthorization.Load() == nil {
 		return nil
 	}
 	if _, err = d.DatasetIdentity(); err != nil {
 		owner.coverageInstallAuthorization.Store(nil)
-		if record.Version == 3 {
+		if record.Coverage != nil {
 			return transfer.ErrRecoveryHeld
 		}
 		return nil
@@ -67,14 +67,14 @@ func (d *Downloader) observeTaskRecoveryCoverage(task *Task, lease *transfer.Rec
 	})
 	if !ok {
 		owner.coverageInstallAuthorization.Store(nil)
-		if record.Version == 3 {
+		if record.Coverage != nil {
 			return transfer.ErrRecoveryHeld
 		}
 		return nil
 	}
 	if err = observer.ObserveRecoveryCoverage(lease, record.Coverage, recoveryCoverageRangeLimit); err != nil {
 		owner.coverageInstallAuthorization.Store(nil)
-		if record.Version == 3 {
+		if record.Coverage != nil {
 			return transfer.ErrRecoveryHeld
 		}
 	}
@@ -209,7 +209,7 @@ func (d *Downloader) recordRunRecoveryCoverage(task *Task, f fetcher.Fetcher, le
 		return nil
 	}
 	owner.mu.Lock()
-	managed := owner.record.Version == 3
+	managed := owner.record.Coverage != nil
 	owner.mu.Unlock()
 	if !managed {
 		return nil
@@ -260,7 +260,7 @@ func (d *Downloader) storeRunRecoveryCoverage(ctx context.Context, task *Task, l
 		if err != nil {
 			return err
 		}
-		if expected.Record.Version != 3 || expected.Record.Coverage == nil || expected.Record.SourceHash != seal.SourceHash() || expected.Record.Coverage.IdentityHash != seal.IdentityHash() {
+		if expected.Record.Coverage == nil || expected.Record.SourceHash != seal.SourceHash() || expected.Record.Coverage.IdentityHash != seal.IdentityHash() {
 			return transfer.ErrRecoveryHeld
 		}
 		checkpoint, err := seal.Checkpoint()
@@ -323,7 +323,7 @@ func (d *Downloader) markCoverageUnprovable(ctx context.Context, task *Task, tok
 		if err != nil {
 			return err
 		}
-		if expected.Record.Version != 3 || expected.Record.Coverage == nil {
+		if expected.Record.Coverage == nil {
 			return transfer.ErrRecoveryHeld
 		}
 		var committed recoveryRecord
@@ -405,9 +405,9 @@ func (d *Downloader) reconcileCoverageUnknown(dataset string, task *Task, owner 
 	owner.coverageInstallAuthorization.Store(nil)
 	owner.coverageSettlementAuthorization.Store(nil)
 	owner.mu.Unlock()
-	if version == 3 {
+	if version == 3 || version == recoverySharedVersion {
 		task.dataLock.Lock()
-		task.Recovery = &TaskRecoveryRef{Version: 3}
+		task.Recovery = &TaskRecoveryRef{Version: version}
 		task.dataLock.Unlock()
 	}
 }

@@ -237,6 +237,14 @@ func (d *Downloader) Setup() error {
 			if task.getStatus() != base.DownloadStatusDone && task.getStatus() != base.DownloadStatusError {
 				task.updateStatus(base.DownloadStatusPause)
 			}
+			if !task.recoveryBlocked {
+				if until, e := d.taskSharedUntil(task); e == nil {
+					task.dataLock.Lock()
+					task.notBefore = until
+					task.dataLock.Unlock()
+				}
+			}
+
 		}
 	}
 	// Sort before publishing the task list to background readers.
@@ -746,7 +754,14 @@ func (d *Downloader) notifyRunning() {
 			d.dequeueLocked(i)
 			// A selective pause can leave stale entries in this queue. Recheck
 			// under the status lock so scheduling never resumes a paused task.
-			d.startTask(wt, true)
+			if err := d.startTask(wt, true); err != nil {
+				if deferred, ok := transfer.AsDeferred(err); ok {
+					wt.dataLock.Lock()
+					wt.notBefore = deferred.Until
+					wt.dataLock.Unlock()
+					d.enqueueLocked(wt)
+				}
+			}
 			break
 		}
 	}()
@@ -1006,6 +1021,11 @@ func (d *Downloader) Continue(filter *TaskFilter) (err error) {
 
 	for _, task := range realContinueTasks {
 		if err = d.doStart(task); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				d.queueSharedUntil(task, deferred.Until)
+				err = nil
+				continue
+			}
 			return
 		}
 	}
@@ -2066,6 +2086,11 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		if err := d.checkTaskRecovery(task); err != nil {
 			return true, err
 		}
+		if until, e := d.taskSharedUntil(task); e != nil {
+			return true, e
+		} else if until.After(time.Now()) {
+			return true, &transfer.DeferredError{Until: until}
+		}
 		if task.creationHeld() {
 			return true, ErrOperationConflict
 		}
@@ -2207,6 +2232,9 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		}
 
 		var recovery *taskRecoveryOwner
+		task.dataLock.RLock()
+		sharedEligible := task.Recovery != nil || task.recoveryInitialEligible.Load()
+		task.dataLock.RUnlock()
 		capture, canCapture := task.fetcher.(interface {
 			CaptureRecoveryContext(*base.Request) (*transfer.HTTPExecutionContext, bool, error)
 			SetRecoveryContext(*transfer.HTTPExecutionContext)
@@ -2265,7 +2293,15 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			if err := recovery.persistSnapshot(task.clone(), nil, false, snapshot.DefaultsHash()); err != nil {
 				return err
 			}
-			if _, err := recovery.begin(generation, ""); err != nil {
+			if sharedEligible {
+				task.lock.Unlock()
+				sharedErr := d.prepareSharedRecovery(runCtx, task, recovery, generation)
+				task.lock.Lock()
+				if sharedErr != nil {
+					return sharedErr
+				}
+			}
+			if _, err := recovery.begin(generation, "", runCtx); err != nil {
 				return err
 			}
 			lease, err := recovery.currentLease(runCtx)
@@ -2459,6 +2495,24 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}
 		f := task.fetcher
+		if lease := transfer.RecoveryLeaseFromContext(runCtx); lease != nil && lease.ActionVersion == 4 && boundWait != nil {
+			if source, ok := f.(interface {
+				CaptureRunQuiescence() func(context.Context) error
+			}); ok {
+				join := source.CaptureRunQuiescence()
+				wait := boundWait
+				ctx := runCtx
+				boundWait = func() error {
+					err := wait()
+					if joined := join(ctx); joined != nil {
+						return joined
+					}
+					return err
+				}
+			} else {
+				return transfer.ErrRecoveryHeld
+			}
+		}
 		startWatch = func() {
 			go func() {
 				defer runCancel()
@@ -2469,6 +2523,22 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 	}
 	go func() {
 		if err := handler(); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				if owner := task.recoveryOwner.Load(); owner != nil {
+					owner.mu.Lock()
+					shared := owner.record.Version == recoverySharedVersion
+					owner.mu.Unlock()
+					if shared {
+						if e := d.deferSharedPreparation(task, generation, runCtx, deferred); e == nil {
+							runCancel()
+							owner.invalidateToken(ownerTokenForRun(owner, generation))
+							return
+						} else {
+							err = e
+						}
+					}
+				}
+			}
 			d.failTaskPreparation(task, generation, runCancel, err)
 			return
 		}
