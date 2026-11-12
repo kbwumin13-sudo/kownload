@@ -30,6 +30,7 @@ type recoveryWaveBarrier struct {
 
 type recoveryWaveWork struct {
 	Context context.Context
+	wave    context.Context
 	barrier *recoveryWaveBarrier
 	epoch   uint64
 	leave   func()
@@ -138,7 +139,7 @@ func (barrier *recoveryWaveBarrier) enter(ctx context.Context, workID string) (*
 		ioContext, cancel := context.WithCancel(ctx)
 		ioContext = context.WithValue(ioContext,sharedIOContextKey{},true)
 		stop := context.AfterFunc(wave, cancel)
-		work := &recoveryWaveWork{Context: ioContext, barrier: barrier, epoch: epoch}
+		work := &recoveryWaveWork{Context: ioContext, wave: wave, barrier: barrier, epoch: epoch}
 		work.leave = func() {
 			stop()
 			cancel()

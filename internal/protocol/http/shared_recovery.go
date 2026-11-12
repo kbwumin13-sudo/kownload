@@ -109,7 +109,11 @@ func (f *Fetcher) enterSharedIO(ctx context.Context, work string) (*recoveryWave
 }
 
 func sharedScopeResult(scope *recoveryWaveWork, parent context.Context, err error) error {
-	if scope != nil && scope.Context.Err() != nil && parent.Err() == nil {
+	// Worker and request cancellation callbacks run independently. The request
+	// may return Canceled before the worker's callback runs; check the wave
+	// captured on admission, which is cancelled synchronously by drain. A
+	// scope's own Leave must not be mistaken for cancellation of that wave.
+	if scope != nil && scope.wave != nil && scope.wave.Err() != nil && parent.Err() == nil {
 		return errSharedWaveDraining
 	}
 	if err != nil && scope != nil && scope.barrier != nil {

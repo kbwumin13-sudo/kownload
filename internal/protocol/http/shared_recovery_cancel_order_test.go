@@ -72,4 +72,23 @@ func TestSharedRecoveryWaveRequestCancelBeforeWorkerCallback(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("draining a wave cancelled the parent run")
 	}
+
+	parent, cancelParent, liveBarrier := sharedWaveFixture(t)
+	left, err := liveBarrier.enter(parent, "worker/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.Leave()
+	if errors.Is(sharedScopeResult(left, parent, context.Canceled), errSharedWaveDraining) {
+		t.Fatal("a scope's own Leave was classified as a wave drain")
+	}
+	cancelled, err := liveBarrier.enter(parent, "worker/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelled.Leave()
+	cancelParent()
+	if errors.Is(sharedScopeResult(cancelled, parent, context.Canceled), errSharedWaveDraining) {
+		t.Fatal("parent cancellation was classified as a recoverable wave drain")
+	}
 }
