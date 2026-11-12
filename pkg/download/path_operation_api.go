@@ -205,6 +205,9 @@ func (d *Downloader) PreviewPathForDataset(ctx context.Context, dataset, kind st
 	if len(opts) != 1 {
 		return pathpolicy.Preparation{}, ErrPathFreezeHeld
 	}
+	if v.Native {
+		return d.previewNativePath(ctx, request, snapshot, opts[0])
+	}
 	name := opts[0].Name
 	u, err := url.Parse(pathItems(request)[0].Req.URL)
 	if err != nil {
