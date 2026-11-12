@@ -295,6 +295,13 @@ func (f *Fetcher) retryManagedConnection(conn *connection, cause error) bool {
 		f.stopForCredentialFailure(conn, transfer.ErrRecoveryStale)
 		return true
 	}
+	// The parent provider owns signed-link refresh. Preserve only this typed
+	// expiry cause when returning its child result; HTTP still performs no
+	// authentication replay and direct HTTP retains its original classifier.
+	if lease.ParentContext != nil && lease.ParentContext.Protocol() == "netdisk" && IsExpiredLinkError(cause) {
+		f.stopForCredentialFailure(conn, cause)
+		return true
+	}
 	classification := ClassifyRecoveryError(cause)
 	if !classification.Retryable {
 		f.stopForCredentialFailure(conn, classification)
