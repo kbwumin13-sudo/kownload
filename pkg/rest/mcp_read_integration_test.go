@@ -5,6 +5,7 @@ package rest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -228,9 +229,95 @@ func TestMCPReadBuildServerS2RoutesCoexist(t *testing.T) {
 	}
 }
 
+// A successful fixture baseline can encounter the production nonblocking read
+// contract while the Core is sampling. Retry only typed Busy, for at most one
+// second (or the caller's earlier deadline); other failures remain failures.
+func readMCPFixtureTask(ctx context.Context, read func(context.Context, string) (download.MCPReadTask, error), id string) (download.MCPReadTask, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return download.MCPReadTask{}, err
+		}
+		value, err := read(ctx, id)
+		if !errors.Is(err, download.ErrMCPReadBusy) {
+			return value, err
+		}
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return download.MCPReadTask{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func TestMCPReadFixtureTaskBusyContract(t *testing.T) {
+	want := download.MCPReadTask{ID: "task_1", Status: "pause"}
+	for _, sample := range []struct {
+		name  string
+		first error
+		retry bool
+	}{
+		{"busy", download.ErrMCPReadBusy, true},
+		{"wrapped_busy", fmt.Errorf("snapshot: %w", download.ErrMCPReadBusy), true},
+		{"unavailable", download.ErrMCPReadUnavailable, false},
+		{"invalid", download.ErrMCPReadInvalid, false},
+		{"missing", download.ErrTaskNotFound, false},
+		{"cancelled", context.Canceled, false},
+		{"deadline", context.DeadlineExceeded, false},
+		{"same_text_not_typed", errors.New(download.ErrMCPReadBusy.Error()), false},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			calls := 0
+			got, err := readMCPFixtureTask(context.Background(), func(ctx context.Context, id string) (download.MCPReadTask, error) {
+				calls++
+				if id != want.ID || ctx.Err() != nil {
+					t.Fatal("read identity or context changed")
+				}
+				if calls == 1 {
+					return download.MCPReadTask{}, sample.first
+				}
+				return want, nil
+			}, want.ID)
+			if sample.retry {
+				if err != nil || calls != 2 || !reflect.DeepEqual(got, want) {
+					t.Fatalf("transient typed Busy did not reach the unchanged snapshot: calls=%d err=%v", calls, err)
+				}
+			} else if err != sample.first || calls != 1 {
+				t.Fatalf("non-Busy error was retried or replaced: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+	t.Run("persistent_busy", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		calls := 0
+		got, err := readMCPFixtureTask(ctx, func(context.Context, string) (download.MCPReadTask, error) {
+			calls++
+			return download.MCPReadTask{}, download.ErrMCPReadBusy
+		}, want.ID)
+		if !errors.Is(err, context.DeadlineExceeded) || calls == 0 || !reflect.DeepEqual(got, download.MCPReadTask{}) {
+			t.Fatalf("persistent Busy did not fail at the deadline: calls=%d err=%v", calls, err)
+		}
+	})
+	t.Run("already_cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := readMCPFixtureTask(ctx, func(context.Context, string) (download.MCPReadTask, error) {
+			t.Fatal("cancelled baseline called the getter")
+			return want, nil
+		}, want.ID)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("lost cancellation: %v", err)
+		}
+	})
+}
+
 func TestMCPReadBuildServerFiveReadsAndRecovery(t *testing.T) {
 	f := newMCPBuiltFixture(t, "unix", "SYNTHETIC_API_SECRET", true, false)
-	before, err := f.downloader.MCPReadGetTask(context.Background(), "task_1")
+	before, err := readMCPFixtureTask(context.Background(), f.downloader.MCPReadGetTask, "task_1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +353,7 @@ func TestMCPReadBuildServerFiveReadsAndRecovery(t *testing.T) {
 			}
 		}
 	}
-	after, err := f.downloader.MCPReadGetTask(context.Background(), "task_1")
+	after, err := readMCPFixtureTask(context.Background(), f.downloader.MCPReadGetTask, "task_1")
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal("reads/rebind changed task")
 	}
