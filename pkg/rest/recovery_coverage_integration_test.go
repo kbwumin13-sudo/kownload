@@ -188,7 +188,7 @@ func TestRecoveryCoverageBuildServerUDSPrefixReplayAndCompletion(t *testing.T) {
 				return task, state
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("%s not reached: Task %s recovery %+v hits %d/%d/%d", label, task.Status, state, hits[0].Load(), hits[1].Load(), hits[2].Load())
+				t.Fatalf("%s not reached: Task %s ref %+v recovery %+v hits %d/%d/%d", label, task.Status, task.Recovery, state, hits[0].Load(), hits[1].Load(), hits[2].Load())
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -198,10 +198,18 @@ func TestRecoveryCoverageBuildServerUDSPrefixReplayAndCompletion(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("actual initial response did not reach the body gate")
 	}
-	initialTask, initial := wait("v3 before the first target byte", func(task *download.Task, state download.RecoveryTaskState) bool {
-		return task.Recovery != nil && task.Recovery.Version == 3 && task.Progress != nil && state.Episode != "" && state.Generation > 0
-	})
 	output := filepath.Join(directory, "one.bin")
+	// The concrete Bolt runner upgrades the strong-identity coverage triplet to
+	// strict v4 before Start; the public recovery projection remains wire v1.
+	// Ref/progress can precede the asynchronous Touch. Wait for the actual target
+	// before reading it while the source still holds every payload byte.
+	initialTask, initial := wait("v4 coverage and target before the first body byte", func(task *download.Task, state download.RecoveryTaskState) bool {
+		info, err := os.Stat(output)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("initial target metadata could not be read", err)
+		}
+		return task.Recovery != nil && task.Recovery.Version == 4 && task.Progress != nil && state.Episode != "" && state.Generation > 0 && err == nil && info.Mode().IsRegular()
+	})
 	// Touch can preallocate the full length before the asynchronous non-Range
 	// worker truncates it. Length is not evidence of downloaded body bytes.
 	select {
@@ -211,9 +219,9 @@ func TestRecoveryCoverageBuildServerUDSPrefixReplayAndCompletion(t *testing.T) {
 	}
 	initialBytes, err := os.ReadFile(output)
 	if err != nil || (len(initialBytes) != 0 && len(initialBytes) != len(payload)) || len(bytes.Trim(initialBytes, "\x00")) != 0 || bodyWrites.Load() != 0 || initialTask.Progress.Downloaded != 0 {
-		t.Fatalf("body preceded confirmed v3: allocated=%d sourceBodyWrites=%d downloaded=%d err=%v", len(initialBytes), bodyWrites.Load(), initialTask.Progress.Downloaded, err)
+		t.Fatalf("body preceded confirmed v4 coverage: allocated=%d sourceBodyWrites=%d downloaded=%d err=%v", len(initialBytes), bodyWrites.Load(), initialTask.Progress.Downloaded, err)
 	}
-	t.Logf("confirmed v3 before body: allocated=%d zeroFilled=true sha256=%x sourceBodyWrites=0 downloaded=0", len(initialBytes), sha256.Sum256(initialBytes))
+	t.Logf("confirmed v4 coverage before body: allocated=%d zeroFilled=true sha256=%x sourceBodyWrites=0 downloaded=0", len(initialBytes), sha256.Sum256(initialBytes))
 	rawReq, err := json.Marshal(initialTask.Meta.Req)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +276,7 @@ func TestRecoveryCoverageBuildServerUDSPrefixReplayAndCompletion(t *testing.T) {
 	}
 	finalReq, _ := json.Marshal(finalTask.Meta.Req)
 	finalCreation, _ := json.Marshal(finalTask.CreationOperation)
-	if !bytes.Equal(rawReq, finalReq) || !bytes.Equal(creation, finalCreation) || finalTask.Meta.Opts.Path != directory || finalTask.Meta.Opts.Name != "one.bin" || finalTask.Meta.SingleFilepath() != output || final.Episode != first.Episode || final.TotalUsed < second.TotalUsed || finalTask.Recovery == nil || finalTask.Recovery.Version != 3 || final.LastExplicitRetry != nil {
+	if !bytes.Equal(rawReq, finalReq) || !bytes.Equal(creation, finalCreation) || finalTask.Meta.Opts.Path != directory || finalTask.Meta.Opts.Name != "one.bin" || finalTask.Meta.SingleFilepath() != output || final.Episode != first.Episode || final.TotalUsed < second.TotalUsed || finalTask.Recovery == nil || finalTask.Recovery.Version != 4 || final.LastExplicitRetry != nil {
 		t.Fatal("Continue changed intent/path/creation identity or reset the episode")
 	}
 	var tasks []*download.Task
@@ -315,15 +323,15 @@ func TestRecoveryCoverageBuildServerUDSPrefixReplayAndCompletion(t *testing.T) {
 		if err := json.Unmarshal(tx.Bucket([]byte("task_recovery_required_v1")).Get([]byte(id)), &required); err != nil {
 			return err
 		}
-		if task.ID != id || task.Status != base.DownloadStatusDone || task.Recovery == nil || task.Recovery.Version != 3 || required.Version != 3 || required.Capability != "http-transport-recovery/v1" {
-			return errors.New("persisted Task/ref/required did not preserve v3 and done")
+		if task.ID != id || task.Status != base.DownloadStatusDone || task.Recovery == nil || task.Recovery.Version != 4 || required.Version != 4 || required.Capability != "http-shared-coverage-recovery/v1" {
+			return errors.New("persisted Task/ref/required did not preserve strict v4 coverage and done")
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	coverage := stored.Coverage
-	if stored.Version != 3 || stored.Episode != final.Episode || stored.Generation != final.Generation || stored.TotalUsed != final.TotalUsed || stored.TransportUsed != final.TransportUsed || coverage == nil || coverage.SettlementSequence != 1 || len(coverage.SettledRanges) != 1 || coverage.SettledRanges[0] != (transfer.HTTPCoverageRange{Begin: 0, End: int64(len(prefix))}) || len(coverage.DurableRanges) != 1 || coverage.DurableRanges[0] != (transfer.HTTPCoverageRange{Begin: 0, End: int64(len(payload))}) {
+	if stored.Version != 4 || stored.Episode != final.Episode || stored.Generation != final.Generation || stored.TotalUsed != final.TotalUsed || stored.TransportUsed != final.TransportUsed || coverage == nil || coverage.SettlementSequence != 1 || len(coverage.SettledRanges) != 1 || coverage.SettledRanges[0] != (transfer.HTTPCoverageRange{Begin: 0, End: int64(len(prefix))}) || len(coverage.DurableRanges) != 1 || coverage.DurableRanges[0] != (transfer.HTTPCoverageRange{Begin: 0, End: int64(len(payload))}) {
 		t.Fatalf("closed Bolt lost the one earned baseline/full durable output: %+v", stored)
 	}
 	t.Logf("real Bolt/UDS single M, client ACK discarded once; same Task %s; prefix=%d total=%d sha256=%x; episodes %s -> %s -> %s -> %s; used %d/%d/%d; source phase hits %d/%d/%d; final seq=%d", id, len(prefix), len(payload), expectedSHA, initial.Episode, first.Episode, second.Episode, final.Episode, first.TotalUsed, second.TotalUsed, final.TotalUsed, hits[0].Load(), hits[1].Load(), hits[2].Load(), coverage.SettlementSequence)
