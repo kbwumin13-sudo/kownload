@@ -164,7 +164,39 @@ def seal_candidate(app, entitlements, manifest, mcp_sdk=None):
     verify_packaged_mcp(app, manifest, execute_version=True)
 
 
-def add_module_sources(bundle, modules, go, source, mcp_index=None):
+def verify_repository_archive(bundle, archive, source, commit):
+    if archive is None:
+        raise RuntimeError('Repository dependency requires the original Git archive')
+    required = {'go.mod', 'go.sum', 'cmd/kownload-mcp/go.mod',
+                'cmd/kownload-mcp/go.sum', 'LICENSE', 'THIRD_PARTY_NOTICES.md'}
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+        if tree.pax_headers.get('comment') != commit:
+            raise RuntimeError('Repository source archive commit differs')
+        members = {m.name: m for m in tree.getmembers()}
+        if not required <= members.keys():
+            raise RuntimeError('Repository source archive is incomplete')
+        for name, member in members.items():
+            if name not in required and not name.endswith('.go'):
+                continue
+            relative = pathlib.PurePosixPath(name)
+            if relative.is_absolute() or '..' in relative.parts or not member.isfile():
+                raise RuntimeError('Repository source archive entry is not a regular file')
+            file = source / name
+            if file.is_symlink() or not file.is_file():
+                raise RuntimeError('Repository source file is missing')
+            raw = tree.extractfile(member).read()
+            if file.read_bytes() != raw:
+                raise RuntimeError('Repository source differs from the original Git archive')
+            try:
+                included = bundle.getmember(name)
+            except KeyError as error:
+                raise RuntimeError('Repository source is absent from the source bundle') from error
+            if not included.isfile() or included.size != len(raw):
+                raise RuntimeError('Repository source is absent from the source bundle')
+
+
+def add_module_sources(bundle, modules, go, source, mcp_index=None,
+                       source_commit=None, original_archive=None):
     for name, value in [('go-modules.json', modules), ('mcp-go-modules.json', mcp_index)]:
         if value is None:
             continue
@@ -176,7 +208,15 @@ def add_module_sources(bundle, modules, go, source, mcp_index=None):
     # and nested MCP module. Exact module ZIPs are shared, not omitted/doubled.
     notices = load('kownload_source_notices', source / 'scripts/collect-macos-notices.py')
     for module in modules:
-        meta = notices.module_source(go, source, module)
+        meta = notices.module_source(go, source, module, source_commit)
+        if meta.get('SourceKind') == 'repository':
+            if (module.get('sourceKind') != 'repository' or
+                    module.get('sourceCommit') != source_commit or
+                    module.get('sourcePath') != '.' or
+                    meta['SourceCommit'] != source_commit):
+                raise RuntimeError('Repository dependency source context differs')
+            verify_repository_archive(bundle, original_archive, source, source_commit)
+            continue
         bundle.add(meta['Zip'], arcname='dependency-sources/go/' + pathlib.Path(meta['Zip']).name.replace('.zip', '') + '-' + hashlib.sha256(module['module'].encode()).hexdigest()[:12] + '.zip')
 
 
@@ -318,7 +358,7 @@ def main():
     resources = app / 'Contents/Resources'
     legal = resources / 'legal'
     notices = load('kownload_notices', source / 'scripts/collect-macos-notices.py')
-    modules = notices.collect(source, legal, [core, host, migration] + ([mcp] if mcp is not None else []), go, flutter)
+    modules = notices.collect(source, legal, [core, host, migration] + ([mcp] if mcp is not None else []), go, flutter, commit)
     mcp_index = None
     if mcp is not None:
         used = {(m['module'], m['version']) for m in notices.binary_modules(go, mcp)}
@@ -405,7 +445,7 @@ def main():
         with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
             for member in tree.getmembers():
                 bundle.addfile(member, tree.extractfile(member) if member.isfile() else None)
-        add_module_sources(bundle, modules, go, source, mcp_index)
+        add_module_sources(bundle, modules, go, source, mcp_index, commit, archive)
     (destination / 'go-modules.json').write_text(json.dumps(modules, indent=2) + '\n')
     (destination / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     assets = [dmg, helper_zip, destination / source_name]

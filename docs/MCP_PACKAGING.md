@@ -42,6 +42,18 @@ App 签名不使用递归 `--deep --force`；签完严格验证 App，重新核 
 并与实际二进制中的版本和 checksum 对照；不向根锁文件补写 nested 依赖或跳过校验。
 完整来源与许可判断仍须 S8 分发审查。
 
+唯一的仓库内依赖例外是 nested 桥的
+`github.com/GopeedLab/gopeed v0.0.0 => ../.. (devel)`：
+collector 保留实际 BuildInfo replacement，核根/nested go.mod 的 module 身份，
+并以只读 go list 核 Replace.Dir、Dir 和 GoMod 都指向本次 archive 根。
+只对该精确 self case，索引写 sourceKind=repository、sourceCommit=本次锁定40位SHA、
+sourcePath=.，保留空 module sum，不伪造上游版本/sum/ZIP。源码包根即其对应源码，
+保留原仓库源码及 LICENSE/THIRD_PARTY_NOTICES 原字节；builder 核原 Git tar 的 commit
+及其 Go 源码、mod/sum、许可与当前构建树一致，且原成员已收入最终源码包，才豁免该项 ZIP。
+未知、外来、sibling/outside 或不匹配的 replacement 拒绝；其他实际外部模块仍逐项核原
+sum、go.mod sum、下载源版本及原 ZIP，未共享的旧桥按原流程打包。此例外不启用写工具、
+不改变授权/执行能力，也不构成发布者认证或法律兼容性结论。
+
 隔离联调默认仍编译 `work/preview-data`。需要验证部署 CLI 的标准受管根时，
 构建可显式传 `--preview --preview-home <已存在的短 /private/tmp 私有HOME>`，
 数据根编译为该 HOME 下的 `Library/Application Support/io.github.kbwumin13-sudo.kownload`。

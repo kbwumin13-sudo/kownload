@@ -338,5 +338,175 @@ class PackageTests(unittest.TestCase):
                     notices.module_source('go', self.root, dep)
 
 
+class RepositorySourceTests(unittest.TestCase):
+    commit = 'a' * 40
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='k14-self-source-')
+        self.addCleanup(self.temp.cleanup)
+        self.repo = pathlib.Path(self.temp.name)
+        self.nested = self.repo / 'cmd/kownload-mcp'
+        self.nested.mkdir(parents=True)
+        files = {'go.mod': 'module ' + notices.SELF_MODULE + '\n',
+                 'go.sum': '# root lock\n',
+                 'cmd/kownload-mcp/go.mod': 'module ' + notices.MCP_MODULE + '\n',
+                 'cmd/kownload-mcp/go.sum': '# nested lock\n',
+                 'LICENSE': 'original root license\n',
+                 'THIRD_PARTY_NOTICES.md': 'original notices\n',
+                 'pkg/mcpwritepolicy/policy.go': 'package mcpwritepolicy\n'}
+        for name, value in files.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value)
+        self.files = list(files)
+        self.dep = {'module': notices.SELF_MODULE, 'version': 'v0.0.0', 'sum': '',
+                    'replace': {'path': '../..', 'version': '(devel)', 'sum': ''}}
+        self.metadata = {'Path': notices.SELF_MODULE, 'Version': 'v0.0.0',
+                         'Dir': str(self.repo), 'GoMod': str(self.repo / 'go.mod'),
+                         'Replace': {'Path': '../..', 'Dir': str(self.repo),
+                                     'GoMod': str(self.repo / 'go.mod')}}
+        self.index = {**self.dep, 'sourceKind': 'repository', 'sourceCommit': self.commit,
+                      'sourcePath': '.', 'source': '.',
+                      'notices': ['LICENSE', 'THIRD_PARTY_NOTICES.md']}
+
+    def query(self, *args, **kwargs):
+        self.assertEqual(args, ('go', 'list', '-m', '-mod=readonly', '-json',
+                                notices.SELF_MODULE))
+        self.assertEqual(kwargs['cwd'], self.nested)
+        return json.dumps(self.metadata)
+
+    def archive(self, commit=None):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w', format=tarfile.PAX_FORMAT,
+                          pax_headers={'comment': commit or self.commit}) as bundle:
+            for name in self.files:
+                raw = (self.repo / name).read_bytes()
+                member = tarfile.TarInfo(name)
+                member.size = len(raw)
+                bundle.addfile(member, io.BytesIO(raw))
+        return stream.getvalue()
+
+    def package_source(self, archive, *, original=None, omit=()):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w') as bundle:
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
+                for member in tree:
+                    if member.name not in omit:
+                        bundle.addfile(member, tree.extractfile(member))
+            with mock.patch.object(build, 'load', return_value=notices), \
+                    mock.patch.object(notices, 'run', self.query):
+                build.add_module_sources(bundle, [self.index], 'go', self.repo,
+                                         source_commit=self.commit,
+                                         original_archive=original if original is not None else archive)
+        return stream.getvalue()
+
+    def test_binary_index_keeps_self_replacement_and_old_external_shape(self):
+        raw = ('binary:\n\tdep\t' + notices.SELF_MODULE + '\tv0.0.0\n'
+               '\t=>\t../..\t(devel)\t\n\t\n'
+               '\tdep\tgithub.com/modelcontextprotocol/go-sdk\tv1.7.0\th1:locked\n')
+        with mock.patch.object(notices, 'run', return_value=raw):
+            self.assertEqual(notices.binary_modules('go', 'binary'), [
+                self.dep, {'module': 'github.com/modelcontextprotocol/go-sdk',
+                           'version': 'v1.7.0', 'sum': 'h1:locked'}])
+        for raw in ['\t=>\t../..\t(devel)\n',
+                    '\tdep\tx\tv0.0.0\n\t=>\t../..\t(devel)\n\t=>\t../..\t(devel)\n',
+                    '\tdep\tx\tv0.0.0\n\t=>\t../..\t(devel)\t\tunknown\n',
+                    '\tdep\tx\n']:
+            with mock.patch.object(notices, 'run', return_value=raw), self.assertRaises(RuntimeError):
+                notices.binary_modules('go', 'binary')
+
+    def test_self_source_has_no_fabricated_sum_zip_or_download(self):
+        with mock.patch.object(notices, 'run', self.query):
+            meta = notices.module_source('go', self.repo, self.dep, self.commit)
+        self.assertEqual(meta['SourceKind'], 'repository')
+        self.assertEqual(meta['SourceCommit'], self.commit)
+        self.assertEqual(meta['SourcePath'], '.')
+        self.assertNotIn('Sum', meta)
+        self.assertNotIn('Zip', meta)
+        archive = self.package_source(self.archive())
+        with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+            self.assertFalse(any(n.endswith('.zip') for n in bundle.getnames()))
+            self.assertEqual(json.load(bundle.extractfile('go-modules.json')), [self.index])
+            for name in self.files:
+                self.assertEqual(bundle.extractfile(name).read(), (self.repo / name).read_bytes())
+
+    def test_foreign_replacements_versions_and_missing_commit_refuse(self):
+        variants = [{**self.dep, 'module': 'example.invalid/foreign'},
+                    {**self.dep, 'version': 'v1.0.0'}, {**self.dep, 'sum': 'h1:fake'},
+                    {k: v for k, v in self.dep.items() if k != 'replace'}]
+        for path in ['../sibling', '../../outside', str(self.repo)]:
+            variants.append({**self.dep, 'replace': {**self.dep['replace'], 'path': path}})
+        for dep in variants:
+            with self.subTest(dep=dep), mock.patch.object(notices, 'run') as query, \
+                    self.assertRaises(RuntimeError):
+                notices.module_source('go', self.repo, dep, self.commit)
+            query.assert_not_called()
+        for commit in [None, '', 'b' * 39, 'A' * 40]:
+            with self.subTest(commit=commit), self.assertRaises(RuntimeError):
+                notices.module_source('go', self.repo, self.dep, commit)
+
+    def test_actual_go_list_root_and_both_module_identities_must_match(self):
+        for scope in ['root', 'nested']:
+            file = (self.repo if scope == 'root' else self.nested) / 'go.mod'
+            old = file.read_bytes()
+            file.write_text('module example.invalid/other\n')
+            with self.subTest(scope=scope), mock.patch.object(notices, 'run') as query, \
+                    self.assertRaises(RuntimeError):
+                notices.module_source('go', self.repo, self.dep, self.commit)
+            query.assert_not_called()
+            file.write_bytes(old)
+        for patch in [{'Dir': str(self.repo.parent)},
+                      {'Replace': {**self.metadata['Replace'], 'Dir': str(self.repo.parent)}},
+                      {'Replace': {**self.metadata['Replace'], 'GoMod': str(self.nested / 'go.mod')}},
+                      {'Replace': {**self.metadata['Replace'], 'Version': 'v1.0.0'}},
+                      {'Sum': 'h1:fake'}, {'Version': 'v1.0.0'}]:
+            with self.subTest(patch=patch), mock.patch.object(
+                    notices, 'run', return_value=json.dumps({**self.metadata, **patch})), \
+                    self.assertRaises(RuntimeError):
+                notices.module_source('go', self.repo, self.dep, self.commit)
+
+    def test_archive_commit_missing_members_and_changed_source_refuse(self):
+        with self.assertRaisesRegex(RuntimeError, 'commit differs'):
+            self.package_source(self.archive('b' * 40))
+        archive = self.archive()
+        with self.assertRaisesRegex(RuntimeError, 'absent'):
+            self.package_source(archive, omit=['go.mod'])
+        (self.repo / 'pkg/mcpwritepolicy/policy.go').write_text('package foreign\n')
+        with self.assertRaisesRegex(RuntimeError, 'differs from the original'):
+            self.package_source(archive)
+        with tarfile.open(fileobj=io.BytesIO(), mode='w') as bundle, \
+                mock.patch.object(build, 'load', return_value=notices), \
+                mock.patch.object(notices, 'run', self.query), self.assertRaises(RuntimeError):
+            build.add_module_sources(bundle, [self.index], 'go', self.repo,
+                                     source_commit=self.commit)
+
+    def test_collector_marks_only_self_as_repository_and_copies_root_notices(self):
+        (self.repo / 'third_party').mkdir()
+        goroot = self.repo / 'sdk-go'
+        flutter = self.repo / 'sdk-flutter'
+        for directory in [goroot, flutter]:
+            directory.mkdir()
+            (directory / 'LICENSE').write_text('SDK license\n')
+        pods = self.repo / 'ui/flutter/macos/Pods/Target Support Files/Pods-Runner/Pods-Runner-acknowledgements.plist'
+        pods.parent.mkdir(parents=True)
+        pods.write_text('native fixture\n')
+
+        def query(*args, **kwargs):
+            if args[1:3] == ('version', '-m'):
+                return '\tdep\t' + notices.SELF_MODULE + '\tv0.0.0\n\t=>\t../..\t(devel)\n'
+            if args[1:3] == ('list', '-m'):
+                return self.query(*args, **kwargs)
+            self.assertEqual(args[1:], ('env', 'GOROOT'))
+            return str(goroot)
+
+        with mock.patch.object(notices, 'run', query):
+            index = notices.collect(self.repo, self.repo / 'legal', ['binary'], 'go',
+                                    flutter, self.commit)
+        self.assertEqual(index, [self.index])
+        for name in self.index['notices']:
+            self.assertEqual((self.repo / 'legal' / name).read_bytes(),
+                             (self.repo / name).read_bytes())
+
+
 if __name__ == '__main__':
     unittest.main()
