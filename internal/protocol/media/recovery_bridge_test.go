@@ -111,7 +111,7 @@ func TestMediaRecoveryBridgeRequests(t *testing.T) {
 	script := `from yt_dlp.networking.impersonate import ImpersonateTarget
 for options in ({'quiet': True, 'proxy': ''}, {'quiet': True, 'proxy': '', 'impersonate': ImpersonateTarget()}):
     with yt_dlp.YoutubeDL(options) as ydl:
-        with ydl.urlopen(context['args'][0]) as response:
+        with ydl.urlopen(context['args'][-1]) as response:
             assert response.read() == b'data'
 `
 	if err := run(script, false); err != nil {
@@ -130,10 +130,10 @@ for options in ({'quiet': True, 'proxy': ''}, {'quiet': True, 'proxy': '', 'impe
 	owner.deny.Store(false)
 	failureScript := `with yt_dlp.YoutubeDL({'quiet': True, 'proxy': ''}) as ydl:
     try:
-        ydl.urlopen(context['args'][0].replace('/redirect', '/failure'))
+        ydl.urlopen(context['args'][-1].replace('/redirect', '/failure'))
     except Exception:
         pass
-    ydl.urlopen(context['args'][0])
+    ydl.urlopen(context['args'][-1])
 `
 	if run(failureScript, true) == nil {
 		t.Fatal("failed hop was swallowed")
@@ -161,7 +161,7 @@ func TestMediaRecoveryBridgeCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd.Args[2] = strings.Replace(cmd.Args[2], bridgeMain, `with yt_dlp.YoutubeDL({'quiet': True, 'proxy': ''}) as ydl:
-    with ydl.urlopen(context['args'][0]) as response:
+    with ydl.urlopen(context['args'][-1]) as response:
         response.read()
 `, 1)
 	setProcessGroup(cmd)
