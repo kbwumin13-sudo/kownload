@@ -2275,6 +2275,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			go func() { defer runCancel(); d.watchRun(task, nil, generation, func() error { return nil }, lease) }()
 			return nil
 		}
+		if err := requireTaskPathFreeze(task);err != nil { return err }
 		if task.Completion != nil {
 			output, ok := task.fetcher.(interface{ RequireVerifiedOutput() })
 			if !ok {

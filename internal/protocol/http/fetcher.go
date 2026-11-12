@@ -255,6 +255,8 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
+	pathFreeze atomic.Pointer[httpFrozenPath]
+	metadataOnly atomic.Bool
 	mcpTransport         atomic.Pointer[mcpHTTPTransportBinding]
 	mcpOutputRequired    atomic.Bool
 	mcpOutputSynced      atomic.Bool
@@ -671,7 +673,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	})
 
 	// If start was called before resolve completed, auto-start
-	if f.startPending.Load() {
+	if f.startPending.Load() && !f.metadataOnly.Load() {
 		go func() {
 			if err := f.doStart(); err != nil {
 				f.setState(stateError)
@@ -962,6 +964,7 @@ func (f *Fetcher) resetUnavailableResumeData() error {
 }
 
 func (f *Fetcher) doStart() error {
+	if err := f.checkFrozenPathWrite();err != nil { return err }
 	if f.sharedRun() != nil {
 		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "startup")
 		if err != nil {
