@@ -51,6 +51,7 @@ func pathVariantForCaps(caps []string) (pathVariant, bool) {
 }
 
 type pathOperationState struct {
+	Handoff        *BrowserHandoff       `json:"handoff,omitempty"`
 	Version        int                   `json:"version"`
 	DatasetID      string                `json:"datasetId"`
 	Request        HTTPPathCreateRequest `json:"request"`
@@ -204,7 +205,7 @@ func pathDecisionMatches(s TaskPathFreeze, p pathOperationState) bool {
 	return d.Origin == p.Request.PathIntent.Origin && d.Root == p.Snapshot.InputRoot && d.RuleID == "" && d.RuleVersion == nil
 }
 func pathRecordValid(r *batchOperationRecord) bool {
-	if r == nil || r.Version != 2 || r.Namespace != batchOperationNamespace || r.Path == nil || r.Path.Version != 1 || !datasetIDPattern.MatchString(r.Path.DatasetID) || !pathRequestValid(r.Path.Request) || !pathSnapshotValid(r.Path.Snapshot) || r.Path.PolicyHash != mcpWriteHash(r.Path.Snapshot) || r.RequestHash != pathRequestHash(r.Path.Request) || r.OperationID != r.Path.Request.OperationID || !reflect.DeepEqual(r.RequiredCapabilities, r.Path.Request.RequiredCapabilities) || !reflect.DeepEqual(r.Integrity, r.Path.Request.Integrity) || len(r.Members) != len(pathItems(r.Path.Request)) {
+	if r == nil || r.Version != 2 || r.Namespace != batchOperationNamespace || r.Path == nil || !browserPathRecordValid(r) || r.Path.Version != 1 || !datasetIDPattern.MatchString(r.Path.DatasetID) || !pathRequestValid(r.Path.Request) || !pathSnapshotValid(r.Path.Snapshot) || r.Path.PolicyHash != mcpWriteHash(r.Path.Snapshot) || r.RequestHash != pathRequestHash(r.Path.Request) || r.OperationID != r.Path.Request.OperationID || !reflect.DeepEqual(r.RequiredCapabilities, r.Path.Request.RequiredCapabilities) || !reflect.DeepEqual(r.Integrity, r.Path.Request.Integrity) || len(r.Members) != len(pathItems(r.Path.Request)) {
 		return false
 	}
 	v, ok := pathVariantForCaps(r.RequiredCapabilities)
@@ -389,7 +390,7 @@ func ReadPathFreeze(reader datasetReader, id string) (*Task, TaskPathFreeze, err
 // member guard never reloads or hashes the full operation/tree.
 func pathTaskFromRecord(reader datasetReader, task *Task, r *batchOperationRecord) (TaskPathFreeze, error) {
 	var empty TaskPathFreeze
-	if task == nil || task.PathFreeze == nil || task.MCPWrite != nil || task.CreationOperation == nil {
+	if task == nil || task.PathFreeze == nil || task.MCPWrite != nil || task.CreationOperation == nil || !browserPathTaskMatches(task, r) {
 		return empty, ErrPathFreezeHeld
 	}
 	ref := task.CreationOperation
@@ -462,6 +463,10 @@ func reservePathOperation(store AtomicStorage, dataset string, request HTTPPathC
 	return reservePathTreeOperation(store, dataset, request, snapshot, []*base.Options{effectiveOptions})
 }
 func reservePathTreeOperation(store AtomicStorage, dataset string, request HTTPPathCreateRequest, snapshot PathPolicySnapshot, effectiveOptions []*base.Options) (batchOperationRecord, bool, error) {
+	return reserveBoundPathTreeOperation(store, dataset, request, snapshot, effectiveOptions, nil)
+}
+
+func reserveBoundPathTreeOperation(store AtomicStorage, dataset string, request HTTPPathCreateRequest, snapshot PathPolicySnapshot, effectiveOptions []*base.Options, handoff *BrowserHandoff) (batchOperationRecord, bool, error) {
 	if store == nil || !datasetIDPattern.MatchString(dataset) || !pathRequestValid(request) || !pathSnapshotValid(snapshot) || len(effectiveOptions) != len(pathItems(request)) {
 		return batchOperationRecord{}, false, ErrPathFreezeInvalid
 	}
@@ -490,6 +495,10 @@ func reservePathTreeOperation(store AtomicStorage, dataset string, request HTTPP
 		}
 	}
 	candidate := batchOperationRecord{Version: 2, Namespace: batchOperationNamespace, Kind: v.Kind, RequiredCapabilities: request.RequiredCapabilities, OperationID: request.OperationID, RequestHash: pathRequestHash(request), CreatedAt: now, UpdatedAt: now, Integrity: request.Integrity, Path: &pathOperationState{Version: 1, DatasetID: dataset, Request: request, Snapshot: snapshot, PolicyHash: mcpWriteHash(snapshot)}, Members: members}
+	candidate.Path.Handoff, err = cloneOperationJSON(handoff)
+	if err != nil {
+		return batchOperationRecord{}, false, ErrPathFreezeInvalid
+	}
 	if !candidate.valid() {
 		return batchOperationRecord{}, false, ErrPathFreezeInvalid
 	}
@@ -504,7 +513,7 @@ func reservePathTreeOperation(store AtomicStorage, dataset string, request HTTPP
 			return err
 		}
 		if old != nil {
-			if old.Version != 2 || old.Kind != v.Kind || old.RequestHash != candidate.RequestHash || old.Path == nil || old.Path.DatasetID != dataset {
+			if old.Version != 2 || old.Kind != v.Kind || old.RequestHash != candidate.RequestHash || old.Path == nil || old.Path.DatasetID != dataset || !reflect.DeepEqual(old.Path.Handoff, candidate.Path.Handoff) {
 				return ErrPathFreezeConflict
 			}
 			result = *old
@@ -609,7 +618,7 @@ func preparePathMember(tx StorageTransaction, dataset string, r *batchOperationR
 	var err error
 	m := &r.Members[index]
 	v, _ := pathVariantForCaps(r.RequiredCapabilities)
-	if m.State != "pending" || task.ID != m.TaskID || task.Protocol != v.Protocol || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) || task.Meta.Res != nil || task.CreationOperation != nil || task.MCPWrite != nil || task.PathFreeze != nil || task.Completion != nil || task.Status == base.DownloadStatusDone {
+	if !reflect.DeepEqual(task.Handoff, r.Path.Handoff) || m.State != "pending" || task.ID != m.TaskID || task.Protocol != v.Protocol || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) || task.Meta.Res != nil || task.CreationOperation != nil || task.MCPWrite != nil || task.PathFreeze != nil || task.Completion != nil || task.Status == base.DownloadStatusDone {
 		return ErrPathFreezeInvalid
 	}
 	for _, bucket := range []string{bucketTask, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired, bucketSave, bucketTaskCompletion, bucketCompletionRequired} {
