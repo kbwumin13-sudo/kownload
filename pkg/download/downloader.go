@@ -640,7 +640,10 @@ func (d *Downloader) saveActiveTask(task *Task) error {
 }
 
 func (d *Downloader) saveTask(task *Task) error {
-	if err := d.checkTaskRecovery(task); err != nil {
+	// A joined pause/shutdown must retain its checkpoint after execution
+	// authority has been revoked. This is declaration/association validation,
+	// not permission for a new request or writable output.
+	if err := d.checkTaskRecoveryState(task); err != nil {
 		return err
 	}
 	// Sealed verification deliberately has no protocol instance or new wire
