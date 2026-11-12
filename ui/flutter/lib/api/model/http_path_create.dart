@@ -152,6 +152,8 @@ class HttpPathCreateRequest {
         'pathIntent': pathIntent.toJson(),
         if (expectedSHA256 != null)
           'integrity': {
+            'version': 1,
+            'requiredCapability': 'http-sha256-completion/v1',
             'algorithm': 'sha256',
             'expectedSHA256': expectedSHA256
           },
