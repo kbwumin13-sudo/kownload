@@ -271,9 +271,15 @@ func TestNetdiskDownloaderCloseTerminatesWaitAndPreservesResume(t *testing.T) {
 					t.Fatal("netdisk task did not finish start persistence")
 				}
 			}
-			waitNetdiskLifecycle(t, "netdisk watcher did not start", func() bool {
+			watchMessage := "netdisk watcher did not start"
+			wantWatched := state != "failed"
+			if !wantWatched {
+				// The observed Error event completed this one-shot watcher.
+				watchMessage = "failed netdisk watcher did not exit"
+			}
+			waitNetdiskLifecycle(t, watchMessage, func() bool {
 				_, watched := fixture.d.watchedTasks.Load(id)
-				return watched
+				return watched == wantWatched
 			})
 			if state == "paused" {
 				if err := fixture.d.Pause(&TaskFilter{IDs: []string{id}}); err != nil {
