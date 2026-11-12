@@ -53,6 +53,7 @@ import '../../app/controllers/app_controller.dart';
 import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
+import 'create_path_intent.dart';
 import 'browser_media_view.dart';
 import 'http_checksum_input.dart';
 import '../../../../../api/verified_http_api.dart';
@@ -74,7 +75,7 @@ class CreateView extends StatefulWidget {
       this.taskResolver});
   Protocol? parseProtocol(String url) => _parseProtocol(url);
   @override
-  State<CreateView> createState() => _CreateViewState();
+  State<CreateView> createState() => CreateViewState();
 }
 
 Protocol? _parseProtocol(String url) {
@@ -104,7 +105,36 @@ class _ManualBatchAttempt {
       {this.expectedSha256});
 }
 
-class _CreateViewState extends State<CreateView> {
+class CreateViewState extends State<CreateView> {
+  PathIntent _pathIntent =
+      const PathIntent(path: '', origin: PathOrigin.defaultPath);
+  int _pathDraftEpoch = 0, _pathRevision = 0;
+
+  /// Current RAM-only provenance; never serialized into legacy create options.
+  PathIntent get pathIntent => _pathIntent;
+
+  void _setDraftPath(String path, PathOrigin origin) {
+    _pathIntent = PathIntent(path: path, origin: origin);
+    ++_pathRevision;
+    _pathController.text = path;
+  }
+
+  void _setIncomingPath(String path) {
+    // An empty options path supplies no directory; preserve default fallback.
+    _setDraftPath(
+        path, path.isEmpty ? PathOrigin.defaultPath : PathOrigin.unknown);
+  }
+
+  ValueChanged<String> _directoryPicked() {
+    final epoch = _pathDraftEpoch, revision = _pathRevision;
+    return (path) {
+      if (!mounted || epoch != _pathDraftEpoch || revision != _pathRevision) {
+        return;
+      }
+      setState(() => _setDraftPath(path, PathOrigin.userSelected));
+    };
+  }
+
   _ManualBatchAttempt? _manualBatch;
   int _manualEpoch = 0;
   int _confirmationEpoch = 0;
@@ -572,6 +602,7 @@ class _CreateViewState extends State<CreateView> {
 
   @override
   void dispose() {
+    ++_pathDraftEpoch;
     ++_manualEpoch;
     _urlController.removeListener(_manualInputChanged);
     if (Util.isMacos()) MacPanel.cancelAutoHide();
@@ -759,10 +790,12 @@ class _CreateViewState extends State<CreateView> {
     }
     if (Util.isMacos()) {
       _syncDefaultDownloadPath();
-    } else if (_pathController.text.isEmpty) {
+    } else if (_pathIntent.origin == PathOrigin.defaultPath &&
+        _pathController.text.isEmpty) {
       // Render placeholders when initializing the path
       final downloadDir = appController.downloaderConfig.value.downloadDir;
-      _pathController.text = renderPathPlaceholders(downloadDir);
+      _setDraftPath(
+          renderPathPlaceholders(downloadDir), PathOrigin.defaultPath);
     }
 
     // Handle pending create task from deep link
@@ -797,7 +830,7 @@ class _CreateViewState extends State<CreateView> {
       if (routerParams.req!.protocol == 'netdisk') {
         _netdiskRequest.value = routerParams.req;
         if (routerParams.opts?.path.isNotEmpty ?? false) {
-          _pathController.text = routerParams.opts!.path;
+          _setIncomingPath(routerParams.opts!.path);
         }
       } else if (protocol != null) {
         final extraHandlers = {
@@ -829,13 +862,13 @@ class _CreateViewState extends State<CreateView> {
         // handle options
         if (routerParams.opts != null) {
           _renameController.text = routerParams.opts!.name;
-          _pathController.text = routerParams.opts!.path;
+          _setIncomingPath(routerParams.opts!.path);
 
           final optionsHandlers = {
             Protocol.http: () {
               final opt = routerParams.opts!;
               _renameController.text = opt.name;
-              _pathController.text = opt.path;
+              _setIncomingPath(opt.path);
               if (opt.extra != null) {
                 final optsExtraHttp =
                     OptsExtraHttp.fromJson(jsonDecode(jsonEncode(opt.extra)));
@@ -1259,6 +1292,7 @@ class _CreateViewState extends State<CreateView> {
                             'downloadDir'.tr,
                             DirectorySelector(
                               controller: _pathController,
+                              onDirectoryPicked: _directoryPicked(),
                               inlineActions: Util.isMacos(),
                             )),
                         // Category selector
@@ -1818,7 +1852,7 @@ class _CreateViewState extends State<CreateView> {
     // defers its listeners to a microtask; apply them before clearing the draft.
     _inputFocusGeneration++;
     final focus = FocusManager.instance.primaryFocus;
-    if (focus?.context?.findAncestorStateOfType<_CreateViewState>() == this) {
+    if (focus?.context?.findAncestorStateOfType<CreateViewState>() == this) {
       focus!.unfocus();
       FocusManager.instance.applyFocusChangesIfNeeded();
     }
@@ -1835,6 +1869,7 @@ class _CreateViewState extends State<CreateView> {
   }
 
   void _resetTaskParameters() {
+    ++_pathDraftEpoch;
     _netdiskRequest.value = null;
     _credentialOrigin = null;
     for (final row in _httpHeaderControllers) {
@@ -1868,7 +1903,7 @@ class _CreateViewState extends State<CreateView> {
     _connectionsController.text =
         config.protocolConfig.http.connections.toString();
     _lastDefaultDownloadPath = renderPathPlaceholders(config.downloadDir);
-    _pathController.text = _lastDefaultDownloadPath!;
+    _setDraftPath(_lastDefaultDownloadPath!, PathOrigin.defaultPath);
     controller.directDownload.value = config.extra.defaultDirectDownload;
   }
 
@@ -2580,11 +2615,10 @@ class _CreateViewState extends State<CreateView> {
   void _syncDefaultDownloadPath() {
     final nextDefault = renderPathPlaceholders(
         Get.find<AppController>().downloaderConfig.value.downloadDir);
-    // A persistent panel follows Settings only while its draft uses the default.
-    // Native/browser inputs and the directory picker may supply a custom path.
-    if (_pathController.text.isEmpty ||
-        _pathController.text == _lastDefaultDownloadPath) {
-      _pathController.text = nextDefault;
+    // Equality with a default path is not evidence of a user's intent.
+    if (_pathIntent.origin == PathOrigin.defaultPath &&
+        _pathController.text != nextDefault) {
+      _setDraftPath(nextDefault, PathOrigin.defaultPath);
     }
     _lastDefaultDownloadPath = nextDefault;
   }
@@ -2594,12 +2628,13 @@ class _CreateViewState extends State<CreateView> {
     final pending = _onboarding;
     if (pending != null) return pending;
     _syncDefaultDownloadPath();
+    final epoch = _pathDraftEpoch;
     final operation = MacOnboarding.show(context);
     _onboarding = operation;
     try {
       return await operation;
     } finally {
-      if (mounted) _syncDefaultDownloadPath();
+      if (mounted && epoch == _pathDraftEpoch) _syncDefaultDownloadPath();
       _onboarding = null;
     }
   }
@@ -3175,8 +3210,9 @@ class _CreateViewState extends State<CreateView> {
                     padding: const EdgeInsets.only(right: 8),
                     child: OutlinedButton(
                       onPressed: () {
-                        _pathController.text =
-                            renderPathPlaceholders(category.path);
+                        setState(() => _setDraftPath(
+                            renderPathPlaceholders(category.path),
+                            PathOrigin.manualCategory));
                       },
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(

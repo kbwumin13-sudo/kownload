@@ -84,6 +84,7 @@ class DirectorySelector extends StatefulWidget {
   final bool allowEdit;
   final bool showPlaceholderButton;
   final VoidCallback? onEditComplete;
+  final ValueChanged<String>? onDirectoryPicked;
   final bool showRenderedPlaceholders;
   final bool inlineActions;
 
@@ -95,6 +96,7 @@ class DirectorySelector extends StatefulWidget {
     this.allowEdit = false,
     this.showPlaceholderButton = false,
     this.onEditComplete,
+    this.onDirectoryPicked,
     this.showRenderedPlaceholders = false,
     this.inlineActions = false,
   }) : super(key: key);
@@ -116,15 +118,24 @@ class _DirectorySelectorState extends State<DirectorySelector> {
             icon: Icon(
                 Util.isMacos() ? CupertinoIcons.folder : Icons.folder_open),
             onPressed: () async {
-              final current = widget.controller.text.trim();
+              final controller = widget.controller;
+              final onPicked = widget.onDirectoryPicked;
+              final onEditComplete = widget.onEditComplete;
+              final inlineActions = widget.inlineActions;
+              final current = controller.text.trim();
               var dir = Util.isMacos()
                   ? await MacPanel.chooseDirectory(
                       initialDirectory: current.isEmpty ? null : current)
                   : await FilePicker.platform.getDirectoryPath();
+              if (!mounted || !identical(widget.controller, controller)) return;
               if (dir != null) {
-                widget.controller.text = dir;
-                if (Util.isMacos() && widget.inlineActions) {
-                  widget.onEditComplete?.call();
+                if (onPicked != null) {
+                  onPicked(dir);
+                } else {
+                  controller.text = dir;
+                }
+                if (Util.isMacos() && inlineActions) {
+                  onEditComplete?.call();
                 }
               }
             });
