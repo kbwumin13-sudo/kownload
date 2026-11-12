@@ -1670,11 +1670,11 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	}
 	defer d.watchedTasks.CompareAndDelete(task.ID, registration)
 	if bound && runLease != nil {
-		defer func() {
+		defer func(token transfer.RecoveryToken) {
 			if owner := task.recoveryOwner.Load(); owner != nil {
-				owner.invalidateToken(runLease.Token)
+				owner.invalidateToken(token)
 			}
-		}()
+		}(runLease.Token)
 	}
 
 	task.statusLock.Lock()
