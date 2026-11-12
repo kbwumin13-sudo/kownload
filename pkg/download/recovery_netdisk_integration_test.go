@@ -29,18 +29,27 @@ import (
 type parentBudgetProvider struct {
 	cloud.Provider
 	api string
+	session, account, fileID string
+	selected atomic.Int32
 }
 
 func (*parentBudgetProvider) Info() netdiskModel.ProviderInfo {
 	return netdiskModel.ProviderInfo{ID: "quark", Hosts: []string{"pan.quark.cn"}, APIHosts: []string{"127.0.0.1"}}
 }
 
-func (provider *parentBudgetProvider) Resolve(ctx context.Context, client *cloud.APIClient, _ *cloud.Session, _ netdiskModel.Source, file netdiskModel.File) (*cloud.Download, error) {
-	var result struct { URL string `json:"url"` }
+func (provider *parentBudgetProvider) Resolve(ctx context.Context, client *cloud.APIClient, session *cloud.Session, _ netdiskModel.Source, file netdiskModel.File) (*cloud.Download, error) {
+	if session == nil || session.ID != provider.session || session.Capture.AccountID != provider.account || file.ID != provider.fileID {
+		return nil, fmt.Errorf("managed parent selected another session/account/file")
+	}
+	provider.selected.Add(1)
+	var result struct { URL string `json:"url"`; File netdiskModel.File `json:"file"` }
 	if err := client.JSON(ctx, http.MethodGet, provider.api, nil, nil, &result); err != nil {
 		return nil, err
 	}
-	return &cloud.Download{URL: result.URL, File: file}, nil
+	if result.File.ID != file.ID || result.File.Size != file.Size || result.File.Hash != file.Hash {
+		return nil, fmt.Errorf("provider response did not identify the original selected file")
+	}
+	return &cloud.Download{URL: result.URL, File: result.File}, nil
 }
 
 func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
@@ -61,7 +70,7 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 				close(refreshEntered)
 				select { case <-refreshRelease: case <-request.Context().Done(): return }
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"url": fmt.Sprintf("%s/file?link=%d", baseURL, sequence)})
+			_ = json.NewEncoder(w).Encode(map[string]any{"url": fmt.Sprintf("%s/file?link=%d", baseURL, sequence),"file":netdiskModel.File{ID:"controlled-file",Size:int64(len(body)),Hash:"sha256:"+hex.EncodeToString(digest[:])}})
 			return
 		}
 		if request.URL.Path != "/file" { http.NotFound(w, request); return }
@@ -107,10 +116,12 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 		if err != nil { t.Fatal(err) }
 	}
 	outputRoot := filepath.Join(root,"output")
-	service := cloud.NewService(&parentBudgetProvider{api: server.URL+"/api/link"})
+	provider := &parentBudgetProvider{api:server.URL+"/api/link",account:"synthetic-account",fileID:"controlled-file"}
+	service := cloud.NewService(provider)
 	manager := &netdiskProtocol.FetcherManager{Service: service}
 	captured, err := service.Capture("", "", netdiskModel.Capture{Provider:"quark",SourcePage:"https://pan.quark.cn/s/controlled",InstanceID:"fixture",ContextID:"fixture",AccountID:"synthetic-account"})
 	if err != nil { t.Fatal(err) }
+	provider.session = captured.SessionID
 	store := NewBoltStorage(filepath.Join(root,"db"))
 	d := NewDownloader(&DownloaderConfig{Storage:store,StorageDir:root,RefreshInterval:50,FetchManagers:[]fetcher.FetcherManager{manager}})
 	if err = d.Setup(); err != nil { store.Close(); t.Fatal(err) }
@@ -163,7 +174,7 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 		t.Fatal("unknown provider UID fabricated or reset coverage rewards")
 	}
 	afterRaw,_ := json.Marshal(afterTask.Meta.Req)
-	if !bytes.Equal(rawParent,afterRaw) || afterTask.Meta.SingleFilepath() != wantedPath || apiCalls.Load() != 2 || refreshedRanges.Load() == 0 {
+	if !bytes.Equal(rawParent,afterRaw) || afterTask.Meta.SingleFilepath() != wantedPath || apiCalls.Load() != 2 || provider.selected.Load() != 2 || refreshedRanges.Load() == 0 {
 		t.Fatalf("raw request, path or finite plan changed: API=%d newRanges=%d path=%q",apiCalls.Load(),refreshedRanges.Load(),afterTask.Meta.SingleFilepath())
 	}
 	if beforeTask.PathFreeze != nil {

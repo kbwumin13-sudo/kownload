@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/netdisk"
 	"net/url"
@@ -581,11 +582,13 @@ func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *
 	if deferred {
 		return s.resolveDeferred(ctx, ctl, req, e, p)
 	}
-	ss, err := s.session(e.Provider, e.SessionID, e.AccountID)
+	ss, err := s.recoverySession(ctx, e.Provider, e.SessionID, e.AccountID)
 	if err != nil {
-		ss = s.sourceSession(e)
-		if ss != nil {
-			err = nil
+		if transfer.RecoveryLeaseFromContext(ctx) == nil {
+			ss = s.sourceSession(e)
+			if ss != nil {
+				err = nil
+			}
 		}
 	}
 	if err != nil {
@@ -909,11 +912,27 @@ func (s *Service) Complete(ctx context.Context, ctl *controller.Controller, req 
 	}
 }
 func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *base.Request, batch string) error {
+	var taskSession string
+	var taskProvider, taskAccount string
+	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+		if err := checkRecoveryContext(ctx); err != nil { return err }
+		if req == nil { return Fail("login_required", "请重新同步原网盘账号") }
+		raw,err := json.Marshal(req.Extra)
+		var extra model.ReqExtra
+		if err != nil || json.Unmarshal(raw,&extra) != nil || extra.SessionID == "" {
+			return Fail("login_required", "请重新同步原网盘账号")
+		}
+		taskSession,taskProvider,taskAccount = extra.SessionID,extra.Provider,extra.AccountID
+	}
 	s.mu.Lock()
 	r := clone(s.transfers[batch])
 	if r == nil {
 		s.mu.Unlock()
 		return Fail("not_found", "转存记录不存在")
+	}
+	if taskSession != "" && (taskProvider != r.Provider || taskAccount != r.AccountID) {
+		s.mu.Unlock()
+		return LoginRequired(r.Provider)
 	}
 	if len(r.Remaining) > 0 {
 		s.mu.Unlock()
@@ -934,7 +953,7 @@ func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *
 		return err
 	}
 	s.mu.Unlock()
-	ss, err := s.session(r.Provider, "", r.AccountID)
+	ss, err := s.recoverySession(ctx, r.Provider, taskSession, r.AccountID)
 	if err == nil {
 		p := s.providers[r.Provider]
 		if p == nil {

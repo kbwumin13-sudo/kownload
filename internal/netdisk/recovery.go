@@ -4,9 +4,33 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
 )
+
+// A managed Task may use only the captured session named by its raw request.
+// AccountID is an equality tag here, never evidence of a stable provider UID.
+// Losing that session requires explicit reauthorization; another same-source
+// browser session cannot silently become this run's account.
+func (service *Service) recoverySession(ctx context.Context, provider, sessionID, account string) (*Session, error) {
+	if transfer.RecoveryLeaseFromContext(ctx) == nil {
+		return service.session(provider, sessionID, account)
+	}
+	if err := checkRecoveryContext(ctx); err != nil {
+		return nil, err
+	}
+	if sessionID == "" || account == "" {
+		return nil, LoginRequired(provider)
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	selected := service.sessions[sessionID]
+	if selected == nil || selected.ID != sessionID || selected.Capture.Provider != provider || selected.Capture.AccountID != account || time.Since(selected.CreatedAt) >= 8*time.Hour {
+		return nil, LoginRequired(provider)
+	}
+	return clone(selected), nil
+}
 
 // Every hop, including a redirected request or one that waited for an API
 // slot, checks the same parent lease immediately before network admission.
