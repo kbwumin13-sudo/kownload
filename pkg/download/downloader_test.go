@@ -2,12 +2,14 @@ package download
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	gohttp "net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -373,66 +375,141 @@ func TestDownloader_CreateRename(t *testing.T) {
 	}
 }
 
-func TestDownloader_StoreAndRestore(t *testing.T) {
-	listener := test.StartTestSlowFileServer(time.Millisecond * 2000)
-	defer listener.Close()
+// pauseResumeBodyWriter uses the existing REST pause fixture's body gate:
+// metadata probes complete normally, while actual bodies remain unfinished.
+// Request cancellation releases the handler during a real Pause/Close.
+type pauseResumeBodyWriter struct {
+	gohttp.ResponseWriter
+	request *gohttp.Request
+	gate    <-chan struct{}
+	entered func()
+}
 
-	downloader := NewDownloader(&DownloaderConfig{
-		Storage: NewBoltStorage("./"),
-	})
+func (w *pauseResumeBodyWriter) Write(p []byte) (int, error) {
+	if len(p) <= 1 {
+		return w.ResponseWriter.Write(p)
+	}
+	n, err := w.ResponseWriter.Write(p[:1])
+	if err != nil {
+		return n, err
+	}
+	if f, ok := w.ResponseWriter.(gohttp.Flusher); ok {
+		f.Flush()
+	}
+	w.entered()
+	select {
+	case <-w.gate:
+		more, err := w.ResponseWriter.Write(p[n:])
+		return n + more, err
+	case <-w.request.Context().Done():
+		return n, w.request.Context().Err()
+	}
+}
+
+func TestDownloader_StoreAndRestore(t *testing.T) {
+	payload := bytes.Repeat([]byte("store-and-resume!"), 32768)
+	gate, bodyEntered := make(chan struct{}), make(chan struct{})
+	var releaseOnce, enteredOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	source := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("ETag", `"store-and-resume-v1"`)
+		writer := &pauseResumeBodyWriter{ResponseWriter: w, request: r, gate: gate,
+			entered: func() { enteredOnce.Do(func() { close(bodyEntered) }) }}
+		gohttp.ServeContent(writer, r, "stored.bin", time.Unix(1, 0), bytes.NewReader(payload))
+	}))
+	defer source.Close()
+	defer release()
+	storageDir, outputDir := t.TempDir(), t.TempDir()
+	downloader := NewDownloader(&DownloaderConfig{Storage: NewBoltStorage(storageDir)})
+	defer func() { _ = downloader.Clear() }()
 	if err := downloader.Setup(); err != nil {
 		t.Fatal(err)
 	}
-	defer downloader.Clear()
-	req := &base.Request{
-		URL: "http://" + listener.Addr().String() + "/" + test.BuildName,
+	type fixtureEvent struct {
+		key EventKey
+		id  string
+		err error
 	}
-	rr, err := downloader.Resolve(req, testDownloadOpt)
+	events := make(chan fixtureEvent, 16)
+	overflow := make(chan struct{}, 1)
+	listen := func(d *Downloader) {
+		d.Listener(func(event *Event) {
+			switch event.Key {
+			case EventKeyStart, EventKeyPause, EventKeyDone, EventKeyError:
+				select {
+				case events <- fixtureEvent{key: event.Key, id: event.Task.ID, err: event.Err}:
+				default:
+					select {
+					case overflow <- struct{}{}:
+					default:
+					}
+				}
+			}
+		})
+	}
+	listen(downloader)
+	rr, err := downloader.Resolve(&base.Request{URL: source.URL + "/stored.bin"}, &base.Options{Path: outputDir, Name: "stored.bin", Extra: http.OptsExtra{Connections: 4}})
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	id, err := downloader.Create(rr.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Millisecond * 1001)
-	err = downloader.Pause(&TaskFilter{IDs: []string{id}})
-	if err != nil {
+	waitEvent := func(key EventKey) {
+		t.Helper()
+		for {
+			var event fixtureEvent
+			select {
+			case event = <-events:
+			case <-overflow:
+				t.Fatal("fixture event diagnostics overflowed")
+			}
+			if event.id != id || event.err != nil || event.key == EventKeyError {
+				t.Fatalf("fixture event=%s task=%s error=%v", event.key, event.id, event.err)
+			}
+			if event.key == key {
+				return
+			}
+			if event.key == EventKeyDone {
+				t.Fatal("body gate allowed premature completion")
+			}
+		}
+	}
+	waitEvent(EventKeyStart)
+	<-bodyEntered
+	if err := downloader.Pause(&TaskFilter{IDs: []string{id}}); err != nil {
 		t.Fatal(err)
 	}
-	downloader.Close()
-
-	downloader = NewDownloader(&DownloaderConfig{
-		Storage: NewBoltStorage("./"),
-	})
+	waitEvent(EventKeyPause) // native pause and Store have finished before closing Bolt
+	if task := downloader.GetTask(id); task == nil || task.Status != base.DownloadStatusPause {
+		t.Fatal("task did not enter persisted Pause")
+	}
+	if err := downloader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	downloader = NewDownloader(&DownloaderConfig{Storage: NewBoltStorage(storageDir)})
 	if err := downloader.Setup(); err != nil {
 		t.Fatal(err)
 	}
 	task := downloader.GetTask(id)
-
-	if task == nil {
-		t.Fatal("task is nil")
+	if task == nil || task.Status != base.DownloadStatusPause || task.Meta.SingleFilepath() != filepath.Join(outputDir, "stored.bin") {
+		t.Fatal("stored task identity/status/path did not survive Bolt reopen")
 	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	downloader.Listener(func(event *Event) {
-		if event.Key == EventKeyDone {
-			wg.Done()
-		}
-	})
-	err = downloader.Continue(&TaskFilter{IDs: []string{id}})
-	wg.Wait()
-	if err != nil {
+	listen(downloader)
+	if err := downloader.Continue(&TaskFilter{IDs: []string{id}}); err != nil {
 		t.Fatal(err)
 	}
-	want := test.FileMd5(test.BuildFile)
-	got := test.FileMd5(test.DownloadFile)
-	if want != got {
-		t.Errorf("StoreAndResume() got = %v, want %v", got, want)
+	release()
+	waitEvent(EventKeyDone)
+	task = downloader.GetTask(id)
+	if task == nil || task.Status != base.DownloadStatusDone {
+		t.Fatal("restored task did not complete")
 	}
-
-	downloader.Clear()
+	got, err := os.ReadFile(task.Meta.SingleFilepath())
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("StoreAndRestore output differs: bytes=%d want=%d error=%v", len(got), len(payload), err)
+	}
 }
 
 func TestDownloader_Protocol_Config(t *testing.T) {
@@ -829,13 +906,24 @@ func TestDownloader_PauseAndContinue(t *testing.T) {
 }
 
 func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
-	listener := test.StartTestSlowFileServer(time.Millisecond * 2000)
-	defer listener.Close()
-	wantMD5 := test.FileMd5(test.BuildFile)
-	if len(wantMD5) != 32 {
-		t.Fatal("fixture digest unavailable")
-	}
-
+	payload := bytes.Repeat([]byte("pause-all-resume!"), 32768)
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	bodyEntered := make(chan string, 32)
+	var entered sync.Map
+	source := httptest.NewServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		w.Header().Set("ETag", `"pause-all-resume-v1"`)
+		writer := &pauseResumeBodyWriter{ResponseWriter: w, request: r, gate: gate, entered: func() {
+			if _, loaded := entered.LoadOrStore(r.URL.Path, true); !loaded {
+				bodyEntered <- r.URL.Path
+			}
+		}}
+		gohttp.ServeContent(writer, r, filepath.Base(r.URL.Path), time.Unix(1, 0), bytes.NewReader(payload))
+	}))
+	defer source.Close()
+	defer release()
+	outputDir := t.TempDir()
 	downloader := NewDownloader(nil)
 	if err := downloader.Setup(); err != nil {
 		t.Fatal(err)
@@ -877,6 +965,8 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 	taskIds := make([]string, 0, taskCount)
 	taskSet := make(map[string]bool, taskCount)
 	done := make(map[string]bool, taskCount)
+	startedTasks := make(map[string]bool, taskCount)
+	pausedTasks := make(map[string]bool, taskCount)
 	observe := func(stage string, event fixtureEvent) {
 		if !taskSet[event.id] {
 			t.Fatalf("fixture stage=%s unexpected task event id=%s", stage, event.id)
@@ -896,6 +986,12 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 				errors.Is(event.err, httpFetcher.ErrUnsafeResume),
 				event.err != nil && strings.HasSuffix(event.err.Error(), ": no saved overlap available"),
 				errors.Is(event.err, context.Canceled), errors.Is(event.err, context.DeadlineExceeded), errors.Is(event.err, io.ErrUnexpectedEOF))
+		}
+		if event.key == EventKeyStart {
+			startedTasks[event.id] = true
+		}
+		if event.key == EventKeyPause {
+			pausedTasks[event.id] = true
 		}
 		if event.key == EventKeyDone {
 			if done[event.id] {
@@ -917,10 +1013,12 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 		}
 	}
 
-	// Create multiple tasks using the original slow file fixture and options.
+	// Hold all three actual bodies until after PauseAll/ContinueAll; creation
+	// latency and prefetch speed cannot turn an earlier task into Done.
 	for i := 0; i < taskCount; i++ {
-		req := &base.Request{URL: "http://" + listener.Addr().String() + "/" + test.BuildName}
-		rr, err := downloader.Resolve(req, testDownloadOpt)
+		req := &base.Request{URL: fmt.Sprintf("%s/file-%d.bin", source.URL, i)}
+		opts := &base.Options{Path: outputDir, Name: fmt.Sprintf("file-%d.bin", i), Extra: http.OptsExtra{Connections: 4}}
+		rr, err := downloader.Resolve(req, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -934,12 +1032,32 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 		drain("created")
 	}
 
-	time.Sleep(time.Millisecond * 100)
+	for len(startedTasks) < taskCount {
+		select {
+		case event := <-events:
+			observe("started", event)
+		case <-overflow:
+			t.Fatal("fixture event diagnostics overflowed")
+		}
+	}
+	for i := 0; i < taskCount; i++ {
+		<-bodyEntered
+	}
+	if len(done) != 0 {
+		t.Fatal("body gate allowed premature completion")
+	}
 	t.Logf("fixture stage=pause-requested tasks=%v", taskIds)
 	if err := downloader.Pause(nil); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Millisecond * 100)
+	for len(pausedTasks) < taskCount {
+		select {
+		case event := <-events:
+			observe("pausing", event)
+		case <-overflow:
+			t.Fatal("fixture event diagnostics overflowed")
+		}
+	}
 	drain("paused")
 
 	pausedCount := 0
@@ -977,6 +1095,7 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 		task := downloader.GetTask(taskId)
 		t.Logf("fixture stage=continue-returned task=%s status=%s downloaded=%d", taskId, task.Status, task.Progress.Downloaded)
 	}
+	release()
 	for len(done) < taskCount {
 		select {
 		case event := <-events:
@@ -998,11 +1117,11 @@ func TestDownloader_PauseAllAndContinueAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("fixture task=%s output stat: %T", taskId, err)
 		}
-		if info.Size() != test.BuildSize {
-			t.Errorf("fixture task=%s size=%d want=%d", taskId, info.Size(), test.BuildSize)
+		if info.Size() != int64(len(payload)) {
+			t.Errorf("fixture task=%s size=%d want=%d", taskId, info.Size(), len(payload))
 		}
-		if got := test.FileMd5(path); got != wantMD5 {
-			t.Errorf("fixture task=%s output bytes differ from original 200MiB fixture", taskId)
+		if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, payload) {
+			t.Errorf("fixture task=%s output bytes differ from the full source payload: %v", taskId, err)
 		}
 	}
 	if doneCount != taskCount {
