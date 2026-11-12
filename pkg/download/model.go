@@ -33,6 +33,7 @@ type TaskCompletionRef struct {
 }
 
 type Task struct {
+	MCPWrite          *MCPTaskState        `json:"mcpWrite,omitempty"`
 	Completion        *TaskCompletionRef   `json:"completion,omitempty"`
 	Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 	Handoff           *BrowserHandoff      `json:"handoff,omitempty"`
@@ -162,8 +163,9 @@ func (t *Task) MarshalJSON() ([]byte, error) {
 		CreationOperation *CreationOperation   `json:"creationOperation,omitempty"`
 		Recovery          *TaskRecoveryRef     `json:"recovery,omitempty"`
 		Completion        *TaskCompletionRef   `json:"completion,omitempty"`
+		MCPWrite          *MCPTaskState        `json:"mcpWrite,omitempty"`
 	}{t.ID, t.Protocol, t.Meta, t.Status, t.Uploading, t.Progress,
-		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery, t.Completion})
+		t.IsCreated, t.CreatedAt, t.UpdatedAt, t.nameLocked(), t.Handoff, t.CreationOperation, t.Recovery, t.Completion, t.MCPWrite})
 }
 
 func (t *Task) getStatus() base.Status {

@@ -246,13 +246,17 @@ func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 	if err != nil {
 		return ErrOperationUnavailable
 	}
-	if !exists && t.CreationOperation == nil {
+	if !exists && t.CreationOperation == nil && t.MCPWrite == nil {
 		return nil
 	}
 	if !exists || t.CreationOperation == nil || link.TaskID != t.ID || link.Ref != *t.CreationOperation {
 		return ErrOperationConflict
 	}
 	ref := link.Ref
+	if ref.Version == 2 && ref.Namespace == MCPWriteNamespace {
+		_, _, err := readMCPWriteTask(reader, t.ID)
+		return err
+	}
 	if ref.Version != 1 || ref.Namespace != batchOperationNamespace {
 		return ErrOperationConflict
 	}
@@ -272,7 +276,13 @@ func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 func (t *Task) creationHeld() bool {
 	t.dataLock.RLock()
 	defer t.dataLock.RUnlock()
-	return t.creationBlocked || (t.CreationOperation != nil && (t.CreationOperation.Version != 1 || t.CreationOperation.Namespace != batchOperationNamespace))
+	if t.creationBlocked {
+		return true
+	}
+	if t.MCPWrite != nil {
+		return t.CreationOperation == nil || t.CreationOperation.Version != 2 || t.CreationOperation.Namespace != MCPWriteNamespace || !mcpWriteStateValid(*t.MCPWrite)
+	}
+	return t.CreationOperation != nil && (t.CreationOperation.Version != 1 || t.CreationOperation.Namespace != batchOperationNamespace)
 }
 func creationEligible(tasks []*Task) []*Task {
 	out := make([]*Task, 0, len(tasks))
