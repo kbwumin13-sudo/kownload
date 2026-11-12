@@ -13,6 +13,9 @@ import (
 type RecoveryParentController interface {
 	RecoveryController
 	RecoveryActionController
+	// Cursor observation is not an execution permit. It avoids guessing Seen
+	// from an immutable older lease after a child charged another action.
+	CurrentRecoveryRound(context.Context, RecoveryToken) (uint64, error)
 	// Enter checks the existing funded workset and Until before actual IO.
 	// It is a scope, not a new debit or a free retry. Retrying failed work uses
 	// RetryRecovery; refresh/deferral first require their durable action ACK.
