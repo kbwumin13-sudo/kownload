@@ -552,7 +552,15 @@ func (s *Service) sourceSession(e *model.ReqExtra) *Session {
 	return clone(newest)
 }
 
-func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) (*Download, error) {
+func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) (result *Download, resultErr error) {
+	if err := checkRecoveryContext(ctx); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := checkRecoveryContext(ctx); err != nil {
+			result, resultErr = nil, err
+		}
+	}()
 	if err := validateFile(e.File); err != nil {
 		return nil, err
 	}
@@ -592,6 +600,9 @@ func (s *Service) Resolve(ctx context.Context, ctl *controller.Controller, req *
 		return cached, nil
 	}
 	download, err := p.Resolve(ctx, NewAPIClient(ctl, req, p.Info(), ss), ss, e.Source, e.File)
+	if currentErr := checkRecoveryContext(ctx); currentErr != nil {
+		return nil, currentErr
+	}
 	if err == nil {
 		s.rememberSessionCache(ss, e.Source)
 	}

@@ -99,7 +99,7 @@ func NewAPIClient(ctl *controller.Controller, req *base.Request, info model.Prov
 			}
 		}
 	}
-	c := &APIClient{Hosts: hosts, Client: &http.Client{Transport: tr, Jar: jar, Timeout: 35 * time.Second}}
+	c := &APIClient{Hosts: hosts, Client: &http.Client{Transport: recoveryAPITransport{tr}, Jar: jar, Timeout: 35 * time.Second}}
 	if ctl != nil && ctl.Budget != nil {
 		c.budget, c.source = ctl.Budget, apiSource(info, s)
 	}
@@ -158,6 +158,9 @@ func SeedCookies(jar http.CookieJar, cookies []model.Cookie, hosts []string) {
 }
 
 func (c *APIClient) Do(ctx context.Context, method, raw string, body []byte, headers map[string]string) (*http.Response, error) {
+	if err := checkRecoveryContext(ctx); err != nil {
+		return nil, err
+	}
 	u, err := url.Parse(raw)
 	if err != nil || !c.Allowed(u) {
 		return nil, fmt.Errorf("不支持的网盘接口地址")
@@ -187,6 +190,12 @@ func (c *APIClient) Do(ctx context.Context, method, raw string, body []byte, hea
 		defer release()
 	}
 	res, err := c.Client.Do(r)
+	if currentErr := checkRecoveryContext(ctx); currentErr != nil {
+		if res != nil {
+			res.Body.Close()
+		}
+		return nil, currentErr
+	}
 	if err != nil {
 		return nil, Fail("network_error", "网盘接口请求失败，请检查网络或代理")
 	}
@@ -226,6 +235,18 @@ func (c *APIClient) Do(ctx context.Context, method, raw string, body []byte, hea
 		return nil, Fail("api_error", fmt.Sprintf("网盘接口返回 HTTP %d", res.StatusCode))
 	}
 	return res, nil
+}
+
+// Interactive provider calls have no lease. A Task call must preserve the
+// caller's parent context; a late API result cannot revive a cancelled run.
+func checkRecoveryContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if lease := transfer.RecoveryLeaseFromContext(ctx); lease != nil {
+		return lease.Check()
+	}
+	return nil
 }
 func (c *APIClient) JSON(ctx context.Context, method, raw string, body any, headers map[string]string, out any) error {
 	var data []byte
