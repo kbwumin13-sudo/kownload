@@ -254,6 +254,17 @@ func checkCreationAssociationFrom(reader datasetReader, t *Task) error {
 	}
 	ref := link.Ref
 	if ref.Version == 2 && ref.Namespace == MCPWriteNamespace {
+		if t.MCPWrite == nil {
+			return ErrOperationConflict
+		}
+		// Startup also passes concrete Storage. R2 needs one real same-D
+		// view; Mem's ordinary Get is not a raw JSON snapshot interface.
+		if store, ok := reader.(Storage); ok {
+			return withDatasetReadView(store, t.MCPWrite.CreationBinding.DatasetID, func(view datasetReader) error {
+				_, _, err := readMCPWriteTask(view, t.ID)
+				return err
+			})
+		}
 		_, _, err := readMCPWriteTask(reader, t.ID)
 		return err
 	}
