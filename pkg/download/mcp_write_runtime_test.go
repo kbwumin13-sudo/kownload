@@ -83,6 +83,10 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 	var webhooks atomic.Int32
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { webhooks.Add(1); w.WriteHeader(204) }))
 	defer webhook.Close()
+	scriptPath := filepath.Join(rootBase, "effect.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nprintf unexpected > \"$0.ran\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	dbPath := filepath.Join(rootBase, "state.db")
 	var d *Downloader
 	defer func() {
@@ -120,6 +124,15 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err = core.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := core.GetConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Script = &base.ScriptConfig{Enable: true, Paths: []string{scriptPath}}
+		cfg.Webhook = &base.WebhookConfig{Enable: true, URLs: []string{webhook.URL}}
+		if err := core.PutConfig(cfg); err != nil {
 			t.Fatal(err)
 		}
 		return core
@@ -206,5 +219,8 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 	}
 	if d.MCPTaskEffectAllowed(final, "script") || d.MCPTaskEffectAllowed(final, "webhook") || d.MCPTaskEffectAllowed(final, "auto_open") || webhooks.Load() != 0 {
 		t.Fatal("default MCP effects were enabled")
+	}
+	if _, err := os.Stat(scriptPath + ".ran"); !os.IsNotExist(err) {
+		t.Fatal("MCP executed a globally enabled script", err)
 	}
 }
