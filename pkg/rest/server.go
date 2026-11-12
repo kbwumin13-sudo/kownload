@@ -108,10 +108,20 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	}
 	downloadCfg.StorageDir = startCfg.StorageDir
 	downloadCfg.Init()
-	Downloader = download.NewDownloader(downloadCfg)
-	if err := Downloader.Setup(); err != nil {
+	core := download.NewDownloader(downloadCfg)
+	built := false
+	defer func() {
+		if !built {
+			_ = core.Close()
+		}
+	}()
+	if err := configureMCPWriteStartup(core, startCfg); err != nil {
 		return nil, nil, err
 	}
+	if err := core.Setup(); err != nil {
+		return nil, nil, err
+	}
+	Downloader = core
 
 	if startCfg.Network == "unix" {
 		util.SafeRemove(startCfg.Address)
@@ -132,6 +142,9 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	var r = mux.NewRouter()
 	r.Methods(http.MethodGet).Path("/api/v1/info").HandlerFunc(Info)
 	registerDatasetCatalogRoutes(r, Downloader)
+	if startCfg.Network == "unix" {
+		registerMCPWriteRoutes(r, core)
+	}
 	registerScopedBatchOperationRoutes(r, Downloader)
 	registerVerifiedHTTPRoutes(r, verifiedHTTPAdapter{core: Downloader})
 	registerVerifiedHTTPEventRoutes(r, verifiedHTTPEventsAdapter{core: Downloader})
@@ -295,6 +308,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 		handlers.AllowedOrigins([]string{"*"}),
 		handlers.AllowCredentials(),
 	)(r)}
+	built = true
 	return srv, listener, nil
 }
 
