@@ -79,6 +79,9 @@ func mcpWriteStoreError(err error) error {
 	return mcpWriteErr(MCPWriteStorageUnavailable)
 }
 
+var mcpTaskIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var mcpEpisodePattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
 var mcpPolicyPattern = regexp.MustCompile(`^mcp-authority-v1:[0-9a-f]{64}$`)
 var mcpNetworkPattern = regexp.MustCompile(`^mcp-network/v1:[0-9a-f]{64}$`)
 
@@ -86,7 +89,7 @@ func mcpWriteName(s string) bool {
 	return s != "" && s != "." && s != ".." && len(s) <= 255 && !strings.ContainsAny(s, "/\\\x00") && filepath.Base(s) == s
 }
 func mcpWriteTargetValid(t MCPWriteTarget) bool {
-	return len(t.Episode) <= 64 && operationIDPattern.MatchString(t.Episode) && t.Generation > 0 && t.Generation <= 9007199254740991 && t.SourceRevision > 0 && t.SourceRevision <= 9007199254740991
+	return mcpEpisodePattern.MatchString(t.Episode) && t.Generation > 0 && t.Generation <= 9007199254740991 && t.SourceRevision > 0 && t.SourceRevision <= 9007199254740991
 }
 func mcpWriteCommandValid(c MCPWriteRequest) bool {
 	if c.Version != 1 || !datasetIDPattern.MatchString(c.DatasetID) || !mcpPolicyPattern.MatchString(c.PolicyID) || !operationIDPattern.MatchString(c.OperationID) {
@@ -100,7 +103,7 @@ func mcpWriteCommandValid(c MCPWriteRequest) bool {
 		u, e := url.Parse(c.Create.URL)
 		return e == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil
 	case MCPWritePause, MCPWriteResume:
-		return c.Create == nil && c.Action != nil && operationIDPattern.MatchString(c.Action.TaskID) && mcpWriteTargetValid(c.Action.Expected)
+		return c.Create == nil && c.Action != nil && mcpTaskIDPattern.MatchString(c.Action.TaskID) && mcpWriteTargetValid(c.Action.Expected)
 	}
 	return false
 }
@@ -170,7 +173,7 @@ func (r *mcpWriteRecord) valid() bool {
 		return false
 	}
 	if r.Kind == MCPWriteCreate {
-		if r.Binding.PreserveGUI || r.Member == nil || r.Member.Index != 0 || !operationIDPattern.MatchString(r.Member.TaskID) || !mcpWriteStateValid(r.Member.TaskState) || r.Member.TaskState.OperationID != r.Command.OperationID || !reflect.DeepEqual(r.Member.TaskState.CreationBinding, r.Binding) || r.Binding.Root.RootID != r.Command.Create.OutputRootID || r.Binding.FileName != r.Command.Create.FileName {
+		if r.Binding.PreserveGUI || r.Member == nil || r.Member.Index != 0 || !mcpTaskIDPattern.MatchString(r.Member.TaskID) || !mcpWriteStateValid(r.Member.TaskState) || r.Member.TaskState.OperationID != r.Command.OperationID || !reflect.DeepEqual(r.Member.TaskState.CreationBinding, r.Binding) || r.Binding.Root.RootID != r.Command.Create.OutputRootID || r.Binding.FileName != r.Command.Create.FileName {
 			return false
 		}
 		if r.Member.State != "pending" && r.Member.State != "created" {
@@ -188,9 +191,9 @@ func (r *mcpWriteRecord) valid() bool {
 			return false
 		}
 		if result.Outcome == MCPWriteRejected {
-			return result.ErrorCode != nil && result.ErrorCode.Valid() && (result.TaskID == nil || operationIDPattern.MatchString(*result.TaskID)) && (r.Member == nil || r.Member.State == "pending")
+			return result.ErrorCode != nil && result.ErrorCode.Valid() && (result.TaskID == nil || mcpTaskIDPattern.MatchString(*result.TaskID)) && (r.Member == nil || r.Member.State == "pending")
 		}
-		if result.TaskID == nil || !operationIDPattern.MatchString(*result.TaskID) || result.ErrorCode != nil {
+		if result.TaskID == nil || !mcpTaskIDPattern.MatchString(*result.TaskID) || result.ErrorCode != nil {
 			return false
 		}
 		if r.Kind == MCPWriteCreate {
@@ -236,12 +239,15 @@ func readMCPWriteTask(reader datasetReader, id string) (*Task, mcpWriteRecord, e
 	if err != nil {
 		return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteStorageUnavailable)
 	}
-	if !present {
+	if !present || task.ID != id {
 		return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
 	}
 	mcpLink := linked && (link.Ref.Namespace == MCPWriteNamespace || link.Ref.Version == 2)
 	mcpRef := task.CreationOperation != nil && (task.CreationOperation.Namespace == MCPWriteNamespace || task.CreationOperation.Version == 2)
 	if task.MCPWrite == nil && !mcpLink && !mcpRef {
+		if err := checkCreationAssociationFrom(reader, task); err != nil {
+			return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
+		}
 		return task, mcpWriteRecord{}, nil
 	}
 	if task.MCPWrite == nil || !linked || !mcpRef || task.CreationOperation == nil || link.TaskID != id || link.Ref != *task.CreationOperation || link.Ref.Version != 2 || link.Ref.Namespace != MCPWriteNamespace || link.Ref.Index != 0 || !mcpWriteStateValid(*task.MCPWrite) {
@@ -252,10 +258,10 @@ func readMCPWriteTask(reader datasetReader, id string) (*Task, mcpWriteRecord, e
 	if err != nil {
 		return nil, mcpWriteRecord{}, err
 	}
-	if r == nil || r.Kind != MCPWriteCreate || r.Member == nil || r.Member.State != "created" || r.Member.TaskID != id || link.Ref.OperationID != s.OperationID || !reflect.DeepEqual(r.Member.TaskState, *s) || task.Protocol != "http" || task.Meta == nil || task.Meta.Req == nil || task.Meta.Opts == nil || task.Meta.Opts.Path != s.CreationBinding.Root.Path || task.Meta.Opts.Name != s.CreationBinding.FileName {
+	if r == nil || r.Kind != MCPWriteCreate || r.Member == nil || r.Member.State != "created" || r.Member.TaskID != id || link.Ref.OperationID != s.OperationID || !reflect.DeepEqual(r.Member.TaskState, *s) || task.Protocol != "http" || task.Meta == nil || task.Meta.Req == nil || task.Meta.Opts == nil || task.Meta.Req.URL != r.Command.Create.URL || task.Meta.Opts.Path != s.CreationBinding.Root.Path || task.Meta.Opts.Name != s.CreationBinding.FileName {
 		return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
 	}
-	if task.Status == base.DownloadStatusDone && s.Output.Phase != MCPWriteOutputPublished {
+	if (task.Status == base.DownloadStatusDone) != (s.Output.Phase == MCPWriteOutputPublished) {
 		return nil, mcpWriteRecord{}, mcpWriteErr(MCPWriteTaskUnavailable)
 	}
 	return task, *r, nil
@@ -593,8 +599,12 @@ func rejectMCPWrite(store AtomicStorage, dataset string, expected mcpWriteRecord
 	if store == nil || !expected.valid() || !code.Valid() {
 		return MCPWriteReceipt{}, mcpWriteErr(MCPWriteInvalidRequest)
 	}
+	expected, err := cloneOperationJSON(expected)
+	if err != nil {
+		return MCPWriteReceipt{}, mcpWriteErr(MCPWriteInvalidRequest)
+	}
 	var receipt MCPWriteReceipt
-	err := store.UpdateAtomic(func(tx StorageTransaction) error {
+	err = store.UpdateAtomic(func(tx StorageTransaction) error {
 		r, err := mcpWriteRecordCAS(tx, dataset, expected)
 		if err != nil {
 			return err
