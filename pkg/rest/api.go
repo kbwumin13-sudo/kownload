@@ -220,6 +220,14 @@ func GetConfig(w http.ResponseWriter, r *http.Request) {
 func PutConfig(w http.ResponseWriter, r *http.Request) {
 	var cfg base.DownloaderStoreConfig
 	if ReadJson(r, w, &cfg) {
+		previous, err := Downloader.GetConfig()
+		if err == nil {
+			err = preparePathPolicyConfigUpdate(previous, &cfg)
+		}
+		if err != nil {
+			WriteJson(w, model.NewErrorResult("path_policy_unavailable"))
+			return
+		}
 		if err := Downloader.PutConfig(&cfg); err != nil {
 			WriteJson(w, model.NewErrorResult(err.Error()))
 			return
