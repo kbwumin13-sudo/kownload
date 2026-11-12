@@ -135,10 +135,19 @@ func (f *Fetcher) BindPathFreezeExecution(execution *transfer.PathFreezeExecutio
 		return transfer.ErrRecoveryHeld
 	}
 	expected := cloneMediaPathLayout(f.pathLayout)
+	// The first durable rule decision may relocate the root. Core must have
+	// applied that exact F root to Meta before issuing this known-ACK binding.
+	// Compare the full relative layout after changing only this owned root;
+	// members, names, selections and the work basename cannot be rewritten here.
+	if f.meta == nil || f.meta.Opts == nil || f.meta.Opts.Path != layout.ParentRoot {
+		return transfer.ErrRecoveryHeld
+	}
+	expected.Layout.ParentRoot = layout.ParentRoot
 	candidate := &mediaPathLayout{OwnerID: execution.OwnerID(), Layout: layout, WorkDirectory: expected.WorkDirectory}
 	if !sameMediaPathLayout(expected, candidate) || execution.WorkPath() != filepath.Join(layout.ParentRoot, expected.WorkDirectory) {
 		return transfer.ErrRecoveryHeld
 	}
+	f.pathLayout = expected
 	f.pathExecution = execution
 	return nil
 }

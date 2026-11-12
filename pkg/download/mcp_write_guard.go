@@ -8,7 +8,7 @@ import (
 
 func mcpTaskPresence(task *Task) bool {
 	return task != nil && (task.MCPWrite != nil || task.CreationOperation != nil &&
-		(task.CreationOperation.Version == 2 || task.CreationOperation.Namespace == MCPWriteNamespace))
+		task.CreationOperation.Namespace == MCPWriteNamespace)
 }
 
 // This check does not borrow or open a root. The existing creation association

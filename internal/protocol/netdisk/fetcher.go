@@ -109,29 +109,30 @@ type fetcherView struct {
 }
 
 type Fetcher struct {
-	pathFreeze    atomic.Pointer[frozenPath]
-	recovery      atomic.Pointer[transfer.RecoveryLease]
-	runController atomic.Pointer[controller.Controller]
-	viewMu        sync.RWMutex
-	view          fetcherView
-	mu            sync.Mutex
-	cancelMu      sync.Mutex
-	service       *cloud.Service
-	ctl           *controller.Controller
-	meta          *fetcher.FetcherMeta
-	child         *httpfetch.Fetcher
-	resume        *saved
-	downloaded    int64
-	refresh       bool
-	operation     uint64 // mu; rejects results from a cancelled/replaced operation
-	resolving     bool
-	resolveDone   chan struct{}
-	running       bool
-	closed        bool
-	cancel        context.CancelFunc
-	done          chan error
-	runDone       chan struct{}
-	phase         string
+	pathFreeze         atomic.Pointer[frozenPath]
+	recovery           atomic.Pointer[transfer.RecoveryLease]
+	runController      atomic.Pointer[controller.Controller]
+	viewMu             sync.RWMutex
+	view               fetcherView
+	mu                 sync.Mutex
+	cancelMu           sync.Mutex
+	service            *cloud.Service
+	ctl                *controller.Controller
+	meta               *fetcher.FetcherMeta
+	child              *httpfetch.Fetcher
+	resume             *saved
+	downloaded         int64
+	refresh            bool
+	completedOperation uint64 // mu; success eligible for the one Core post-commit callback
+	operation          uint64 // mu; rejects results from a cancelled/replaced operation
+	resolving          bool
+	resolveDone        chan struct{}
+	running            bool
+	closed             bool
+	cancel             context.CancelFunc
+	done               chan error
+	runDone            chan struct{}
+	phase              string
 	// Time the latest link resolution took (取链), for Stats.
 	linkTime time.Duration
 }
@@ -530,7 +531,7 @@ func (f *Fetcher) Start() error {
 		if f.checkRunResult(ctx, operation, err) != nil {
 			return
 		}
-		if err == nil {
+		if err == nil && f.pathFreeze.Load() == nil {
 			cleanctx, c := context.WithTimeout(ctx, 40*time.Second)
 			if ctl, ctlErr := f.controllerForContext(cleanctx); ctlErr == nil {
 				f.service.Complete(cleanctx, ctl, f.meta.Req, e)
@@ -548,6 +549,9 @@ func (f *Fetcher) Start() error {
 		}
 		if err == nil {
 			f.phase = "已完成"
+			if f.pathFreeze.Load() != nil {
+				f.completedOperation = operation
+			}
 		} else {
 			f.phase = "下载失败"
 			if _, deferred := transfer.AsDeferred(err); deferred {

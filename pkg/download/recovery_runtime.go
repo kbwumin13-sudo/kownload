@@ -51,7 +51,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 	defer o.mu.Unlock()
 	var committed recoveryRecord
 	err := o.store.UpdateAtomic(func(tx StorageTransaction) error {
-		_, record, err := readRecovery(tx, o.taskID)
+		current, record, err := readRecovery(tx, o.taskID)
 		if err != nil {
 			return err
 		}
@@ -60,6 +60,9 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		}
 		if snapshot.ID != o.taskID || !recoveryProtocolCompatible(snapshot.Protocol, record.Version) || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
+		}
+		if err := guardPathSnapshot(&current, snapshot); err != nil {
+			return err
 		}
 		if err := guardCompletionSnapshot(tx, snapshot); err != nil {
 			return err
@@ -224,7 +227,7 @@ func (o *taskRecoveryOwner) markCleanPaused() error {
 func invalidateDeletedRun(task *Task) {
 	cancelVerifiedSuccess(task)
 	invalidateTaskRecovery(task)
-	if task.Protocol == "http" || parentRecoveryProtocol(task.Protocol) {
+	if task.Protocol == "http" || parentRecoveryProtocol(task.Protocol) || task.PathFreeze != nil {
 		if cancel := task.recoveryRunCancel.Load(); cancel != nil {
 			(*cancel)()
 		}

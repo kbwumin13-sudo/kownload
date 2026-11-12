@@ -385,14 +385,15 @@ func (f *Fetcher) Start() error {
 	f.recoveryEpoch++
 	done := make(chan struct{})
 	f.runDone = done
+	result := f.done
 	f.mu.Unlock()
 	go func() {
-		_ = f.startMediaRun(ctx, cancel, req, opts, ctl, cfg, needsResolve, done)
+		_ = f.startMediaRun(ctx, cancel, req, opts, ctl, cfg, needsResolve, done, result)
 	}()
 	return nil
 }
 
-func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, req *base.Request, opts *base.Options, ctl *controller.Controller, cfg model.Config, needsResolve bool, done chan struct{}) (runErr error) {
+func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, req *base.Request, opts *base.Options, ctl *controller.Controller, cfg model.Config, needsResolve bool, done chan struct{}, result chan error) (runErr error) {
 	launched := false
 	defer func() {
 		if !launched {
@@ -404,7 +405,7 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 			f.mu.Unlock()
 			if runErr != nil && !wasCancelled {
 				select {
-				case f.done <- runErr:
+				case result <- runErr:
 				default:
 				}
 			}
@@ -531,11 +532,11 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	f.cmd, f.running, f.starting, f.phase = cmd, true, false, "download"
 	f.mu.Unlock()
 	launched = true
-	go f.run(ctx, cmd, stdout, stderr, target, workPrefix, extra, cfg, execution, cleanup, cancel)
+	go f.run(ctx, cmd, stdout, stderr, target, workPrefix, extra, cfg, execution, cleanup, cancel, done, result)
 	return nil
 }
 
-func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Reader, target, workPrefix string, extra *model.ReqExtra, cfg model.Config, execution *transfer.PathFreezeExecution, cleanup func(), cancel context.CancelFunc) {
+func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Reader, target, workPrefix string, extra *model.ReqExtra, cfg model.Config, execution *transfer.PathFreezeExecution, cleanup func(), cancel context.CancelFunc, runDone chan struct{}, result chan error) {
 	var finalPath string
 	var errorTail boundedTail
 	var scanWG sync.WaitGroup
@@ -638,11 +639,10 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 	cancel()
 	f.mu.Lock()
 	f.cmd, f.stop, f.running = nil, nil, false
-	runDone := f.runDone
 	f.mu.Unlock()
 	if !paused {
 		select {
-		case f.done <- err:
+		case result <- err:
 		default:
 		}
 	}
@@ -938,7 +938,12 @@ func (f *Fetcher) Progress() fetcher.Progress {
 	defer f.mu.Unlock()
 	return fetcher.Progress{f.downloaded}
 }
-func (f *Fetcher) Wait() error { return <-f.done }
+func (f *Fetcher) Wait() error {
+	f.mu.Lock()
+	done := f.done
+	f.mu.Unlock()
+	return <-done
+}
 
 // Publish selected sidecars beside the final media, including when embedding was disabled.
 func moveSubtitleFiles(prefix, target string) error {

@@ -44,8 +44,8 @@ type BrowserDownloadState struct {
 	Error string `json:"error"`
 }
 type BrowserHandoffRequest struct {
-	PathCreate *HTTPPathCreateRequest `json:"pathCreate,omitempty"`
-	DatasetID string `json:"datasetId,omitempty"`
+	PathCreate      *HTTPPathCreateRequest `json:"pathCreate,omitempty"`
+	DatasetID       string                 `json:"datasetId,omitempty"`
 	Action          string                 `json:"action"`
 	OperationID     string                 `json:"operationId"`
 	ClientID        string                 `json:"clientId"`
@@ -60,22 +60,22 @@ type BrowserHandoffRequest struct {
 	Pending         bool                   `json:"pending,omitempty"`
 }
 type BrowserPathHandoffProjection struct {
-	Version int `json:"version"`
-	DatasetID string `json:"datasetId"`
-	Kind string `json:"kind"`
+	Version              int      `json:"version"`
+	DatasetID            string   `json:"datasetId"`
+	Kind                 string   `json:"kind"`
 	RequiredCapabilities []string `json:"requiredCapabilities"`
 }
 
 type BrowserHandoffResult struct {
-	PathCreate *BrowserPathHandoffProjection `json:"pathCreate,omitempty"`
-	Version     int                     `json:"version"`
-	OperationID string                  `json:"operationId"`
-	State       string                  `json:"state"`
-	TaskID      string                  `json:"taskId,omitempty"`
-	TaskIDs     []string                `json:"taskIds"`
-	Download    *BrowserDownloadBinding `json:"download,omitempty"`
-	Reason      string                  `json:"reason,omitempty"`
-	TaskStatus  base.Status             `json:"taskStatus,omitempty"`
+	PathCreate  *BrowserPathHandoffProjection `json:"pathCreate,omitempty"`
+	Version     int                           `json:"version"`
+	OperationID string                        `json:"operationId"`
+	State       string                        `json:"state"`
+	TaskID      string                        `json:"taskId,omitempty"`
+	TaskIDs     []string                      `json:"taskIds"`
+	Download    *BrowserDownloadBinding       `json:"download,omitempty"`
+	Reason      string                        `json:"reason,omitempty"`
+	TaskStatus  base.Status                   `json:"taskStatus,omitempty"`
 }
 
 func (t *Task) handoffHeld() bool {
@@ -152,6 +152,9 @@ func (d *Downloader) BrowserHandoff(r BrowserHandoffRequest) (BrowserHandoffResu
 	task := d.findHandoff(r.OperationID)
 	if task != nil && !handoffMatches(task, r) {
 		return result, ErrHandoffConflict
+	}
+	if r.PathCreate != nil || r.DatasetID != "" || task != nil && task.PathFreeze != nil {
+		return d.browserPathHandoff(r, task)
 	}
 	switch r.Action {
 	case "prepare":
@@ -313,7 +316,15 @@ func (d *Downloader) PendingBrowserHandoffs(clientID, browser string) ([]Browser
 		match := h != nil && h.ClientID == clientID && h.Browser == browser && h.Phase == "prepared"
 		task.dataLock.RUnlock()
 		if match {
-			out = append(out, handoffResult(task, h.OperationID))
+			if task.PathFreeze != nil {
+				stored, _, projection, err := d.readBrowserPathHandoff(BrowserHandoffRequest{Action: "query", ClientID: clientID, Browser: browser, OperationID: h.OperationID})
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, browserPathResult(stored, h.OperationID, projection))
+			} else {
+				out = append(out, handoffResult(task, h.OperationID))
+			}
 		}
 	}
 	return out, nil
