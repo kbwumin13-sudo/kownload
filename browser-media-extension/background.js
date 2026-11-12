@@ -257,6 +257,7 @@ async function create(item,options = {}) {
     const savedOperation=state.operations?.[mark];
     let operationId = typeof savedOperation==='string' ? savedOperation : savedOperation?.operationId || '';
     let bridgeBinding=savedOperation?.bridgeBinding;
+    let pathKind=savedOperation?.pathKind || '';
     const started = Date.now(),domain = siteOf(options.imageUrl || item.url);
     const trace = (stage,errorCategory = '') => {
       if (typeof console !== 'undefined') console.info('kownload submission', {operationId,stage,errorCategory,elapsedMs:Date.now()-started,domain});
@@ -265,7 +266,7 @@ async function create(item,options = {}) {
       const latest = await read();
       latest.operations ||= {};
       const previous=latest.operations[mark];
-      const pending=id ? {version:1,operationId:id,bridgeBinding} : undefined;
+      const pending=id ? {version:1,operationId:id,bridgeBinding,...(pathKind ? {pathKind} : {})} : undefined;
       if (id) latest.operations[mark] = pending;
       else if ((typeof latest.operations[mark]==='string' ? latest.operations[mark] : latest.operations[mark]?.operationId) === operationId) delete latest.operations[mark];
       try {await write(latest,item.tabId,true);} catch(error) {
@@ -286,10 +287,19 @@ async function create(item,options = {}) {
       const req = await selectedRequest(imageUrl ? {...item,url:imageUrl} : item);
       if (!(await read()).items[item.id]) throw new Error('资源已失效，请重新捕获');
       const media = usesMedia(item);
+      const pathCreate = options.pathCreate;
+      if (pathCreate && (!media || typeof pathCreate.sessionId !== 'string' || !pathCreate.sessionId ||
+          typeof pathCreate.commandId !== 'string' || !pathCreate.commandId)) throw bridgeFailure('invalid_request');
       const extra = media ? mediaExtra(req,{format,mediaKind,container:options.container || '',subtitleLanguages:options.subtitleLanguages || [],writeAutomaticSubtitles:!!options.writeAutomaticSubtitles,embedSubtitles:!!options.embedSubtitles}) : {header:req.header,sourcePage:req.sourcePage};
       const payload = {req:{url:req.url,...(media ? {protocol:'media'} : {}),extra},opts:{name:options.name || '',path:options.path || ''}};
       const query = async () => {
         await nativeBinding(chrome,bridgeBinding);
+        if (pathKind === 'media-path-create/v1') {
+          // A prior uncertain path operation never returns through legacy
+          // creation, even after the App or extension has restarted.
+          return nativeSubmission(await native({method:'mediaPathQuery',operationId,bridgeBinding,params:{}},false,true),operationId);
+        }
+        if (pathKind) throw bridgeFailure('submission_unknown');
         const data=await appBridge.request('submission',{operationId},bridgeBinding);
         if(data?.state==='created' && Array.isArray(data.taskIds) && data.taskIds.length && data.taskIds.every(id=>typeof id==='string' && id.trim())) {
           return {state:'created',taskIds:data.taskIds,taskId:data.taskIds[0],operationId};
@@ -301,7 +311,8 @@ async function create(item,options = {}) {
       const submit = async () => {
         trace('assistant_submit');sent=true;
         try {
-          return nativeSubmission(await native({method:'create',operationId,bridgeBinding,meta:{silent:true},params:payload},false,true),operationId);
+          return nativeSubmission(await native({method:pathKind ? 'mediaPathCreate' : 'create',operationId,bridgeBinding,
+            meta:{silent:true,...(pathKind ? {sessionId:pathCreate.sessionId,commandId:pathCreate.commandId} : {})},params:payload},false,true),operationId);
         } catch(error) {
           if(!['resend','unknown'].includes(submissionOutcome(error)))throw error;
           trace('assistant_query',error.category);
@@ -316,11 +327,15 @@ async function create(item,options = {}) {
       if (operationId) {
         if(savedOperation?.version!==1 || !validBridgeBinding(bridgeBinding))throw bridgeFailure('binding_required');
         result=await query();
-        if(result.state==='cancelled'){await remember('');result=undefined;}
+        if(result.state==='cancelled'){
+          if(pathCreate || pathKind) throw bridgeFailure('submission_cancelled');
+          await remember('');result=undefined;
+        }
       }
       if (!result) {
         operationId = newOperationId();
         bridgeBinding=Object.freeze(await nativeBinding(chrome));
+        pathKind=pathCreate ? 'media-path-create/v1' : '';
         await remember(operationId);
         result = await submit();
       }

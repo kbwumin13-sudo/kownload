@@ -109,7 +109,14 @@ export function createAppMediaBridge(browser,appBridge,{call,preview,pollMs=500}
     if (!item || s.scope.mode === 'single' && item.id !== s.scope.target) throw new Error(FAILURE);
     if (command.type === 'INSPECT') return inspect(s,item);
     if (command.type === 'RECOVERABLE') return call(message(s,command.type,item.id));
-    return call(message(s,command.type,item.id,options(s,item,command.options || {})));
+    const chosen = options(s,item,command.options || {});
+    if (command.pathFreeze === true) {
+      if (command.type !== 'CREATE' || item.kind === 'image') throw new Error(FAILURE);
+      // Only the App's pending command supplies this correlation. Raw page
+      // options cannot install provenance or a path capability.
+      chosen.pathCreate = {sessionId:s.id,commandId:command.id};
+    }
+    return call(message(s,command.type,item.id,chosen));
   }
   async function stop(s,notify) {
     if (s.closed) return;
@@ -165,7 +172,7 @@ export function createAppMediaBridge(browser,appBridge,{call,preview,pollMs=500}
       const items = await summary(await list(s));
       await frame(s.scope);
       if (s.closed) throw new Error(FAILURE);
-      await appBridge.request('mediaOpen',{...identity,sessionId:s.id,view:scope.mode,site:scope.site,items});
+      await appBridge.request('mediaOpen',{...identity,sessionId:s.id,view:scope.mode,site:scope.site,items,pathFreezeVersion:1});
       if (s.closed) {
         await appBridge.request('mediaResult',{sessionId:s.id,closed:true,error:FAILURE}).catch(() => {});
         throw new Error(FAILURE);

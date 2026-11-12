@@ -53,6 +53,21 @@ test('App command scope and request-header forgeries cannot override the frozen 
  assert.equal(create.options.header,undefined);assert.equal(create.options.url,undefined);assert.equal(create.options.name,'kept');
  const wrong=await f.send({type:'CREATE',itemId:'b',options:{}});assert.equal(wrong.ok,false);assert.equal(f.calls.filter(c=>c.type==='CREATE').length,1);
 });
+test('path creation carries only the live App command and keeps original track selection',async t=>{
+ const f=await fixture(t,{items:[video]});await f.open();
+ assert.equal(f.requests.find(r=>r.action==='mediaOpen').params.pathFreezeVersion,1);
+ await f.send({type:'INSPECT',itemId:'a'});
+ const reply=await f.send({type:'CREATE',itemId:'a',pathFreeze:true,
+   options:{format:'v+en',path:'/owned',name:'chosen.mp4',pathIntent:{origin:'rule'},pathCreate:{sessionId:'forged',commandId:'forged'}}});
+ assert.equal(reply.ok,true);
+ const create=f.calls.find(c=>c.type==='CREATE');
+ const open=f.requests.find(r=>r.action==='mediaOpen').params;
+ assert.deepEqual(create.options.pathCreate,{sessionId:open.sessionId,commandId:reply.commandId});
+ assert.equal(create.options.pathIntent,undefined);
+ assert.equal(create.options.format,'v+en');
+ assert.equal(create.options.path,'/owned');
+ assert.equal(create.options.name,'chosen.mp4');
+});
 test('identify keeps player/document scope through inspect, create and enhanced search',async t=>{
  const f=await fixture(t,{mode:'identify',items:[video]});await f.open();
  assert.equal((await f.send({type:'INSPECT',itemId:'a'})).ok,true);

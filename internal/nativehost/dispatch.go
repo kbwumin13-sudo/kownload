@@ -127,7 +127,21 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "request_failed", nil, nil)
 		}
 		return interpret(req, status, reply, false)
-	case "create", "forward":
+	case "create", "forward", "mediaPathCreate", "mediaPathQuery":
+		mediaPath := req.Method == "mediaPathCreate" || req.Method == "mediaPathQuery"
+		if mediaPath {
+			// This App-confirmed route has no legacy envelope or host fallback.
+			if req.OperationID == "" || req.IdentityProtocol == nil || req.BridgeBinding == nil {
+				return failure(req.OperationID, "binding_required", nil, nil)
+			}
+			if req.Method == "mediaPathCreate" {
+				session, sOK := req.Meta["sessionId"].(string)
+				command, cOK := req.Meta["commandId"].(string)
+				if !sOK || !cOK || !operationID.MatchString(session) || !operationID.MatchString(command) {
+					return failure(req.OperationID, "invalid_request", nil, nil)
+				}
+			}
+		}
 		// The official Gopeed extension sends create params as a base64 JSON
 		// string. Normalize this legacy envelope before validating/forwarding;
 		// forward requests still require the structured REST envelope.
@@ -145,7 +159,10 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 		if json.Unmarshal(req.Params, &object) != nil || object == nil {
 			return failure(req.OperationID, "invalid_request", nil, nil)
 		}
-		creation := req.Method == "create"
+		if req.Method == "mediaPathQuery" && len(object) != 0 {
+			return failure(req.OperationID, "invalid_request", nil, nil)
+		}
+		creation := req.Method == "create" || req.Method == "mediaPathCreate"
 		budget := 10 * time.Second
 		if req.Method == "forward" {
 			var forward struct {
@@ -158,7 +175,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			creation = forward.Method == "POST" && (strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks" || strings.TrimSuffix(forward.Path, "/") == "/api/v1/tasks/batch")
 			budget = 60 * time.Second
 		}
-		if req.Method == "create" {
+		if creation && req.Method != "forward" {
 			wake, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := d.Wakeup.Ensure(wake, silent)
 			cancel()

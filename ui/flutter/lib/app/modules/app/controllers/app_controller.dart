@@ -43,6 +43,7 @@ import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
 import '../../../services/browser_integration.dart';
+import '../../../services/media_path_submission.dart';
 import '../../../../identity/app_identity_rpc.dart';
 import '../../redirect/views/redirect_view.dart';
 import '../../../services/notification_service.dart';
@@ -209,6 +210,15 @@ class AppController extends GetxController with WindowListener, TrayListener {
           : '此下载仍由浏览器处理，未新建 kownload 任务。');
     }
     throw StateError('未收到浏览器的确认，请检查原下载后重试。');
+  }
+
+  Future<void> authorizeBrowserPathSubmission(CreateTask task) async {
+    final id = task.browserOperationId;
+    if (id == null || task.browserHandoff != null ||
+        _browserRpc?.confirmationStatus(id)['state'] != 'accepted') {
+      throw StateError('原捕获交接尚未确认，请查询原操作，勿重新创建。');
+    }
+    await authorizeBrowserConfirmation(id);
   }
 
   /// The task that is pending URL update via listen mode.
@@ -557,16 +567,33 @@ class AppController extends GetxController with WindowListener, TrayListener {
         socket: await Util.homePathJoin(AppIdentity.hostSocket),
         preview: Util.isIsolatedPreview,
       );
+      final mediaPath = MediaPathSubmission(
+        claim: browserIntegration.media.claimPathCreate,
+        ready: () => !Util.isMacos() || MacOnboarding.completed,
+      );
       await startRpcServer({
         "/identity": identityRpc.handle,
-        "/create": (ctx) => browserRpc.handle(
+        "/create": (ctx) async {
+          final params = await ctx.readJSON();
+          if (browserIntegration.media.hasPendingPathCreate &&
+              (params['req'] as Map?)?['protocol'] == 'media') {
+            final reply = BrowserRpcReply.failure(
+                ctx.request.headers[operationHeader]?.firstOrNull,
+                'path_confirmation_required', status: 409);
+            await ctx.writeJSON(reply.body, statusCode: reply.status);
+            return;
+          }
+          return browserRpc.handle(
               ctx,
               create: true,
               forceCaptureConfirmation:
                   Util.isMacos() && !MacOnboarding.completed,
               forceConfirmation: pendingUpdateTask.value != null ||
                   (Util.isMacos() && !MacOnboarding.completed),
-            ),
+            );
+        },
+        "/mediaPathCreate": (ctx) => mediaPath.handle(ctx, create: true),
+        "/mediaPathQuery": (ctx) => mediaPath.handle(ctx, create: false),
         "/forward": (ctx) => browserRpc.handle(ctx, create: false),
         "/browser": browserIntegration.handle,
       });
