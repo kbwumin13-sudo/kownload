@@ -1067,6 +1067,11 @@ func (d *Downloader) continueAll() (err error) {
 
 	for _, task := range continuedTasks {
 		if err = d.doStart(task); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				d.queueSharedUntil(task, deferred.Until)
+				err = nil
+				continue
+			}
 			return
 		}
 	}
@@ -1088,6 +1093,11 @@ func (d *Downloader) ContinueBatch(filter *TaskFilter) (err error) {
 	continueTasks := creationEligible(handoffEligible(d.getTasksByFilter(filter)))
 	for _, task := range continueTasks {
 		if err = d.doStart(task); err != nil {
+			if deferred, ok := transfer.AsDeferred(err); ok {
+				d.queueSharedUntil(task, deferred.Until)
+				err = nil
+				continue
+			}
 			return
 		}
 	}
