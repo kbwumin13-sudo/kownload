@@ -70,6 +70,8 @@ type PathFreezeExpected struct {
 	Meta                  *fetcher.FetcherMeta
 	SourceHash            string
 	ExecutionDefaultsHash string
+	CheckpointPresent     bool
+	CheckpointHash        string
 }
 type PathFreezePrepared struct {
 	ResolvedMeta *fetcher.FetcherMeta
@@ -77,4 +79,26 @@ type PathFreezePrepared struct {
 	Layout       pathpolicy.LayoutV1
 	LayoutHash   string
 	StagingName  string
+}
+
+// HTTPPathCapability is produced by the active Core, never by preview alone.
+type HTTPPathMethods struct {
+	Create  string `json:"create"`
+	Query   string `json:"query"`
+	Cancel  string `json:"cancel"`
+	Preview string `json:"preview"`
+}
+type HTTPPathCapability struct {
+	ScopeVersion         int             `json:"scopeVersion"`
+	DatasetID            string          `json:"datasetId"`
+	Kind                 string          `json:"kind"`
+	RequestVersion       int             `json:"requestVersion"`
+	Supported            bool            `json:"supported"`
+	RequiredCapabilities []string        `json:"requiredCapabilities"`
+	Methods              HTTPPathMethods `json:"methods"`
+}
+type HTTPPathOperationResult struct {
+	Operation            BatchOperationResult `json:"operation"`
+	RequiredCapabilities []string             `json:"requiredCapabilities"`
+	CompletionViews      []TaskCompletionView `json:"completionViews,omitempty"`
 }
