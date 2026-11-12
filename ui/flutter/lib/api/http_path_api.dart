@@ -5,6 +5,7 @@ import 'model/create_task_batch.dart';
 import 'model/http_path_create.dart';
 import 'model/task_batch_operation.dart';
 import 'model/task_batch_scope.dart';
+import 'model/task_batch_catalog.dart';
 import 'task_batch_api.dart';
 
 Object? _json(Object? value) {
@@ -28,12 +29,24 @@ class HttpPathApi extends ScopedTaskBatchApi {
       {required super.snapshot,
       required super.identity,
       required this.request});
-  String get _root => '/api/v1/datasets/${identity.datasetId}/http-path/v1';
-  Future<bool> supported({CancelToken? cancelToken}) async {
+  String get _root => '/api/v1/datasets/${identity.datasetId}/${request.variant.prefix}/v1';
+  Future<bool> supported({CancelToken? cancelToken}) => supportedFor(
+      snapshot: snapshot, identity: identity, variant: request.variant,
+      withIntegrity: request.expectedSHA256 != null, cancelToken: cancelToken);
+
+  /// A read-only probe before protocol prepare/capture. It grants no R, send
+  /// permission or IO. The actual frozen request is checked again at submit.
+  static Future<bool> supportedFor({required api.ActiveApiSnapshot snapshot,
+      required DatasetIdentity identity, required PathCreateVariant variant,
+      bool withIntegrity = false, CancelToken? cancelToken}) async {
+    if (!snapshot.isCurrent || !identity.supported || !identity.persistent ||
+        (withIntegrity && variant != PathCreateVariant.http)) return false;
+    final requiredCaps = [variant.capability,
+      if (withIntegrity) 'http-sha256-completion/v1'];
     final response = await api.scopedTaskBatchRequest(
-        snapshot, 'GET', '$_root/capability',
+        snapshot, 'GET', '/api/v1/datasets/${identity.datasetId}/${variant.prefix}/v1/capability',
         queryParameters:
-            request.expectedSHA256 == null ? null : {'integrity': 'sha256'},
+            withIntegrity ? {'integrity': 'sha256'} : null,
         cancelToken: cancelToken);
     final body = _json(response.data);
     if (!snapshot.isCurrent ||
@@ -46,11 +59,11 @@ class HttpPathApi extends ScopedTaskBatchApi {
     return data['scopeVersion'] is int &&
         data['scopeVersion'] == 1 &&
         data['datasetId'] == identity.datasetId &&
-        data['kind'] == httpPathCreateKind &&
+        data['kind'] == variant.kind &&
         data['requestVersion'] is int &&
         data['requestVersion'] == 1 &&
         data['supported'] == true &&
-        _sameCaps(data['requiredCapabilities'], request.requiredCapabilities) &&
+        _sameCaps(data['requiredCapabilities'], requiredCaps) &&
         methods is Map &&
         methods['create'] == 'POST' &&
         methods['query'] == 'GET' &&
@@ -71,7 +84,8 @@ class HttpPathApi extends ScopedTaskBatchApi {
         body['data'] is! Map) {
       throw const FormatException('path_preview_unavailable');
     }
-    return HttpPathPreview.fromJson(Map<String, dynamic>.from(body['data']));
+    return HttpPathPreview.fromJson(Map<String, dynamic>.from(body['data']),
+        variant: request.variant);
   }
 
   @override
@@ -105,6 +119,7 @@ class HttpPathApi extends ScopedTaskBatchApi {
           datasetId: identity.datasetId,
           operation: operation,
           action: action,
+          kind: request.variant.kind,
           requiredCapabilities: request.requiredCapabilities,
           statusCode: response.statusCode,
           body: _json(response.data),
@@ -114,6 +129,7 @@ class HttpPathApi extends ScopedTaskBatchApi {
           datasetId: identity.datasetId,
           operation: operation,
           action: action,
+          kind: request.variant.kind,
           requiredCapabilities: request.requiredCapabilities,
           transportFailure: error.type.name);
     }
@@ -122,11 +138,13 @@ class HttpPathApi extends ScopedTaskBatchApi {
 
 class HttpPathReply extends ScopedTaskBatchReply {
   final List<String> requiredCapabilities;
+  final String kind;
   HttpPathReply(
       {required super.datasetId,
       required super.operation,
       required super.action,
       required this.requiredCapabilities,
+      this.kind = httpPathCreateKind,
       super.statusCode,
       super.body,
       super.transportFailure});
@@ -134,7 +152,7 @@ class HttpPathReply extends ScopedTaskBatchReply {
   bool get scopeVerified {
     if (!super.scopeVerified) return false;
     final data = envelope.envelope!['data'] as Map;
-    if (data['kind'] != httpPathCreateKind) return false;
+    if (data['kind'] != kind) return false;
     if (_sameCaps(data['requiredCapabilities'], requiredCapabilities))
       return true;
     // No R exists yet. This narrowly validates a read-only absence response;
@@ -159,8 +177,10 @@ class HttpPathReply extends ScopedTaskBatchReply {
 /// A display-only preview. This never becomes a caller-supplied F or permit.
 class HttpPathPreview {
   final String root, name;
-  const HttpPathPreview._(this.root, this.name);
-  factory HttpPathPreview.fromJson(Map<String, dynamic> json) {
+  final List<PathPreviewMember> members;
+  const HttpPathPreview._(this.root, this.name, this.members);
+  factory HttpPathPreview.fromJson(Map<String, dynamic> json,
+      {PathCreateVariant variant = PathCreateVariant.http}) {
     final decision = json['decision'], layout = json['layout'];
     final name = json['name'], hash = json['layoutHash'];
     if (json['version'] is! int ||
@@ -195,14 +215,33 @@ class HttpPathPreview {
       throw const FormatException('invalid_path_preview');
     }
     final members = layout['members'] as List;
-    if (members.length != 1 ||
-        members.single is! Map ||
-        members.single['index'] is! int ||
-        members.single['index'] != 0 ||
-        members.single['selected'] != true ||
-        members.single['relativePath'] != name) {
+    if (members.isEmpty) throw const FormatException('invalid_path_preview_layout');
+    final paths = <String>{};
+    for (var i = 0; i < members.length; ++i) {
+      final item = members[i];
+      final relative = item is Map ? item['relativePath'] : null;
+      if (item is! Map || item['index'] is! int || item['index'] != i ||
+          item['selected'] is! bool || relative is! String ||
+          relative.isEmpty || relative.contains(RegExp(r'[\\\x00]')) ||
+          relative.split('/').any((p) => p.isEmpty || p == '.' || p == '..') ||
+          !paths.add(relative)) {
+        throw const FormatException('invalid_path_preview_layout');
+      }
+    }
+    if (variant == PathCreateVariant.http && (members.length != 1 ||
+        members.single['selected'] != true || members.single['relativePath'] != name)) {
       throw const FormatException('invalid_path_preview_layout');
     }
-    return HttpPathPreview._(decision['root'], name);
+    return HttpPathPreview._(decision['root'], name, List.unmodifiable([
+      for (final member in members)
+        PathPreviewMember(member['index'], member['relativePath'], member['selected'])
+    ]));
   }
+}
+
+class PathPreviewMember {
+  final int index;
+  final String relativePath;
+  final bool selected;
+  const PathPreviewMember(this.index, this.relativePath, this.selected);
 }

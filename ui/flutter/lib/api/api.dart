@@ -190,18 +190,18 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
     allowed = true;
   }
   final pathCap =
-      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/http-path/v1/capability$')
+      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/(http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/capability$')
           .firstMatch(path);
   if (pathCap != null &&
       pathCap[0] == path &&
       method == 'GET' &&
       data == null) {
     allowed = queryParameters == null ||
-        (queryParameters.length == 1 &&
+        (pathCap[1] == 'http-path' && queryParameters.length == 1 &&
             queryParameters['integrity'] == 'sha256');
   }
   final preview =
-      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/http-path/v1/preview$')
+      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/(?:http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/preview$')
           .firstMatch(path);
   if (preview != null &&
       preview[0] == path &&
@@ -209,7 +209,7 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
       data != null &&
       queryParameters == null) allowed = true;
   final match = RegExp(
-          r'^/api/v1/datasets/([0-9a-f]{32})/(?:task-batches/v1|verified-http/v1|http-path/v1)/operations(?:/([^/]+)(/cancel)?)?$')
+          r'^/api/v1/datasets/([0-9a-f]{32})/(?:task-batches/v1|verified-http/v1|(?:http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1)/operations(?:/([^/]+)(/cancel)?)?$')
       .firstMatch(path);
   if (match != null && match[0] == path && queryParameters == null) {
     if (match[2] == null) {
