@@ -243,13 +243,13 @@ func readRecovery(tx recoveryReader, id string) (Task, recoveryRecord, error) {
 	if e != nil {
 		return task, record, transfer.ErrRecoveryUnavailable
 	}
-	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || task.Protocol != "http" || task.Recovery == nil || !supportedRecoveryVersion(task.Recovery.Version) || task.Recovery.Version != record.Version || required.Version != record.Version || !record.valid(id) {
+	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || !recoveryProtocolCompatible(task.Protocol, record.Version) || task.Recovery == nil || !supportedRecoveryVersion(task.Recovery.Version) || task.Recovery.Version != record.Version || required.Version != record.Version || !record.valid(id) {
 		return task, record, transfer.ErrRecoveryHeld
 	}
 	if validateRecoveryTriplet(&task, record, required) != nil {
 		return task, record, transfer.ErrRecoveryHeld
 	}
-	hash, e := recoverySourceHash(task.Meta.Req, record.ExecutionDefaultsHash)
+	hash, e := recoveryTaskSourceHash(&task, record.ExecutionDefaultsHash)
 	if e != nil || hash != record.SourceHash {
 		return task, record, transfer.ErrRecoveryHeld
 	}
@@ -266,7 +266,7 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 			return nil, err
 		}
 	}
-	hash, e := recoverySourceHash(task.Meta.Req, digest)
+	hash, e := recoveryTaskSourceHash(task, digest)
 	if e != nil {
 		return nil, e
 	}
@@ -303,24 +303,32 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 		if saved.Meta == nil || saved.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
 		}
-		savedHash, err := recoverySourceHash(saved.Meta.Req, digest)
+		savedHash, err := recoveryTaskSourceHash(&saved, digest)
 		if err != nil || savedHash != hash {
 			return transfer.ErrRecoveryHeld
 		}
-		saved.Recovery = &TaskRecoveryRef{Version: 1}
+		version := 1
+		if parentRecoveryProtocol(saved.Protocol) {
+			version = recoverySharedVersion
+		}
+		saved.Recovery = &TaskRecoveryRef{Version: version}
 		freshEnrollment = freshInitial
 		initialState := "uncertain"
 		if freshInitial {
 			initialState = "ungranted"
 		}
-		record = recoveryRecord{Version: 1, TaskID: task.ID, Episode: episode, SourceRevision: 1, SourceHash: hash, ExecutionDefaultsHash: digest, InitialAttempt: recoveryInitialAttempt{State: initialState}, Actions: []recoveryAction{}}
+		record = recoveryRecord{Version: version, TaskID: task.ID, Episode: episode, SourceRevision: 1, SourceHash: hash, ExecutionDefaultsHash: digest, InitialAttempt: recoveryInitialAttempt{State: initialState}, Actions: []recoveryAction{}}
 		if err = tx.Put(bucketTask, task.ID, &saved); err != nil {
 			return err
 		}
 		if err = tx.Put(bucketTaskRecovery, task.ID, &record); err != nil {
 			return err
 		}
-		return tx.Put(bucketRecoveryRequired, task.ID, &recoveryRequirement{1, recoveryCapability})
+		required, err = recoveryRequirementFor(record)
+		if err != nil || validateRecoveryTriplet(&saved, record, required) != nil {
+			return transfer.ErrRecoveryHeld
+		}
+		return tx.Put(bucketRecoveryRequired, task.ID, &required)
 	})
 	if e != nil {
 		return nil, recoveryStorageError(e)
