@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	HTTPPathCreateKind = "http-path-create/v1"
-	HTTPPathCapability = "single-http-path-freeze/v1"
+	HTTPPathCreateKind         = "http-path-create/v1"
+	HTTPPathRequiredCapability = "single-http-path-freeze/v1"
 )
 
 // PathIntent contains caller provenance, never a frozen decision or rule ID.
