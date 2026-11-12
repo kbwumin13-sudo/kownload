@@ -86,14 +86,14 @@ func TestED2KLegacyPathClaimIsAtomicAndQuiesces(t *testing.T) {
 		legacyDone <- err
 	}()
 	<-checked
-	managedDone := make(chan error, 1)
-	go func() { managedDone <- f.Start() }()
 	// Deterministic assertion at the held gap, without scheduler sleeps: D6
 	// registration cannot pass the legacy check until insertion completes.
 	barrierHeld := !fm.mu.TryLock()
 	if !barrierHeld {
 		fm.mu.Unlock()
 	}
+	managedDone := make(chan error, 1)
+	go func() { managedDone <- f.Start() }()
 	unblock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
