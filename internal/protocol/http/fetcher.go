@@ -255,6 +255,10 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
+	mcpTransport         atomic.Pointer[mcpHTTPTransportBinding]
+	mcpOutputRequired    atomic.Bool
+	mcpOutputSynced      atomic.Bool
+	mcpOutputSyncFailure atomic.Pointer[mcpOutputSyncError]
 	executionContext     atomic.Pointer[transfer.HTTPExecutionContext]
 	boundRun             atomic.Pointer[httpBoundRun]
 	recovery             atomic.Pointer[httpRecoveryRun]
@@ -1131,6 +1135,11 @@ func (f *Fetcher) doStart() error {
 // without a validator with the server before any stream starts.
 func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 	defer func() {
+		if f.mcpOutputRequired.Load() {
+			// A cancelled supervisor may return before its workers. This is
+			// the independent loop goroutine, never a worker joining itself.
+			f.wg.Wait()
+		}
 		f.leaveBudget()
 		deferred := f.deferred.Load()
 		if deferred != nil || f.policyFailure.Load() != nil {
@@ -1155,6 +1164,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 				f.deferred.Store(nil)
 			}
 			f.sealCoverageBeforeClose(false)
+			f.syncMCPOutputBeforeClose()
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1172,6 +1182,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 		// on the protocol loop goroutine. Core's Pause handler holds task.lock;
 		// it must never become the caller performing coverage join/Sync.
 		f.sealCoverageBeforeClose(false)
+		f.syncMCPOutputBeforeClose()
 
 		// Update file last modified time before closing
 		if !f.verifiedOutputPolicy.Load() && f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
@@ -1355,6 +1366,7 @@ func (f *Fetcher) expandConnections() {
 
 			// Close the file before signaling completion
 			f.sealCoverageBeforeClose(true)
+			f.syncMCPOutputBeforeClose()
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -2564,6 +2576,9 @@ func (f *Fetcher) onDownloadComplete() {
 	// Close the file before signaling completion
 	// This ensures the file handle is released before Wait() returns
 	f.sealCoverageBeforeClose(finalErr == nil)
+	if syncErr := f.syncMCPOutputBeforeClose(); finalErr == nil && syncErr != nil {
+		finalErr = syncErr
+	}
 	f.fileMu.Lock()
 	if f.file != nil {
 		f.file.Close()
@@ -2866,6 +2881,10 @@ func (f *Fetcher) Pause() error {
 	}
 	f.resolveRespLock.Unlock()
 
+	var syncErr error
+	if failed := f.mcpOutputSyncFailure.Load(); failed != nil {
+		syncErr = failed.err
+	}
 	f.fileMu.Lock()
 	if f.file != nil {
 		f.file.Close()
@@ -2874,7 +2893,7 @@ func (f *Fetcher) Pause() error {
 	f.fileMu.Unlock()
 
 	f.setState(statePaused)
-	return nil
+	return syncErr
 }
 
 func (f *Fetcher) Close() error {

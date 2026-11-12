@@ -21,6 +21,7 @@ type VerifiedAuthority struct {
 	order     []*transfer.VerifiedPolicyRoot
 	borrowing int
 	closing   bool
+	taskRoots map[string]mcpwritepolicy.CreateGrant
 }
 
 // OpenVerifiedAuthority verifies every explicitly configured registry root so
@@ -33,7 +34,7 @@ func OpenVerifiedAuthority(p *mcpwritepolicy.Policy, dataset, networkPolicyID st
 	if err != nil || !datasetPattern.MatchString(dataset) || !networkPattern.MatchString(networkPolicyID) {
 		return nil, ErrInvalidAuthority
 	}
-	v := &VerifiedAuthority{roots: make(map[string]*transfer.VerifiedPolicyRoot)}
+	v := &VerifiedAuthority{roots: make(map[string]*transfer.VerifiedPolicyRoot), taskRoots: make(map[string]mcpwritepolicy.CreateGrant)}
 	defer func() {
 		if err != nil {
 			for _, root := range v.order {
@@ -51,6 +52,18 @@ func OpenVerifiedAuthority(p *mcpwritepolicy.Policy, dataset, networkPolicyID st
 		v.order = append(v.order, root)
 		binding := root.Binding()
 		bindings = append(bindings, VerifiedRootBinding{RootID: binding.RootID, Path: binding.Path, Identity: binding.Identity})
+	}
+	for _, scope := range snapshot.Datasets {
+		if scope.ID != dataset {
+			continue
+		}
+		for _, id := range scope.RootIDs {
+			for _, spec := range snapshot.Roots {
+				if spec.ID == id {
+					v.taskRoots[id] = mcpwritepolicy.CreateGrant{OutputRoot: spec.Path, Effects: append([]string{}, snapshot.Effects...)}
+				}
+			}
+		}
 	}
 	v.authority, err = New(p, dataset, networkPolicyID, bindings)
 	if err != nil {
