@@ -56,6 +56,9 @@ func (d *Downloader) getScriptPaths() []string {
 // executeScriptAtPath executes a single script with the given data
 // Returns any error that occurred during execution
 func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData, permits ...*verifiedSuccessPermit) error {
+	if scriptPath == "" {
+		return fmt.Errorf("script path is empty")
+	}
 	if data == nil || data.Payload == nil || !d.MCPTaskEffectAllowed(data.Payload.Task, "script") {
 		return context.Canceled
 	}
@@ -66,10 +69,6 @@ func (d *Downloader) executeScriptAtPath(scriptPath string, data *ScriptData, pe
 		}
 		ctx = permits[0].ctx
 	}
-	if scriptPath == "" {
-		return fmt.Errorf("script path is empty")
-	}
-
 	// Check if script file exists
 	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
 		return fmt.Errorf("script file does not exist: %s", scriptPath)

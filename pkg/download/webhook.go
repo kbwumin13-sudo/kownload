@@ -98,7 +98,12 @@ func (d *Downloader) getWebhookUrls() []string {
 // sendWebhookToUrl sends webhook data to a single URL
 // Returns the HTTP status code and any error that occurred
 func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData, permits ...*verifiedSuccessPermit) (int, error) {
-	if data == nil || data.Payload == nil || !d.MCPTaskEffectAllowed(data.Payload.Task, "webhook") {
+	if url == "" {
+		return 0, fmt.Errorf("webhook URL is empty")
+	}
+	// Taskless payloads retain the transport helper's legacy contract. Every
+	// Task payload, including a missing Task, still requires the effect guard.
+	if data == nil || data.Payload != nil && !d.MCPTaskEffectAllowed(data.Payload.Task, "webhook") {
 		return 0, context.Canceled
 	}
 	ctx := context.Background()
@@ -108,10 +113,6 @@ func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData, permits ...
 		}
 		ctx = permits[0].ctx
 	}
-	if url == "" {
-		return 0, fmt.Errorf("webhook URL is empty")
-	}
-
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return 0, err
