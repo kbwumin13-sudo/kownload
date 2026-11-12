@@ -1,5 +1,29 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import '../../api/model/http_path_create.dart';
+import '../../api/model/task_batch_operation.dart';
+
+Map<String, dynamic> _ownedMediaMap(Map value) =>
+    Map<String, dynamic>.from(jsonDecode(jsonEncode(value)));
+Object? _orderedMediaValue(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.cast<String>().toList()..sort();
+    return {for (final key in keys) key: _orderedMediaValue(value[key])};
+  }
+  if (value is List) return value.map(_orderedMediaValue).toList();
+  return value;
+}
+
+class _PathConfirmation {
+  final BrowserMediaSession session;
+  final HttpPathIntent intent;
+  final Map<String, dynamic> options;
+  String? operationId, requestFingerprint;
+  _PathConfirmation(this.session, HttpPathIntent intent, Map options)
+      : intent = HttpPathIntent(path: intent.path, origin: intent.origin),
+        options = _ownedMediaMap(options);
+}
 
 class BrowserMediaSession {
   final String id;
@@ -8,8 +32,10 @@ class BrowserMediaSession {
   final String site;
   List<Map<String, dynamic>> items;
   bool closed = false;
+  int? pathFreezeVersion;
   final commands = <Map<String, dynamic>>[];
-  BrowserMediaSession(this.id, this.clientId, this.view, this.site, this.items);
+  BrowserMediaSession(this.id, this.clientId, this.view, this.site, this.items,
+      {this.pathFreezeVersion});
 }
 
 /// In-memory presentation/command queue. The extension retains the original
@@ -17,11 +43,43 @@ class BrowserMediaSession {
 class BrowserMedia extends ChangeNotifier {
   final Future<void> Function() show;
   final _sessions = <String, BrowserMediaSession>{};
-  final _pending = <String, (String, Completer<dynamic>)>{};
+  final _pending = <String, (String, Completer<dynamic>, _PathConfirmation?)>{};
   int _sequence = 0;
   BrowserMedia({required this.show});
   BrowserMediaSession? get active =>
       _sessions.values.where((s) => !s.closed).firstOrNull;
+  bool get hasPendingPathCreate => _pending.values.any((p) => p.$3 != null);
+
+  /// Local App confirmation only. No intent supplied by the page/extension is
+  /// trusted. Repeated claims retain the original operation and full intent.
+  Map<String, dynamic> claimPathCreate({required String sessionId,
+      required String commandId, required String operationId, required Map request}) {
+    final pending = _pending[commandId];
+    final confirmation = pending?.$3;
+    final session = _sessions[sessionId];
+    if (pending == null || pending.$1 != sessionId || confirmation == null ||
+        session == null || session.closed || session.pathFreezeVersion != 1 ||
+        !identical(session, confirmation.session)) {
+      throw StateError('media_path_confirmation_unavailable');
+    }
+    TaskBatchOperationRef(namespace: TaskBatchOperationRef.namespaceV1,
+        operationId: operationId);
+    final req = request['req'], opts = request['opts'];
+    if (req is! Map || req['protocol'] != 'media' || opts is! Map ||
+        opts['path'] != confirmation.intent.path ||
+        opts['path'] != confirmation.options['path'] ||
+        opts['name'] != confirmation.options['name']) {
+      throw StateError('media_path_confirmation_changed');
+    }
+    final canonical = jsonEncode(_orderedMediaValue(_ownedMediaMap(request)));
+    if (confirmation.operationId != null &&
+        (confirmation.operationId != operationId || confirmation.requestFingerprint != canonical)) {
+      throw StateError('media_path_confirmation_changed');
+    }
+    confirmation.operationId = operationId;
+    confirmation.requestFingerprint = canonical;
+    return confirmation.intent.toJson();
+  }
 
   static List<Map<String, dynamic>> _items(dynamic value) {
     if (value is! List) throw const FormatException('invalid_request');
@@ -47,13 +105,16 @@ class BrowserMedia extends ChangeNotifier {
         }
         if (current != null && !current.closed) {
           current.items = _items(value['items']);
+          current.pathFreezeVersion = value['pathFreezeVersion'] is int
+              ? value['pathFreezeVersion'] : null;
         } else {
           _sessions[id] = BrowserMediaSession(
               id,
               value['clientId'],
               value['view'],
               value['site'] is String ? value['site'] : '',
-              _items(value['items']));
+              _items(value['items']), pathFreezeVersion: value['pathFreezeVersion'] is int
+                  ? value['pathFreezeVersion'] : null);
         }
         notifyListeners();
         await show();
@@ -89,7 +150,8 @@ class BrowserMedia extends ChangeNotifier {
   }
 
   Future<dynamic> send(BrowserMediaSession session, String type,
-      {String? itemId, Map<String, dynamic> options = const {}}) async {
+      {String? itemId, Map<String, dynamic> options = const {},
+      HttpPathIntent? pathIntent}) async {
     if (session.closed || !_sessions.containsKey(session.id))
       throw StateError('资源页面已关闭，请重新捕获。');
     if (!const [
@@ -102,14 +164,22 @@ class BrowserMedia extends ChangeNotifier {
     ].contains(type)) {
       throw const FormatException('invalid_request');
     }
+    if (pathIntent != null && (type != 'CREATE' || session.pathFreezeVersion != 1 ||
+        options.containsKey('taskId') || itemId == null ||
+        !session.items.any((item) => item['id'] == itemId) ||
+        options['path'] != pathIntent.path)) {
+      throw StateError('media_path_carrier_unsupported');
+    }
     final id = 'media-${++_sequence}';
     final result = Completer<dynamic>();
-    _pending[id] = (session.id, result);
+    _pending[id] = (session.id, result, pathIntent == null ? null :
+        _PathConfirmation(session, pathIntent, options));
     session.commands.add({
       'id': id,
       'type': type,
       if (itemId != null) 'itemId': itemId,
-      'options': options
+      'options': pathIntent == null ? options : _ownedMediaMap(options),
+      if (pathIntent != null) 'pathFreeze': true,
     });
     try {
       final data = await result.future.timeout(const Duration(seconds: 60));
