@@ -240,7 +240,8 @@ func isRedirectExpiredError(err error) bool {
 // when the redirect URL has expired. Returns the response if successful.
 func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Client, rangeStart, rangeEnd int64) (*http.Response, error) {
 	if lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(ctx)); lease != nil && lease.ActionVersion == 4 {
-		return nil, transfer.ErrRecoveryWork
+		if !originalRequestReplaySafe(f.meta.Req) { return nil,transfer.ErrScopedContext }
+		return nil,&RecoveryPublicRefreshRequired{token:lease.Token,sourceHash:lease.SourceHash,seen:lease.Round,begin:rangeStart,end:rangeEnd}
 	}
 
 	// A cached redirect does not authorize replaying a non-idempotent source

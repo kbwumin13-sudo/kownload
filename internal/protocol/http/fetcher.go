@@ -1545,6 +1545,10 @@ func (f *Fetcher) runConnection(conn *connection) {
 		if errors.Is(err, errSharedWaveDraining) {
 			continue
 		}
+		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
+			if refreshErr != nil { f.stopForCredentialFailure(conn,refreshErr);return }
+			continue
+		}
 		if err == nil {
 			rateLimits = 0
 			f.connMu.Lock()
@@ -1772,9 +1776,13 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 	// Record connection start time for adaptive timeout tracking
 	connStartTime := time.Now()
 
-	resp, err := doCredentialRequest(client, httpReq)
-	if err == nil {
-		resp, err = f.refreshResponse(ctx, client, httpReq, resp)
+	resp, err := f.takeSharedRefreshResponse(f.recoveryWork(conn),rangeStart,rangeEnd)
+	if err != nil { return err }
+	if resp == nil {
+		resp, err = doCredentialRequest(client, httpReq)
+		if err == nil {
+			resp, err = f.refreshResponse(ctx, client, httpReq, resp)
+		}
 	}
 	if err != nil {
 		return err
@@ -1803,6 +1811,8 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 				if policyErr := credentialPolicyError(fallbackErr); policyErr != nil {
 					return policyErr
 				}
+				var refresh *RecoveryPublicRefreshRequired
+				if errors.As(fallbackErr,&refresh) { return fallbackErr }
 				return originalErr
 			}
 		} else {
@@ -2181,6 +2191,10 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 		}
 
 		if errors.Is(err, errSharedWaveDraining) {
+			continue
+		}
+		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
+			if refreshErr != nil { f.stopForCredentialFailure(conn,refreshErr);return }
 			continue
 		}
 		if err == nil {

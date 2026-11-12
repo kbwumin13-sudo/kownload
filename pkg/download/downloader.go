@@ -1612,7 +1612,7 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	if bound {
 		if runLease != nil {
 			owner := task.recoveryOwner.Load()
-			if owner != nil && parentRecoveryProtocol(task.Protocol) {
+			if owner != nil && runLease.ActionVersion == recoverySharedVersion {
 				var leaseErr error
 				runLease,leaseErr = owner.parentResultLease(runLease)
 				if leaseErr != nil { return }
@@ -2448,8 +2448,20 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			} else {
 				resolveErr = task.fetcher.Resolve(resolveMeta.Req, resolveMeta.Opts)
 			}
-			if resolveErr != nil {
-				return resolveErr
+			for resolveErr != nil {
+				var refresh *httpProtocol.RecoveryPublicRefreshRequired
+				if !errors.As(resolveErr,&refresh) { return resolveErr }
+				httpFetcher,ok := task.fetcher.(*httpProtocol.Fetcher)
+				if !ok { return transfer.ErrRecoveryHeld }
+				// Resolve has returned and its response is closed. Reserve,
+				// metadata network and source CAS cannot run under Task.lock.
+				task.lock.Unlock()
+				lease,refreshErr := httpFetcher.RefreshSharedSource(runCtx,refresh)
+				task.lock.Lock()
+				if refreshErr != nil { return refreshErr }
+				if runCtx.Err() != nil || lease == nil || d.getTask(task.ID) != task || task.runGeneration != generation { return transfer.ErrRecoveryStale }
+				runCtx = transfer.WithRecoveryLease(runCtx,lease)
+				resolveErr = httpFetcher.ResolveContext(runCtx,resolveMeta.Req,resolveMeta.Opts)
 			}
 		} else if preparer, ok := task.fetcher.(fetcher.StartPreparer); ok {
 			if err := preparer.PrepareContext(runCtx, resolveMeta.Req, resolveMeta.Opts); err != nil {

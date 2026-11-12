@@ -191,7 +191,16 @@ func (f *Fetcher) recoveryContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+	if previous := transfer.RecoveryLeaseFromContext(ctx); previous != nil {
+		// Only future scopes on this still-live run may inherit a confirmed
+		// source handoff. An old request/body scope is never relabeled.
+		if ctx.Err() == nil && ctx.Value(sharedIOContextKey{}) == nil {
+			if run := f.recovery.Load(); run != nil && previous.Owner == run.lease.Owner &&
+				previous.Token.TaskID == run.lease.Token.TaskID && previous.Token.Episode == run.lease.Token.Episode &&
+				previous.Token.Generation == run.lease.Token.Generation && previous.Token.SourceRevision < run.lease.Token.SourceRevision {
+				return transfer.WithRecoveryLease(ctx,run.lease)
+			}
+		}
 		return ctx
 	}
 	if run := f.recovery.Load(); run != nil {
@@ -245,7 +254,7 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	return nil
 }
 func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
-	lease := transfer.RecoveryLeaseFromContext(conn.ctx)
+	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(conn.ctx))
 	if lease == nil {
 		return nil
 	}
@@ -286,7 +295,7 @@ func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
 }
 
 func (f *Fetcher) retryManagedConnection(conn *connection, cause error) bool {
-	lease := transfer.RecoveryLeaseFromContext(conn.ctx)
+	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(conn.ctx))
 	if lease == nil {
 		return false
 	}
@@ -394,7 +403,14 @@ func (f *Fetcher) finishManagedConnection(conn *connection) error {
 	}
 	permit := conn.recoveryPermit
 	conn.recoveryPermit = nil
-	return permit.Finish(conn.ctx)
+	err := permit.Finish(conn.ctx)
+	if errors.Is(err,transfer.ErrRecoveryStale) {
+		old := transfer.RecoveryLeaseFromContext(conn.ctx)
+		if run := f.recovery.Load(); old != nil && run != nil && old.Token.TaskID == run.lease.Token.TaskID && old.Token.Episode == run.lease.Token.Episode && old.Token.Generation == run.lease.Token.Generation && old.Token.SourceRevision < run.lease.Token.SourceRevision {
+			return nil // Late old-source bookkeeping must not cancel the new source.
+		}
+	}
+	return err
 }
 
 func (f *Fetcher) CaptureRecoveryContext(req *base.Request) (*transfer.HTTPExecutionContext, bool, error) {
