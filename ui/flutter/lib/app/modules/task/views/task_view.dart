@@ -365,8 +365,7 @@ class _MacTaskViewState extends State<_MacTaskView> {
                                           ? MacButton(
                                               primary: true,
                                               icon: CupertinoIcons.add,
-                                              onPressed: () => Get.rootDelegate
-                                                  .toNamed(Routes.CREATE),
+                                              onPressed: MacPanel.showPanel,
                                               child: Text('create'.tr))
                                           : null,
                                     )
