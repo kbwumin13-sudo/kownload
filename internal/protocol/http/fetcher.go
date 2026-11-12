@@ -255,6 +255,10 @@ func (s *slowStartController) commitBatch(count int) {
 // ============================================================================
 
 type Fetcher struct {
+	mcpTransport         atomic.Pointer[mcpHTTPTransportBinding]
+	mcpOutputRequired    atomic.Bool
+	mcpOutputSynced      atomic.Bool
+	mcpOutputSyncFailure atomic.Pointer[mcpOutputSyncError]
 	executionContext     atomic.Pointer[transfer.HTTPExecutionContext]
 	boundRun             atomic.Pointer[httpBoundRun]
 	recovery             atomic.Pointer[httpRecoveryRun]
@@ -1131,6 +1135,11 @@ func (f *Fetcher) doStart() error {
 // without a validator with the server before any stream starts.
 func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 	defer func() {
+		if f.mcpOutputRequired.Load() {
+			// A cancelled supervisor may return before its workers. This is
+			// the independent loop goroutine, never a worker joining itself.
+			f.wg.Wait()
+		}
 		f.leaveBudget()
 		deferred := f.deferred.Load()
 		if deferred != nil || f.policyFailure.Load() != nil {
@@ -1155,6 +1164,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 				f.deferred.Store(nil)
 			}
 			f.sealCoverageBeforeClose(false)
+			f.syncMCPOutputBeforeClose()
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1172,6 +1182,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 		// on the protocol loop goroutine. Core's Pause handler holds task.lock;
 		// it must never become the caller performing coverage join/Sync.
 		f.sealCoverageBeforeClose(false)
+		f.syncMCPOutputBeforeClose()
 
 		// Update file last modified time before closing
 		if !f.verifiedOutputPolicy.Load() && f.config.UseServerCtime && f.meta.Res.Files[0].Ctime != nil {
@@ -1355,6 +1366,7 @@ func (f *Fetcher) expandConnections() {
 
 			// Close the file before signaling completion
 			f.sealCoverageBeforeClose(true)
+			f.syncMCPOutputBeforeClose()
 			f.fileMu.Lock()
 			if f.file != nil {
 				f.file.Close()
@@ -1564,9 +1576,8 @@ func (f *Fetcher) runConnection(conn *connection) {
 		if f.dropSteal(conn) {
 			f.diag.failure(err)
 			if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
-				wait, deferred, giveUp := f.rateLimit(re, 1)
-				if !giveUp {
-					if handled, e := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled && e != nil {
+				if handled, e := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, 1); handled {
+					if e != nil {
 						if conn.ctx.Err() == nil {
 							if _, deferred := transfer.AsDeferred(e); !deferred {
 								f.stopForCredentialFailure(conn, e)
@@ -1574,8 +1585,7 @@ func (f *Fetcher) runConnection(conn *connection) {
 						}
 						return
 					}
-				}
-				if giveUp {
+				} else if _, _, giveUp := f.rateLimit(re, 1); giveUp {
 					// A wait too long to honour must end the task, as on any
 					// other stream, not leave it deferred for days.
 					f.connMu.Lock()
@@ -1613,18 +1623,12 @@ func (f *Fetcher) runConnection(conn *connection) {
 		// server-requested wait releases the task's running slot.
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
 			rateLimits++
-			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
-			f.connMu.Lock()
-			conn.State = connFailed
-			conn.failed = giveUp
-			f.connMu.Unlock()
-			if giveUp {
-				if f.slowStart != nil {
-					f.slowStart.onConnectFailed()
-				}
-				return
+			if f.sharedRun() != nil {
+				f.connMu.Lock()
+				conn.State = connFailed
+				f.connMu.Unlock()
 			}
-			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+			if handled, sharedErr := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, rateLimits); handled {
 				if sharedErr != nil {
 					if conn.ctx.Err() == nil {
 						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
@@ -1635,6 +1639,17 @@ func (f *Fetcher) runConnection(conn *connection) {
 				}
 				retries++
 				continue
+			}
+			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
+			f.connMu.Lock()
+			conn.State = connFailed
+			conn.failed = giveUp
+			f.connMu.Unlock()
+			if giveUp {
+				if f.slowStart != nil {
+					f.slowStart.onConnectFailed()
+				}
+				return
 			}
 			if deferred != nil {
 				f.deferRun(deferred)
@@ -2197,15 +2212,12 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 
 		if re := extractRequestError(err); re != nil && transfer.IsRateLimitStatus(re.Code) {
 			rateLimits++
-			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
-			f.connMu.Lock()
-			conn.State = connFailed
-			conn.failed = giveUp
-			f.connMu.Unlock()
-			if giveUp {
-				return
+			if f.sharedRun() != nil {
+				f.connMu.Lock()
+				conn.State = connFailed
+				f.connMu.Unlock()
 			}
-			if handled, sharedErr := f.sharedRateLimited(conn.ctx, f.recoveryWork(conn), f.sharedDeadline(wait, deferred), re.Code); handled {
+			if handled, sharedErr := f.sharedResponseRateLimited(conn.ctx, f.recoveryWork(conn), err, rateLimits); handled {
 				if sharedErr != nil {
 					if conn.ctx.Err() == nil {
 						if _, deferred := transfer.AsDeferred(sharedErr); !deferred {
@@ -2216,6 +2228,14 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				}
 				retries++
 				continue
+			}
+			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
+			f.connMu.Lock()
+			conn.State = connFailed
+			conn.failed = giveUp
+			f.connMu.Unlock()
+			if giveUp {
+				return
 			}
 			if deferred != nil {
 				f.deferRun(deferred)
@@ -2556,6 +2576,9 @@ func (f *Fetcher) onDownloadComplete() {
 	// Close the file before signaling completion
 	// This ensures the file handle is released before Wait() returns
 	f.sealCoverageBeforeClose(finalErr == nil)
+	if syncErr := f.syncMCPOutputBeforeClose(); finalErr == nil && syncErr != nil {
+		finalErr = syncErr
+	}
 	f.fileMu.Lock()
 	if f.file != nil {
 		f.file.Close()
@@ -2858,6 +2881,10 @@ func (f *Fetcher) Pause() error {
 	}
 	f.resolveRespLock.Unlock()
 
+	var syncErr error
+	if failed := f.mcpOutputSyncFailure.Load(); failed != nil {
+		syncErr = failed.err
+	}
 	f.fileMu.Lock()
 	if f.file != nil {
 		f.file.Close()
@@ -2866,7 +2893,7 @@ func (f *Fetcher) Pause() error {
 	f.fileMu.Unlock()
 
 	f.setState(statePaused)
-	return nil
+	return syncErr
 }
 
 func (f *Fetcher) Close() error {

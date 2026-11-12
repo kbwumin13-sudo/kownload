@@ -74,6 +74,10 @@ func (f *Fetcher) SetVerifiedOutput(file *os.File) error {
 		return fmt.Errorf("%w: output already bound", ErrUnsafeResume)
 	}
 	f.verifiedOutput = file
+	if f.mcpOutputRequired.Load() {
+		f.mcpOutputSynced.Store(false)
+		f.mcpOutputSyncFailure.Store(nil)
+	}
 	f.verifiedOutputPolicy.Store(true)
 	return nil
 }

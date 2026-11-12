@@ -12,6 +12,16 @@ func (t *Task) recoveryHeld() bool {
 // an instruction to enroll it. A reverse requirement survives old writers
 // dropping Task.recovery. No repair, protocol restore or IO occurs here.
 func (d *Downloader) checkTaskRecovery(task *Task) error {
+	if err := d.checkMCPTaskExecution(task); err != nil {
+		return err
+	}
+	return d.checkTaskRecoveryState(task)
+}
+
+// Setup caches only declaration compatibility. Current policy/holder admission
+// is checked afresh at each execution boundary, so a trusted startup policy
+// update cannot permanently poison an otherwise valid historical Task.
+func (d *Downloader) checkTaskRecoveryState(task *Task) error {
 	if err := d.checkUnsupportedCompletion(task); err != nil {
 		return err
 	}

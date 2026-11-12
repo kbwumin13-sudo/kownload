@@ -23,7 +23,7 @@ func (d *Downloader) checkCompletionForceDelete(selected []*Task) error {
 	livePresence := false
 	for _, task := range selected {
 		task.dataLock.RLock()
-		present := task.Completion != nil
+		present := task.Completion != nil || mcpTaskPresence(task)
 		task.dataLock.RUnlock()
 		livePresence = livePresence || present
 	}
@@ -41,7 +41,12 @@ func (d *Downloader) checkCompletionForceDelete(selected []*Task) error {
 			if err != nil {
 				return ErrVerifiedHTTPUnsupportedOption
 			}
-			if found && (owned == nil || owned.Completion != nil) {
+			if found && (owned == nil || owned.Completion != nil || mcpTaskPresence(owned)) {
+				return ErrVerifiedHTTPUnsupportedOption
+			}
+			var link operationTaskLink
+			linked, err := tx.Get(bucketOperationTasks, task.ID, &link)
+			if err != nil || linked && (link.Ref.Version == 2 || link.Ref.Namespace == MCPWriteNamespace) {
 				return ErrVerifiedHTTPUnsupportedOption
 			}
 			for _, bucket := range []string{bucketTaskCompletion, bucketCompletionRequired} {
