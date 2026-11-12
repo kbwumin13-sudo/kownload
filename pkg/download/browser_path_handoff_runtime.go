@@ -46,9 +46,6 @@ func (d *Downloader) readBrowserPathHandoff(r BrowserHandoffRequest) (*Task, *ba
 }
 
 func browserPathResult(task *Task, operation string, projection *BrowserPathHandoffProjection) BrowserHandoffResult {
-	if task != nil && task.dataLock == nil {
-		initTask(task)
-	}
 	result := handoffResult(task, operation)
 	result.PathCreate = projection
 	return result
