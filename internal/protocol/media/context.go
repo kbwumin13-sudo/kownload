@@ -161,25 +161,32 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 		}
 	}
 	if interpreter == "" {
-		if transfer.RecoveryLeaseFromContext(ctx) != nil { return nil, nil, transfer.ErrRecoveryHeld }
+		if transfer.RecoveryLeaseFromContext(ctx) != nil {
+			return nil, nil, transfer.ErrRecoveryHeld
+		}
 		return standaloneCommand(ctx, cfg, extra, scopes, args)
 	}
 	program := strings.Replace(contextWrapper, "# KOWNLOAD_RECOVERY_BRIDGE", recoveryWrapper, 1)
 	cmd := exec.CommandContext(ctx, interpreter, "-c", program)
 	bridge, err := newMediaRecoveryBridge(ctx, cmd)
-	if err != nil { return nil, nil, err }
+	if err != nil {
+		return nil, nil, err
+	}
 	var recovery map[string]int
 	if bridge != nil {
-		recovery = map[string]int{"read":3, "write":4}
+		recovery = map[string]int{"read": 3, "write": 4}
 		args = append([]string{"--retries", "0", "--fragment-retries", "0", "--extractor-retries", "0", "--file-access-retries", "0", "--abort-on-unavailable-fragments"}, args...)
 	}
 	payload, err := json.Marshal(struct {
-		Args []string `json:"args"`
-		Scopes []model.HeaderScope `json:"scopes"`
-		Probe string `json:"probe"`
-		Recovery map[string]int `json:"recovery,omitempty"`
+		Args     []string            `json:"args"`
+		Scopes   []model.HeaderScope `json:"scopes"`
+		Probe    string              `json:"probe"`
+		Recovery map[string]int      `json:"recovery,omitempty"`
 	}{args, scopes, probePath(cfg), recovery})
-	if err != nil { bridge.Close(); return nil, nil, errors.New("invalid media context") }
+	if err != nil {
+		bridge.Close()
+		return nil, nil, errors.New("invalid media context")
+	}
 
 	file, err := os.CreateTemp("", "gopeed-media-context-*")
 	if err != nil {

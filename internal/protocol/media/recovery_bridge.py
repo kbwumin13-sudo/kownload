@@ -94,6 +94,10 @@ def install_recovery_bridge():
                     rpc('valid')
                 except BaseException:
                     try:
+                        rpc('fail')
+                    except Exception:
+                        pass
+                    try:
                         close()
                     except Exception:
                         pass
@@ -120,10 +124,14 @@ def install_recovery_bridge():
         lease = rpc('enter')
         try:
             response = original_open(self, http_class, request, **kwargs)
+            if response.status >= 400:
+                response.close()
+                rpc('fail')
+                raise TransportError('media network request failed')
             rpc('check', lease)
             return guard_response(response, lease)
         except BaseException:
-            rpc('leave', lease)
+            rpc('fail')
             raise
 
     _urllib.HTTPHandler.do_open = admitted_open
@@ -136,8 +144,16 @@ def install_recovery_bridge():
                 try:
                     response = original_send(self, request)
                 except HTTPError as error:
-                    error.response = guard_response(error.response, lease)
+                    if error.response.status >= 400:
+                        error.response.close()
+                        rpc('fail')
+                    else:
+                        error.response = guard_response(error.response, lease)
                     raise
+                if response.status >= 400:
+                    response.close()
+                    rpc('fail')
+                    raise TransportError('media network request failed')
                 rpc('check', lease)
                 return guard_response(response, lease)
             except HTTPError:
@@ -145,7 +161,7 @@ def install_recovery_bridge():
                 # response. Preserve its lease until that body is released.
                 raise
             except BaseException:
-                rpc('leave', lease)
+                rpc('fail')
                 raise
 
         _curlcffi.CurlCFFIRH._send = admitted_send

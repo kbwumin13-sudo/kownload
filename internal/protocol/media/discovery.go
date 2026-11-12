@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/controller"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 	"golang.org/x/net/publicsuffix"
@@ -59,7 +60,34 @@ func (t scopedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 	}
-	return t.base.RoundTrip(copy)
+	lease := transfer.RecoveryLeaseFromContext(req.Context())
+	if lease == nil {
+		return t.base.RoundTrip(copy)
+	}
+	owner, ok := lease.Owner.(transfer.RecoveryParentController)
+	if !ok {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	scope, err := owner.EnterRecoveryWork(req.Context(), lease.Token, "media/inspect")
+	if err != nil {
+		return nil, err
+	}
+	if err = scope.Check(); err != nil {
+		scope.Leave()
+		return nil, err
+	}
+	response, err := t.base.RoundTrip(copy.WithContext(scope.Context()))
+	if err != nil {
+		scope.Leave()
+		return nil, err
+	}
+	if err = scope.Check(); err != nil {
+		response.Body.Close()
+		scope.Leave()
+		return nil, err
+	}
+	response.Body = &mediaRecoveryBody{ReadCloser: response.Body, scope: scope}
+	return response, nil
 }
 
 type manifestRef struct {

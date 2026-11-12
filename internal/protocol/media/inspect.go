@@ -182,10 +182,6 @@ func invalidateInspection(req *base.Request, cfg model.Config) {
 		return
 	}
 	exactKey := inspectionKey(&requestCopy, extra, cfg)
-	if transfer.RecoveryLeaseFromContext(ctx) != nil {
-		// A funded Task never joins another Task's background extraction.
-		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, ctl, cfg)
-	}
 	baseKey := baseInspectionKey(&requestCopy, extra, cfg)
 	inspections.Lock()
 	delete(inspections.items, exactKey)
@@ -208,6 +204,10 @@ func inspectInfo(ctx context.Context, req *base.Request, ctl *controller.Control
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+		// A funded Task never joins another Task's background extraction.
+		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, ctl, cfg)
 	}
 	baseKey := baseInspectionKey(&requestCopy, extra, cfg)
 	if extra.Format != "" {
@@ -445,7 +445,9 @@ func extractInfo(ctx context.Context, req *base.Request, extra *model.ReqExtra, 
 	setProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	out, err := cmd.Output()
-	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil { return nil, nil, checkErr }
+	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil {
+		return nil, nil, checkErr
+	}
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {

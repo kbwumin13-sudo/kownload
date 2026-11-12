@@ -87,6 +87,9 @@ type Fetcher struct {
 	cmd           *exec.Cmd
 	stop          context.CancelFunc
 	resolveCancel context.CancelFunc
+	resolveDone   chan struct{}
+	parentContext context.Context
+	recoveryEpoch uint64
 	running       bool
 	downloaded    int64
 	total         int64
@@ -112,11 +115,18 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 		f.mu.Unlock()
 		return errors.New("media task is active or resolving")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	parent := f.parentContext
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	f.resolveCancel = cancel
+	f.recoveryEpoch++
+	f.resolveDone = make(chan struct{})
+	resolveDone := f.resolveDone
 	ctl, cfg := f.ctl, f.cfg
 	f.mu.Unlock()
-	defer func() { cancel(); f.mu.Lock(); f.resolveCancel = nil; f.mu.Unlock() }()
+	defer func() { cancel(); f.mu.Lock(); f.resolveCancel = nil; close(resolveDone); f.mu.Unlock() }()
 	return f.resolve(ctx, req, opts, ctl, cfg)
 }
 
@@ -198,6 +208,9 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 		}
 	}
 	identity := mediaIdentity(req, extra, info)
+	if err := mediaRecoveryCheck(ctx); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		f.mu.Unlock()
@@ -325,31 +338,74 @@ func (f *Fetcher) Start() error {
 		f.mu.Unlock()
 		return errors.New("media is unresolved")
 	}
-	if f.needsResolve {
-		f.starting = true
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		f.resolveCancel = cancel
-		req, opts, ctl, cfg := f.meta.Req, f.meta.Opts, f.ctl, f.cfg
+	parent := f.parentContext
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	req, err := cloneRequest(f.meta.Req)
+	if err != nil {
 		f.mu.Unlock()
-		err := f.resolve(ctx, req, opts, ctl, cfg)
 		cancel()
-		f.mu.Lock()
-		f.resolveCancel = nil
-		f.starting = false
-		if err != nil {
+		return err
+	}
+	opts, ctl, cfg, needsResolve := f.meta.Opts.Clone(), f.ctl, f.cfg, f.needsResolve
+	f.starting, f.stop = true, cancel
+	f.recoveryEpoch++
+	done := make(chan struct{})
+	f.runDone = done
+	f.mu.Unlock()
+	go func() {
+		_ = f.startMediaRun(ctx, cancel, req, opts, ctl, cfg, needsResolve, done)
+	}()
+	return nil
+}
+
+func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, req *base.Request, opts *base.Options, ctl *controller.Controller, cfg model.Config, needsResolve bool, done chan struct{}) (runErr error) {
+	launched := false
+	defer func() {
+		if !launched {
+			wasCancelled := ctx.Err() != nil
+			cancel()
+			f.mu.Lock()
+			f.starting, f.stop = false, nil
+			close(done)
 			f.mu.Unlock()
+			if runErr != nil && !wasCancelled {
+				select {
+				case f.done <- runErr:
+				default:
+				}
+			}
+		}
+	}()
+	if err := mediaRecoveryCheck(ctx); err != nil {
+		return err
+	}
+	if needsResolve {
+		inspectCtx, stopInspect := context.WithTimeout(ctx, 45*time.Second)
+		err := f.resolve(inspectCtx, req, opts, ctl, cfg)
+		stopInspect()
+		if err != nil {
 			return err
 		}
 	}
-	defer f.mu.Unlock()
-	req, err := cloneRequest(f.meta.Req)
+	f.mu.Lock()
+	target := f.meta.SingleFilepath()
+	workPrefix := f.workPrefix
+	if workPrefix == "" {
+		workPrefix = target + ".gopeed-media"
+		if f.workID != "" {
+			workPrefix += "." + f.workID
+		}
+		f.workPrefix = workPrefix
+	}
+	f.mu.Unlock()
+	extra, err := extraFor(req)
 	if err != nil {
 		return err
 	}
-	ctl, cfg := f.ctl, f.cfg
-	target := f.meta.SingleFilepath()
-	extra, err := extraFor(req)
-	if err != nil {
+	if err := mediaRecoveryCheck(ctx); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
@@ -358,15 +414,6 @@ func (f *Fetcher) Start() error {
 	args, cleanup, err := requestArgs(req, extra, ctl, cfg)
 	if err != nil {
 		return err
-	}
-	// A fixed work prefix retains .part/.ytdl across pause and process restart.
-	workPrefix := f.workPrefix
-	if workPrefix == "" {
-		workPrefix = target + ".gopeed-media"
-		if f.workID != "" {
-			workPrefix += "." + f.workID
-		}
-		f.workPrefix = workPrefix
 	}
 	if err := os.MkdirAll(filepath.Dir(workPrefix), 0755); err != nil {
 		cleanup()
@@ -382,10 +429,8 @@ func (f *Fetcher) Start() error {
 	args = append(args, "--no-simulate", "--continue", "--newline", "--progress", "--concurrent-fragments", strconv.Itoa(cfg.Connections))
 	args = append(args, "--progress-template", "download:media-progress:%(info.format_id)j\t%(progress)j", "--print", "before_postprocess:media-merge:{}", "--print", "after_move:media-final:%(filepath)j")
 	args = append(args, "-o", strings.ReplaceAll(workPrefix, "%", "%%")+".%(ext)s", req.URL)
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd, commandCleanup, err := mediaCommand(ctx, cfg, req, extra, args)
+	cmd, commandCleanup, err := mediaCommand(mediaWorkContext(ctx, "media/download"), cfg, req, extra, args)
 	if err != nil {
-		cancel()
 		cleanup()
 		return err
 	}
@@ -395,23 +440,29 @@ func (f *Fetcher) Start() error {
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
 		cleanup()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		cancel()
+		stdout.Close()
+		cleanup()
+		return err
+	}
+	if err := mediaRecoveryCheck(ctx); err != nil {
+		stdout.Close()
+		stderr.Close()
 		cleanup()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
-		cancel()
 		cleanup()
 		return errors.New("media downloader could not start")
 	}
-	f.cmd, f.stop, f.running, f.phase = cmd, cancel, true, "download"
-	f.runDone = make(chan struct{})
+	f.mu.Lock()
+	f.cmd, f.running, f.starting, f.phase = cmd, true, false, "download"
+	f.mu.Unlock()
+	launched = true
 	go f.run(ctx, cmd, stdout, stderr, target, workPrefix, extra, cfg, cleanup, cancel)
 	return nil
 }
@@ -426,6 +477,9 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 		s := bufio.NewScanner(stdout)
 		s.Buffer(make([]byte, 4096), 2*1024*1024)
 		for s.Scan() {
+			if mediaRecoveryCheck(ctx) != nil {
+				continue
+			}
 			line := s.Text()
 			switch {
 			case strings.HasPrefix(line, "media-progress:"):
@@ -445,6 +499,9 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 		s := bufio.NewScanner(stderr)
 		s.Buffer(make([]byte, 4096), 2*1024*1024)
 		for s.Scan() {
+			if mediaRecoveryCheck(ctx) != nil {
+				continue
+			}
 			line := s.Text()
 			if strings.HasPrefix(line, "media-progress:") {
 				f.acceptProgress(strings.TrimPrefix(line, "media-progress:"))
@@ -456,6 +513,9 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 	}()
 	scanWG.Wait()
 	err := cmd.Wait()
+	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil {
+		err = checkErr
+	}
 	cleanup()
 	if err == nil {
 		if finalPath == "" || !strings.HasPrefix(filepath.Clean(finalPath), filepath.Clean(workPrefix)+".") {
@@ -467,7 +527,7 @@ func (f *Fetcher) run(ctx context.Context, cmd *exec.Cmd, stdout, stderr io.Read
 			} else if trackErr := validateFinalTracks(ctx, cfg, extra.MediaKind, finalPath); trackErr != nil {
 				err = trackErr
 			} else if ctx.Err() != nil {
-				err = ctx.Err()
+				err = mediaRecoveryCheck(ctx)
 			} else if subtitleErr := validateSubtitleFiles(workPrefix, extra.SubtitleLanguages); subtitleErr != nil {
 				err = subtitleErr
 			} else if subtitleErr := moveSubtitleFiles(workPrefix, target); subtitleErr != nil {
@@ -680,6 +740,7 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 			options.Path = opts.Path
 		}
 	}
+	f.recoveryEpoch++
 	f.meta = &fetcher.FetcherMeta{Req: candidate, Opts: options, Res: f.meta.Res}
 	if req != nil {
 		f.needsResolve = true
@@ -709,12 +770,12 @@ func mediaIdentity(req *base.Request, extra *model.ReqExtra, info *videoInfo) st
 }
 
 func (f *Fetcher) Pause() error {
-	f.CancelResolve()
 	f.mu.Lock()
-	stop, cmd, running, runDone := f.stop, f.cmd, f.running, f.runDone
+	stop, cmd, active, runDone := f.stop, f.cmd, f.running || f.starting, f.runDone
+	resolveCancel, resolveDone := f.resolveCancel, f.resolveDone
 	f.mu.Unlock()
-	if !running {
-		return nil
+	if resolveCancel != nil {
+		resolveCancel()
 	}
 	if stop != nil {
 		stop()
@@ -722,10 +783,18 @@ func (f *Fetcher) Pause() error {
 	if cmd != nil {
 		_ = killProcessGroup(cmd)
 	}
-	// run closes this only after cmd.Wait and pipe readers terminate.
-	<-runDone
+	// Both joins occur outside the protocol mutex. Core must likewise invalidate
+	// the run before joining without holding the Task lock used by admission.
+	if resolveCancel != nil && resolveDone != nil {
+		<-resolveDone
+	}
+	if active && runDone != nil {
+		<-runDone
+	}
 	f.mu.Lock()
-	f.phase = "pause"
+	if active {
+		f.phase = "pause"
+	}
 	f.mu.Unlock()
 	return nil
 }
