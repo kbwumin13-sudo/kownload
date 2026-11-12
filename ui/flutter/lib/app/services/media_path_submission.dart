@@ -41,7 +41,7 @@ class MediaPathSubmission {
 
   TaskBatchReceipt _receipt(Map data, String dataset, String id) {
     final value = data['operation'];
-    if (data['scopeVersion'] != 1 || data['datasetId'] != dataset ||
+    if (data['scopeVersion'] is! int || data['scopeVersion'] != 1 || data['datasetId'] != dataset ||
         data['namespace'] != TaskBatchOperationRef.namespaceV1 ||
         data['kind'] != kind || value is! Map) {
       throw StateError('submission_unknown');
@@ -92,9 +92,9 @@ class MediaPathSubmission {
     final caps = _data(await api.scopedTaskBatchRequest(
         snapshot, 'GET', '$root/capability'));
     final required = caps['requiredCapabilities'], methods = caps['methods'];
-    if (!snapshot.isCurrent || !ready() || caps['scopeVersion'] != 1 ||
+    if (!snapshot.isCurrent || !ready() || caps['scopeVersion'] is! int || caps['scopeVersion'] != 1 ||
         caps['datasetId'] != dataset || caps['kind'] != kind ||
-        caps['requestVersion'] != 1 || caps['supported'] != true ||
+        caps['requestVersion'] is! int || caps['requestVersion'] != 1 || caps['supported'] != true ||
         required is! List || required.length != 1 ||
         required.single != capability || methods is! Map ||
         methods['create'] != 'POST' || methods['query'] != 'GET' ||
