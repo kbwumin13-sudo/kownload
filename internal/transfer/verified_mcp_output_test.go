@@ -17,13 +17,23 @@ import (
 // it does not open or read the contents of files referred to by other descriptors.
 func verifiedMCPTestHandleCount(t *testing.T, identities ...CompletionFileIdentity) int {
 	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
+	// ReadDir may lstat a transient /dev/fd entry when d_type is unknown.
+	// Read names only, then inspect actual open descriptors via Fstat below.
+	directory, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
+	names, readErr := directory.Readdirnames(-1)
+	closeErr := directory.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	count := 0
-	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil {
 			continue
 		}
@@ -89,6 +99,9 @@ func TestVerifiedMCPOutputBridgeCompleteBytesAndLifetime(t *testing.T) {
 	if binding.DirectoryIdentity != identity || binding.StagingIdentity.Inode == 0 {
 		t.Fatal("returned binding is not the actual leased stage")
 	}
+	if n := verifiedMCPTestHandleCount(t, binding.StagingIdentity); n != 1 {
+		t.Fatalf("observer missed the independent writer descriptor: %d", n)
+	}
 	// The short directory callback has ended. The separate writer fd is valid,
 	// and the retained lease still prevents registry-owner teardown.
 	if err := root.Close(); !errors.Is(err, ErrVerifiedRootBusy) {
@@ -103,11 +116,17 @@ func TestVerifiedMCPOutputBridgeCompleteBytesAndLifetime(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if n := verifiedMCPTestHandleCount(t, binding.StagingIdentity); n != 0 {
+		t.Fatalf("observer retained a closed writer descriptor: %d", n)
+	}
 	readonly, err := OpenVerifiedMCPOutput(lease, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = readonly.Close() })
+	if n := verifiedMCPTestHandleCount(t, binding.StagingIdentity); n != 1 {
+		t.Fatalf("observer missed the independent reader descriptor: %d", n)
+	}
 	seal := MCPOutputSeal{Binding: binding, SealedSize: int64(len(body))}
 	outcome, err := PublishVerifiedMCPOutput(lease, readonly, seal)
 	if err != nil || outcome != MCPOutputConfirmed {
