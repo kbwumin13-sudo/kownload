@@ -25,6 +25,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | 显式 error Retry 三方 v2 与 `lastExplicitRetry.version=1`（本地候选，未审查/合入/安装） | 本地 writer 在首次真正用户 Retry 同事务把 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个既有 version 一起1→2；bucket/cap名称不变，不增 Task 字段 | 39忽略新状态仍不安全；冻结26/cdd76b11 v1 reader真实打开v2 Bolt后，Setup无fetcher且显式Continue held；既有输出保留 | 新 reader 仅接受完整v1/noLast或完整v2/Last；混版、缺坏Last、未知版本 held零IO，GET不升版 | Last是历史回执，不是首IO许可；仅新action已确认fresh ACK给本进程一次retryAuthorization，unknown/replay/restart不恢复 | 配对快照及禁止裸活动库回退；只明确用户新episode重置本轮计数/actions，Continue/Pause/Resume从不暗reset，保持同TaskID/path/checkpoint/source/D/notBefore |
 | D4 净新覆盖三方 v3（本地成套已接线，待审/未安装） | 原 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个 version 同事务升3；原bucket/cap不变，ledger必需 coverage.version=1；不增Task字段/第二ledger/迁移 | normal40/41/42均unsupported v3（政策）；40无held保证，41仅静态拒版，42仅按运行树字节关联下文ceff实际reader；不等于42 App冷启；39仍unsafe | 新reader仅接受完整v1无Last/Coverage、v2必Last无Coverage且Last.ToEpisode=current、v3必合法Coverage且Last可历史；混版/缺坏/未知held零IO | 首装只消费本进程普通新Task/本次new M已确认ACK、首byte前RAM一次资格；历史/unknown/replay/reload不补；checkpoint和完整record独立CAS，结算不直接授IO | 配对快照且禁止裸活动库回退；slot482本身仅schema/版本测试；本地runtime候选及验证分层见下节，normal42不含本候选 |
+| HTTP共享恢复三方 v4（planned，未落库/未激活） | 原Task.recovery与task_recovery_v1、task_recovery_required_v1同事务version4，原key/字段不扩；required cap精确二选一 | af2版本谓词仅静态接受v1/v2/v3、拒4；真实新writer Bolt与逐入口拒执行待验，不能称已有实测 | http-shared-recovery/v1必须无Coverage；http-shared-coverage-recovery/v1必须合法Coverage v1；混版/未知cap/错配/缺坏held零IO | 仅已有完整v1-v3在安全非活动Fence与同D/token/fullRecord/required/current-checkpoint CAS升级；legacy不enroll，GET/Setup不迁移，升级无免费资格 | 总16/transport6/refresh3/deferral10守恒；绝对NotBefore硬门；unknown/reload/query不补RAM；保B/seq/Until/历史receipt，详下节planned约束 |
 | `Task.completion={version:1,completionId:string}`（S4本地候选已接线，待审/未安装） | 普通single directHTTP(S)/显式SHA256专用receiver；ID等原R冻结值及record.CompletionID，无checksum原流程不变 | 旧39/Core可能忽略ref，不安全执行 | 新端见ref/record/required任一即核三方；缺坏/未知或CID空/错配held，bucket key不能代替CID绑定；Resolve/Start/staging前须确认受理 | 显式/批量/自动Continue不能绕过；prepared不授执行，删除不重造 | 与以下两行同M事务；精确v1，不增v2/迁移；旧Core不能消费新guard，禁止裸活动库回退，配对快照不证明输出/续跑安全 |
 | `task_completion_v1`，record.version=1（S4本地候选已接线，待审/未安装） | 同TaskID，R冻结稳定completionId/typed integrity完整意图；Core/REST真实链已验，UI/App待成套验收 | 旧Core不理解校验/安全发布阶段 | prepared可空basename/size=-1/无anchor；首byte前完整name/root与真实inode保存ACK，join后才waiting_verify | 未C重开重hash；外来同hash不认领，未知阶段拒绝；不自动整理stage | phase仅prepared/waiting_verify/verifying/verified/published_pending_commit/committed；expected/actual与归属锚点不构成跨FS+DB原子保证 |
 | `task_completion_required_v1={version:1,capability:http-sha256-completion/v1}`（S4本地候选已接线，待审/未安装） | 同M三方required；同C原子done+record+required，fresh ACK后API线性化与一次私有成功许可 | 旧39/Core忽略bucket仍unsafe；不能靠文档声称已拒 | 三方缺失/混坏/未知版，旧writer丢ref也不得降legacy；真实IO需同run/Fence | unknown ACK只读原ID，不补许可；恢复C仅重建状态不补脚本/Webhook | 备份保三方及实际输出另核；受理与公开DTO见VERIFIED_HTTP_COMPLETION.md，正常build40/41未含 |
@@ -236,3 +237,40 @@ S0 验证仅在临时 fixture 执行，不安装或运行生产 App，也不启�
 
 这些测试不证明真实旧版回退、生产 GUI 提示或输出文件仍匹配；后续新状态仍须各自实现
 版本支持守卫与故障测试，不能把 S0 的启动政策误当作通用未知字段执行证明。
+
+### HTTP共享恢复三方 v4 planned 合同（未落库/未激活）
+
+仅登记15原合同§19.1 cofreeze，基准`af2c7d23456bb539dd2970a91f8953845bd984d9`。
+三方沿原bucket/key，Task ref仍只Version，required仍Version/Capability；ledger原字段不增。
+版本4只接受plain `http-shared-recovery/v1`（Coverage nil）或coverage
+`http-shared-coverage-recovery/v1`（完整Coverage v1，含tracking/unprovable及原B/seq）。
+plain带Coverage、coverage缺坏、混版/未知cap均held；旧v1-v3变体原义不变。
+
+Actions仍原7字段`id/kind/generation/sourceRevision/members/finished/state`，kind闭集为
+transport/refresh/deferral，ID连续，NextAction=len(Actions)=TotalUsed=三分类计数之和，
+总上限16，分上限6/3/10；不因URL/source/连接变化reset。NotBefore仍原string，空或严格
+非零UTC RFC3339Nano；deferralUsed>0须非空，过期不删字段，所有begin均须now>=Until。
+延长Until先确认ACK，不截短等待、不新debit/action/wave；命令DTO的Until/ExtendActionID
+不是新增持久action字段。同一逻辑动作只扣kind+total一次，重复/查询不恢复发送许可；
+known fresh ACK至多一个受控nextwave，deferral只准排队、refresh只准一次dispatcher，
+真正IO还受Until及同D/E/G/S/action/workset门禁。unknown/reload无RAM补发资格。
+
+升级仅已有完整v1-v3在Core安全非活动Fence（旧worker锁外join）内调用，同事务首核D，
+精确核token/全record/required与CURRENT checkpoint存在/hash，从CURRENT Task仅改
+ref.version4、record.version4及required version/cap，其余状态逐值保留。v3包括unprovable
+与B/seq必须进coverage variant，不能降plain；v1-v2进plain，不造空Coverage。
+全无legacy不enroll，缺坏held，GET/Setup不迁移；升级本身不给initial/earned/continuation。
+v4 plain可保原合法v1 G0：四计数/actions零、无Last/Coverage、initial.gen0、
+InitialAttempt.CheckpointHash初始证明字段空、Until空；不抬generation/伪issued。
+CURRENT bucketSave可存在，升级逐值保全并核Expected.CheckpointPresent/hash CAS，不能删除
+或解释成免费；Token仅存储CAS坐标，不能借执行Token.Valid误拒G0，也不由此授IO。
+首次免费仍仅本进程原newM确认的RAM证据，否则沿保守收费；
+v2/v3及v4 coverage仍拒G0。Retry/save/install等须统一校验变体，未接Until门禁不得放开执行4。
+
+公开Recovery/Last/receipt仍wire1，不公开cap/kind/Until、不添timer。仅合法managed v4且
+Until未来时新增reason `cooldown`、retryAllowed=false；历史receipt.newEpisode仍Last.ToEpisode。
+冻结af2的supportedRecoveryVersion仅静态拒4；未来须真实v4 writer Bolt分别覆盖plain与
+coverage（含真实非零kind/Until），再验证Setup/Continue single/all/multi-ID/专用ContinueBatch/
+Patch/Retry在Restore/Build/HTTP前held及全库/输出保全。当前没有这些执行证据，不沿用ceff
+v3拒版日志称v4通过。40无guard政策与既有41静态/42源码关联边界保持；App+data+prefs
+配对回退不证明裸活动库执行安全。此笔只有planned文档，不改53/54或正常43，不授writer激活。
