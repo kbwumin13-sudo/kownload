@@ -239,7 +239,7 @@ func TestPathFreezeK12NativeLayoutBinding(t *testing.T) {
 				t.Fatal("native state/zero-length member changed")
 			}
 			expected = pathK12Expected(t, f, task.ID)
-			binding := PathLayoutOutputState{Version: 1, DirectoryIdentity: transfer.CompletionFileIdentity{Device: 7, Inode: 11}, Files: []PathFileIdentity{{Index: 0, RelativePath: layout.Members[0].RelativePath, Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 13}}, {Index: 1, RelativePath: layout.Members[1].RelativePath, Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 17}}}}
+			binding := PathLayoutOutputState{Phase: MCPWriteOutputStaging, Version: 1, DirectoryIdentity: transfer.CompletionFileIdentity{Device: 7, Inode: 11}, Files: []PathFileIdentity{{Index: 0, RelativePath: layout.Members[0].RelativePath, Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 13}}, {Index: 1, RelativePath: layout.Members[1].RelativePath, Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 17}}}}
 			if task, fresh, err := SavePathLayoutOutput(mcpK12Fault{f.store, true}, f.d, expected, binding); err == nil || fresh || task != nil {
 				t.Fatal("unknown native ACK activated")
 			}
@@ -309,6 +309,93 @@ func TestPathFreezeK12NetdiskTree(t *testing.T) {
 				if task.Meta.Opts.Path != snapshot.InputRoot {
 					t.Fatal("tree root split")
 				}
+			}
+		})
+	}
+}
+
+func TestPathFreezeK12MediaSidecarsAndPublication(t *testing.T) {
+	for _, backend := range []string{"mem", "bolt"} {
+		t.Run(backend, func(t *testing.T) {
+			f := mcpK12New(t, backend)
+			header, snapshot := pathK12Intent(f, "media", "media-layout")
+			r, _, err := reservePathOperation(f.store, f.d, header, snapshot, header.Request.Opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate, initial := pathK12Candidate(t, r, 0)
+			task, _, err := createPathOperationTask(f.store, f.d, r, candidate, initial)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := pathK12Expected(t, f, task.ID)
+			p := pathK12Prepared(t, expected, snapshot.InputRoot, "movie.mp4")
+			p.WorkDirectory = ".media-private-work"
+			p.Layout, err = pathpolicy.BuildLayoutV1(snapshot.InputRoot, []pathpolicy.Member{{Index: 0, RelativePath: "movie.mp4", Selected: true}, {Index: 1, RelativePath: "movie.en.srt", Selected: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.LayoutHash, _ = pathpolicy.LayoutFingerprint(p.Layout)
+			wrong, _ := cloneOperationJSON(p)
+			wrong.Layout.Members[1].RelativePath = "elsewhere/movie.en.srt"
+			wrong.LayoutHash, _ = pathpolicy.LayoutFingerprint(wrong.Layout)
+			if _, fresh, err := ConfirmPathFreeze(f.store, f.d, expected, wrong); err == nil || fresh {
+				t.Fatal("non-sibling sidecar accepted")
+			}
+			task, _, err = ConfirmPathFreeze(f.store, f.d, expected, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(task.Meta.Res.Files) != 1 || len(task.PathFreeze.Layout.Members) != 2 {
+				t.Fatal("historical Resource falsified")
+			}
+			root := transfer.CompletionFileIdentity{Device: 7, Inode: 11}
+			work := transfer.CompletionFileIdentity{Device: 7, Inode: 13}
+			binding := PathLayoutOutputState{Version: 1, Phase: MCPWriteOutputStaging, DirectoryIdentity: root, WorkDirectoryIdentity: &work, Files: []PathFileIdentity{}}
+			expected = pathK12Expected(t, f, task.ID)
+			task, _, err = SavePathLayoutOutput(f.store, f.d, expected, binding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding.Phase = MCPWriteOutputPublishing
+			binding.Files = []PathFileIdentity{{Index: 0, RelativePath: "movie.mp4", Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 17}}, {Index: 1, RelativePath: "movie.en.srt", Identity: transfer.CompletionFileIdentity{Device: 7, Inode: 19}}}
+			expected = pathK12Expected(t, f, task.ID)
+			if owned, fresh, err := SavePathLayoutOutput(mcpK12Fault{f.store, true}, f.d, expected, binding); err == nil || fresh || owned != nil {
+				t.Fatal("unknown publication ACK granted")
+			}
+			task, _ = pathK12Read(t, f, task.ID)
+			if task.PathFreeze.LayoutOutput.Phase != MCPWriteOutputPublishing {
+				t.Fatal("unknown commit not preserved")
+			}
+			expected = pathK12Expected(t, f, task.ID)
+			rewind := binding
+			rewind.Phase = MCPWriteOutputStaging
+			if _, fresh, err := SavePathLayoutOutput(f.store, f.d, expected, rewind); err == nil || fresh {
+				t.Fatal("publishing regained RW staging")
+			}
+			uncertain := binding
+			uncertain.Phase = MCPWriteOutputUncertain
+			if _, _, err = SavePathLayoutOutput(f.store, f.d, expected, uncertain); err != nil {
+				t.Fatal(err)
+			}
+			expected = pathK12Expected(t, f, task.ID)
+			if _, fresh, err := SavePathLayoutOutput(f.store, f.d, expected, rewind); err == nil || fresh {
+				t.Fatal("uncertain regained RW")
+			}
+			// An old writer route may query R2 history, but cannot cancel it.
+			next := header
+			next.OperationID = "cancel-pending"
+			if _, _, err = reservePathOperation(f.store, f.d, next, snapshot, next.Request.Opts); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = (&Downloader{storage: f.store}).CancelBatchOperationForDataset(f.d, next.OperationID); !errors.Is(err, ErrOperationConflict) {
+				t.Fatalf("legacy cancel entered R2: %v", err)
+			}
+			if err = cancelPathOperation(f.store, f.d, next.OperationID, "http-path-create/v1"); !errors.Is(err, ErrPathFreezeHeld) {
+				t.Fatal("wrong-kind cancel accepted")
+			}
+			if err = cancelPathOperation(f.store, f.d, next.OperationID, "media-path-create/v1"); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

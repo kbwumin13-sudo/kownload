@@ -726,7 +726,7 @@ func (d *Downloader) cancelBatchOperationInDataset(id, dataset string, requireIn
 		if !exists {
 			return nil
 		}
-		if !r.valid() || r.OperationID != id {
+		if !r.valid() || r.Version != 1 || r.OperationID != id {
 			return ErrOperationConflict
 		}
 		if len(requireIntegrity) > 0 && requireIntegrity[0] && (r.Integrity == nil || !r.Integrity.valid()) {
