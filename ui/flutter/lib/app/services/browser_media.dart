@@ -52,20 +52,29 @@ class BrowserMedia extends ChangeNotifier {
 
   /// Local App confirmation only. No intent supplied by the page/extension is
   /// trusted. Repeated claims retain the original operation and full intent.
-  Map<String, dynamic> claimPathCreate({required String sessionId,
-      required String commandId, required String operationId, required Map request}) {
+  Map<String, dynamic> claimPathCreate(
+      {required String sessionId,
+      required String commandId,
+      required String operationId,
+      required Map request}) {
     final pending = _pending[commandId];
     final confirmation = pending?.$3;
     final session = _sessions[sessionId];
-    if (pending == null || pending.$1 != sessionId || confirmation == null ||
-        session == null || session.closed || session.pathFreezeVersion != 1 ||
+    if (pending == null ||
+        pending.$1 != sessionId ||
+        confirmation == null ||
+        session == null ||
+        session.closed ||
+        session.pathFreezeVersion != 1 ||
         !identical(session, confirmation.session)) {
       throw StateError('media_path_confirmation_unavailable');
     }
-    TaskBatchOperationRef(namespace: TaskBatchOperationRef.namespaceV1,
-        operationId: operationId);
+    TaskBatchOperationRef(
+        namespace: TaskBatchOperationRef.namespaceV1, operationId: operationId);
     final req = request['req'], opts = request['opts'];
-    if (req is! Map || req['protocol'] != 'media' || opts is! Map ||
+    if (req is! Map ||
+        req['protocol'] != 'media' ||
+        opts is! Map ||
         opts['path'] != confirmation.intent.path ||
         opts['path'] != confirmation.options['path'] ||
         opts['name'] != confirmation.options['name']) {
@@ -73,7 +82,8 @@ class BrowserMedia extends ChangeNotifier {
     }
     final canonical = jsonEncode(_orderedMediaValue(_ownedMediaMap(request)));
     if (confirmation.operationId != null &&
-        (confirmation.operationId != operationId || confirmation.requestFingerprint != canonical)) {
+        (confirmation.operationId != operationId ||
+            confirmation.requestFingerprint != canonical)) {
       throw StateError('media_path_confirmation_changed');
     }
     confirmation.operationId = operationId;
@@ -106,15 +116,18 @@ class BrowserMedia extends ChangeNotifier {
         if (current != null && !current.closed) {
           current.items = _items(value['items']);
           current.pathFreezeVersion = value['pathFreezeVersion'] is int
-              ? value['pathFreezeVersion'] : null;
+              ? value['pathFreezeVersion']
+              : null;
         } else {
           _sessions[id] = BrowserMediaSession(
               id,
               value['clientId'],
               value['view'],
               value['site'] is String ? value['site'] : '',
-              _items(value['items']), pathFreezeVersion: value['pathFreezeVersion'] is int
-                  ? value['pathFreezeVersion'] : null);
+              _items(value['items']),
+              pathFreezeVersion: value['pathFreezeVersion'] is int
+                  ? value['pathFreezeVersion']
+                  : null);
         }
         notifyListeners();
         await show();
@@ -150,7 +163,8 @@ class BrowserMedia extends ChangeNotifier {
   }
 
   Future<dynamic> send(BrowserMediaSession session, String type,
-      {String? itemId, Map<String, dynamic> options = const {},
+      {String? itemId,
+      Map<String, dynamic> options = const {},
       HttpPathIntent? pathIntent}) async {
     if (session.closed || !_sessions.containsKey(session.id))
       throw StateError('资源页面已关闭，请重新捕获。');
@@ -164,16 +178,24 @@ class BrowserMedia extends ChangeNotifier {
     ].contains(type)) {
       throw const FormatException('invalid_request');
     }
-    if (pathIntent != null && (type != 'CREATE' || session.pathFreezeVersion != 1 ||
-        options.containsKey('taskId') || itemId == null ||
-        !session.items.any((item) => item['id'] == itemId) ||
-        options['path'] != pathIntent.path)) {
+    if (pathIntent != null &&
+        (type != 'CREATE' ||
+            session.pathFreezeVersion != 1 ||
+            options.containsKey('taskId') ||
+            itemId == null ||
+            !session.items.any((item) => item['id'] == itemId) ||
+            options['path'] != pathIntent.path)) {
       throw StateError('media_path_carrier_unsupported');
     }
     final id = 'media-${++_sequence}';
     final result = Completer<dynamic>();
-    _pending[id] = (session.id, result, pathIntent == null ? null :
-        _PathConfirmation(session, pathIntent, options));
+    _pending[id] = (
+      session.id,
+      result,
+      pathIntent == null
+          ? null
+          : _PathConfirmation(session, pathIntent, options)
+    );
     session.commands.add({
       'id': id,
       'type': type,

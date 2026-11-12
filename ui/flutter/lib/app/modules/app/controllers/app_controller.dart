@@ -214,7 +214,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
 
   Future<void> authorizeBrowserPathSubmission(CreateTask task) async {
     final id = task.browserOperationId;
-    if (id == null || task.browserHandoff != null ||
+    if (id == null ||
+        task.browserHandoff != null ||
         _browserRpc?.confirmationStatus(id)['state'] != 'accepted') {
       throw StateError('原捕获交接尚未确认，请查询原操作，勿重新创建。');
     }
@@ -579,18 +580,19 @@ class AppController extends GetxController with WindowListener, TrayListener {
               (params['req'] as Map?)?['protocol'] == 'media') {
             final reply = BrowserRpcReply.failure(
                 ctx.request.headers[operationHeader]?.firstOrNull,
-                'path_confirmation_required', status: 409);
+                'path_confirmation_required',
+                status: 409);
             await ctx.writeJSON(reply.body, statusCode: reply.status);
             return;
           }
           return browserRpc.handle(
-              ctx,
-              create: true,
-              forceCaptureConfirmation:
-                  Util.isMacos() && !MacOnboarding.completed,
-              forceConfirmation: pendingUpdateTask.value != null ||
-                  (Util.isMacos() && !MacOnboarding.completed),
-            );
+            ctx,
+            create: true,
+            forceCaptureConfirmation:
+                Util.isMacos() && !MacOnboarding.completed,
+            forceConfirmation: pendingUpdateTask.value != null ||
+                (Util.isMacos() && !MacOnboarding.completed),
+          );
         },
         "/mediaPathCreate": (ctx) => mediaPath.handle(ctx, create: true),
         "/mediaPathQuery": (ctx) => mediaPath.handle(ctx, create: false),

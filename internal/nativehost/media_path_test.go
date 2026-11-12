@@ -16,9 +16,9 @@ func TestMediaPathConfirmationTransport(t *testing.T) {
 	version := IdentityProtocol
 	req := Request{Method: "mediaPathCreate", OperationID: "media-path-op",
 		IdentityProtocol: &version,
-		BridgeBinding: &BridgeBinding{Version: version, HostName: appidentity.HostName, RouteScope: scope},
-		Meta: map[string]any{"sessionId": "session-1", "commandId": "media-2", "silent": true},
-		Params: json.RawMessage(`{"req":{"url":"https://media.test/watch","protocol":"media","extra":{"format":"v+a","header":{"Referer":"https://media.test"}}},"opts":{"path":"/owned","name":"chosen.mp4"}}`)}
+		BridgeBinding:    &BridgeBinding{Version: version, HostName: appidentity.HostName, RouteScope: scope},
+		Meta:             map[string]any{"sessionId": "session-1", "commandId": "media-2", "silent": true},
+		Params:           json.RawMessage(`{"req":{"url":"https://media.test/watch","protocol":"media","extra":{"format":"v+a","header":{"Referer":"https://media.test"}}},"opts":{"path":"/owned","name":"chosen.mp4"}}`)}
 	f := &fixture{available: true, status: 200,
 		body: `{"code":0,"operationId":"media-path-op","data":["same-task"],"submission":{"state":"created","taskIds":["same-task"]}}`}
 	d := Dispatcher{Client: f, Wakeup: f, Identity: identity}

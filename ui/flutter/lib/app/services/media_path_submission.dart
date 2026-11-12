@@ -34,16 +34,21 @@ class MediaPathSubmission {
 
   Map _data(dynamic response) {
     final body = _json(response.data);
-    if (response.statusCode != 200 || body is! Map || body['code'] != 0 ||
+    if (response.statusCode != 200 ||
+        body is! Map ||
+        body['code'] != 0 ||
         body['data'] is! Map) throw StateError('submission_unknown');
     return body['data'] as Map;
   }
 
   TaskBatchReceipt _receipt(Map data, String dataset, String id) {
     final value = data['operation'];
-    if (data['scopeVersion'] is! int || data['scopeVersion'] != 1 || data['datasetId'] != dataset ||
+    if (data['scopeVersion'] is! int ||
+        data['scopeVersion'] != 1 ||
+        data['datasetId'] != dataset ||
         data['namespace'] != TaskBatchOperationRef.namespaceV1 ||
-        data['kind'] != kind || value is! Map) {
+        data['kind'] != kind ||
+        value is! Map) {
       throw StateError('submission_unknown');
     }
     late final TaskBatchReceipt receipt;
@@ -56,16 +61,17 @@ class MediaPathSubmission {
       throw StateError('submission_unknown');
     }
     final caps = data['requiredCapabilities'];
-    if (caps is! List || (receipt.state == 'unknown'
-        ? caps.isNotEmpty
-        : caps.length != 1 || caps.single != capability)) {
+    if (caps is! List ||
+        (receipt.state == 'unknown'
+            ? caps.isNotEmpty
+            : caps.length != 1 || caps.single != capability)) {
       throw StateError('submission_unknown');
     }
     return receipt;
   }
 
-  Future<TaskBatchReceipt> _query(api.ActiveApiSnapshot snapshot,
-      String dataset, String id) async {
+  Future<TaskBatchReceipt> _query(
+      api.ActiveApiSnapshot snapshot, String dataset, String id) async {
     final response = await api.scopedTaskBatchRequest(snapshot, 'GET',
         '/api/v1/datasets/$dataset/media-path/v1/operations/$id');
     if (!snapshot.isCurrent) throw StateError('submission_unknown');
@@ -78,38 +84,64 @@ class MediaPathSubmission {
     // Existing R1, another kind, pending and unknown ACK cannot turn into a
     // second create. Only a confirmed empty R2 query admits this first send.
     if (old.state != 'unknown') return old;
-    final intent = claim(sessionId: meta['sessionId'],
-        commandId: meta['commandId'], operationId: id, request: params);
+    final intent = claim(
+        sessionId: meta['sessionId'],
+        commandId: meta['commandId'],
+        operationId: id,
+        request: params);
     final path = (params['opts'] as Map?)?['path'];
     if (params.keys.any((k) => k != 'req' && k != 'opts') ||
         (params['req'] as Map?)?['protocol'] != 'media' ||
-        path is! String || intent['version'] != 1 || intent['path'] != path ||
-        !const {'default', 'user_selected', 'manual_category',
-          'api_explicit', 'source_suggested', 'unknown'}.contains(intent['origin'])) {
+        path is! String ||
+        intent['version'] != 1 ||
+        intent['path'] != path ||
+        !const {
+          'default',
+          'user_selected',
+          'manual_category',
+          'api_explicit',
+          'source_suggested',
+          'unknown'
+        }.contains(intent['origin'])) {
       throw const FormatException('invalid_request');
     }
     final root = '/api/v1/datasets/$dataset/media-path/v1';
-    final caps = _data(await api.scopedTaskBatchRequest(
-        snapshot, 'GET', '$root/capability'));
+    final caps = _data(
+        await api.scopedTaskBatchRequest(snapshot, 'GET', '$root/capability'));
     final required = caps['requiredCapabilities'], methods = caps['methods'];
-    if (!snapshot.isCurrent || !ready() || caps['scopeVersion'] is! int || caps['scopeVersion'] != 1 ||
-        caps['datasetId'] != dataset || caps['kind'] != kind ||
-        caps['requestVersion'] is! int || caps['requestVersion'] != 1 || caps['supported'] != true ||
-        required is! List || required.length != 1 ||
-        required.single != capability || methods is! Map ||
-        methods['create'] != 'POST' || methods['query'] != 'GET' ||
-        methods['cancel'] != 'POST' || methods['preview'] != 'POST') {
+    if (!snapshot.isCurrent ||
+        !ready() ||
+        caps['scopeVersion'] is! int ||
+        caps['scopeVersion'] != 1 ||
+        caps['datasetId'] != dataset ||
+        caps['kind'] != kind ||
+        caps['requestVersion'] is! int ||
+        caps['requestVersion'] != 1 ||
+        caps['supported'] != true ||
+        required is! List ||
+        required.length != 1 ||
+        required.single != capability ||
+        methods is! Map ||
+        methods['create'] != 'POST' ||
+        methods['query'] != 'GET' ||
+        methods['cancel'] != 'POST' ||
+        methods['preview'] != 'POST') {
       throw StateError('submission_unknown');
     }
     // Recheck the live App confirmation after the asynchronous capability read.
     // The service binds the same operation and complete canonical request.
-    claim(sessionId: meta['sessionId'], commandId: meta['commandId'],
-        operationId: id, request: params);
+    claim(
+        sessionId: meta['sessionId'],
+        commandId: meta['commandId'],
+        operationId: id,
+        request: params);
     try {
-      final response = await api.scopedTaskBatchRequest(snapshot, 'POST',
-          '$root/operations', data: {
-        'version': 1, 'operationId': id,
-        'requiredCapabilities': [capability], 'request': params,
+      final response = await api
+          .scopedTaskBatchRequest(snapshot, 'POST', '$root/operations', data: {
+        'version': 1,
+        'operationId': id,
+        'requiredCapabilities': [capability],
+        'request': params,
         'pathIntent': intent,
       });
       if (!snapshot.isCurrent) throw StateError('submission_unknown');
@@ -126,8 +158,8 @@ class MediaPathSubmission {
       final ids = ctx.request.headers[operationHeader];
       if (ids?.length != 1) throw const FormatException('invalid_request');
       id = ids!.single;
-      TaskBatchOperationRef(namespace: TaskBatchOperationRef.namespaceV1,
-          operationId: id);
+      TaskBatchOperationRef(
+          namespace: TaskBatchOperationRef.namespaceV1, operationId: id);
       final params = await ctx.readJSON();
       if (!create && params.isNotEmpty) {
         throw const FormatException('invalid_request');
@@ -143,11 +175,13 @@ class MediaPathSubmission {
         final values = ctx.request.headers['X-Kownload-Host-Meta'];
         if (values?.length != 1) throw const FormatException('invalid_request');
         final meta = jsonDecode(values!.single);
-        if (meta is! Map || meta['sessionId'] is! String ||
+        if (meta is! Map ||
+            meta['sessionId'] is! String ||
             meta['commandId'] is! String) {
           throw const FormatException('invalid_request');
         }
-        if (_submitted.length >= 512 && !_submitted.containsKey('$dataset/$id')) {
+        if (_submitted.length >= 512 &&
+            !_submitted.containsKey('$dataset/$id')) {
           throw StateError('submission_unknown');
         }
         // Keep an uncertain first send in memory too. A subsequent invocation
@@ -157,14 +191,21 @@ class MediaPathSubmission {
       } else {
         receipt = await _query(snapshot, dataset, id);
       }
-      if (receipt.state != 'settled' || receipt.queryRequired ||
-          receipt.createdCount != 1 || receipt.failedCount != 0 ||
-          receipt.pendingCount != 0 || receipt.taskIds.length != 1) {
+      if (receipt.state != 'settled' ||
+          receipt.queryRequired ||
+          receipt.createdCount != 1 ||
+          receipt.failedCount != 0 ||
+          receipt.pendingCount != 0 ||
+          receipt.taskIds.length != 1) {
         throw StateError('submission_unknown');
       }
-      await ctx.writeJSON({'code': 0, 'msg': '', 'operationId': id,
+      await ctx.writeJSON({
+        'code': 0,
+        'msg': '',
+        'operationId': id,
         'data': receipt.taskIds,
-        'submission': {'state': 'created', 'taskIds': receipt.taskIds}});
+        'submission': {'state': 'created', 'taskIds': receipt.taskIds}
+      });
     } on FormatException {
       final reply = BrowserRpcReply.failure(id, 'invalid_request', status: 400);
       await ctx.writeJSON(reply.body, statusCode: reply.status);
@@ -172,7 +213,8 @@ class MediaPathSubmission {
       final reply = BrowserRpcReply.failure(id, 'invalid_request', status: 400);
       await ctx.writeJSON(reply.body, statusCode: reply.status);
     } catch (_) {
-      final reply = BrowserRpcReply.failure(id, 'submission_unknown', status: 503);
+      final reply =
+          BrowserRpcReply.failure(id, 'submission_unknown', status: 503);
       await ctx.writeJSON(reply.body, statusCode: reply.status);
     }
   }
