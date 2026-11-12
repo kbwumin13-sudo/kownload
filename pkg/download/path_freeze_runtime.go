@@ -283,7 +283,9 @@ func (d *Downloader) applyFrozenFetcherMeta(task *Task) error {
 	}
 	runtime.Opts.Path = task.Meta.Opts.Path
 	runtime.Opts.Name = task.Meta.Opts.Name
-	runtime.Res = task.Meta.Res
+	resource, err := cloneOperationJSON(task.Meta.Res)
+	if err != nil { return err }
+	runtime.Res = resource
 	return nil
 }
 
