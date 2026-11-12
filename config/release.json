@@ -1,7 +1,7 @@
 {
   "appVersion": "1.9.3",
-  "revision": 30,
-  "buildNumber": 43,
+  "revision": 31,
+  "buildNumber": 44,
   "minimumMacOS": "12.0",
   "flutterVersion": "3.41.2",
   "goVersion": "1.25.4",
