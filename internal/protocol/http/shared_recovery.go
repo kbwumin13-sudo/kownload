@@ -21,6 +21,7 @@ type sharedHTTPController interface {
 }
 
 type sharedHTTPWait struct {
+	epoch   uint64
 	seen    uint64
 	work    string
 	members []string
@@ -108,12 +109,37 @@ func sharedScopeResult(scope *recoveryWaveWork, parent context.Context, err erro
 	if scope != nil && scope.Context.Err() != nil && parent.Err() == nil {
 		return errSharedWaveDraining
 	}
+	if err != nil && scope != nil && scope.barrier != nil {
+		return &sharedWaveFailure{cause: err, barrier: scope.barrier, epoch: scope.epoch}
+	}
 	return err
 }
+
+// Leave retires the IO registration, not the identity of its result. A worker
+// can be delayed after Leave while the coordinator admits the next wave.
+type sharedWaveFailure struct {
+	cause   error
+	barrier *recoveryWaveBarrier
+	epoch   uint64
+}
+
+func (failure *sharedWaveFailure) Error() string { return failure.cause.Error() }
+func (failure *sharedWaveFailure) Unwrap() error { return failure.cause }
 
 // Called after leaving the reporting request/body/write scope. The independent
 // coordinator drains scopes, never the workers parked on this result channel.
 func (f *Fetcher) sharedRateLimited(ctx context.Context, work string, until time.Time, status int) (bool, error) {
+	return f.reportSharedRateLimit(ctx, work, until, status, nil, 0)
+}
+
+// Response-driven reports carry the original IO epoch. Verify it before even
+// updating the source Budget: a late old refusal must neither debit another
+// action nor postpone the already admitted wave's requests.
+func (f *Fetcher) sharedResponseRateLimited(ctx context.Context, work string, cause error, attempt int) (bool, error) {
+	return f.reportSharedRateLimit(ctx, work, time.Time{}, 0, cause, attempt)
+}
+
+func (f *Fetcher) reportSharedRateLimit(ctx context.Context, work string, until time.Time, status int, cause error, attempt int) (bool, error) {
 	s := f.sharedRun()
 	if s == nil {
 		return false, nil
@@ -121,8 +147,47 @@ func (f *Fetcher) sharedRateLimited(ctx context.Context, work string, until time
 	if s.failure != nil {
 		return true, s.failure
 	}
+	p, err := s.prepareRateLimitReport(ctx, work, until, status, cause, attempt)
+	if p == nil || err != nil {
+		return true, err // An already admitted old epoch needs no new wait.
+	}
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	case <-p.done:
+		return true, p.err
+	}
+}
+
+func (s *httpSharedRecovery) prepareRateLimitReport(ctx context.Context, work string, until time.Time, status int, cause error, attempt int) (*sharedHTTPWait, error) {
 	s.run.mu.Lock()
+	defer s.run.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.barrier.mu.Lock()
+	epoch, failure := s.barrier.epoch, s.barrier.failure
+	s.barrier.mu.Unlock()
+	if failure != nil {
+		return nil, failure
+	}
+	if cause != nil {
+		var report *sharedWaveFailure
+		re := extractRequestError(cause)
+		if !errors.As(cause, &report) || report.barrier != s.barrier || report.epoch == 0 || report.epoch > epoch || re == nil || !transfer.IsRateLimitStatus(re.Code) {
+			return nil, transfer.ErrRecoveryWork
+		}
+		if report.epoch < epoch {
+			return nil, nil // This refusal's wave was already charged/admitted.
+		}
+		wait, deferred, giveUp := s.f.rateLimit(re, attempt)
+		if giveUp {
+			return nil, re
+		}
+		until, status = s.f.sharedDeadline(wait, deferred), re.Code
+	}
 	seen := s.run.round
+	f := s.f
 	f.connMu.Lock()
 	members := []string{}
 	unique := map[string]bool{}
@@ -146,14 +211,17 @@ func (f *Fetcher) sharedRateLimited(ctx context.Context, work string, until time
 		members = append(members, work)
 	}
 	f.connMu.Unlock()
-	s.run.mu.Unlock()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.pending
 	if p == nil {
-		p = &sharedHTTPWait{seen: seen, work: work, members: members, until: until, status: status, done: make(chan struct{})}
+		p = &sharedHTTPWait{epoch: epoch, seen: seen, work: work, members: members, until: until, status: status, done: make(chan struct{})}
 		s.pending = p
 		go s.coordinate(p)
 	} else {
+		if p.epoch != epoch || p.seen != seen {
+			return nil, transfer.ErrRecoveryStale
+		}
 		included := false
 		for _, member := range p.members {
 			if member == work {
@@ -162,20 +230,13 @@ func (f *Fetcher) sharedRateLimited(ctx context.Context, work string, until time
 			}
 		}
 		if !included {
-			s.mu.Unlock()
-			return true, transfer.ErrRecoveryWork
+			return nil, transfer.ErrRecoveryWork
 		}
 		if until.After(p.until) {
 			p.until = until
 		}
 	}
-	s.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return true, ctx.Err()
-	case <-p.done:
-		return true, p.err
-	}
+	return p, nil
 }
 
 func (s *httpSharedRecovery) finish(p *sharedHTTPWait, err error) {

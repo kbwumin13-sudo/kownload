@@ -249,7 +249,7 @@ func (d *Downloader) RetryRecoveryForDataset(ctx context.Context, dataset, id st
 		return RecoveryTaskState{}, transfer.ErrRecoveryHeld
 	}
 	task.statusLock.Lock()
-	if task.Protocol != "http" || task.getStatus() != base.DownloadStatusError {
+	if !recoveryProtocolCompatible(task.Protocol, recoverySharedVersion) || task.getStatus() != base.DownloadStatusError {
 		task.statusLock.Unlock()
 		return RecoveryTaskState{}, transfer.ErrRecoveryHeld
 	}

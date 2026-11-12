@@ -199,11 +199,14 @@ func (o *taskRecoveryOwner) prepareSharedAction(ctx context.Context, token trans
 }
 
 // ReserveRecoveryAction is invoked by the independent HTTP coordinator, never
-// under a protocol/Task/main lock. This first producer supports deferral only;
-// refresh/provider/media remain unimplemented and fail closed here.
+// under a protocol/Task/main lock. A refresh permit covers only the frozen
+// resolver plan; it is distinct from a deferral's future-wave continuation.
 func (o *taskRecoveryOwner) ReserveRecoveryAction(ctx context.Context, token transfer.RecoveryToken, seen uint64, kind transfer.RecoveryActionKind, work string, input []string, until time.Time) (*transfer.RecoveryActionPermit, error) {
 	members, err := recoveryMembers(input)
-	if err != nil || !hasRecoveryMember(members, work) || kind != transfer.RecoveryActionDeferral || until.IsZero() {
+	if err != nil || !hasRecoveryMember(members, work) ||
+		(kind != transfer.RecoveryActionDeferral && kind != transfer.RecoveryActionRefresh) ||
+		(kind == transfer.RecoveryActionDeferral && until.IsZero()) ||
+		(kind == transfer.RecoveryActionRefresh && !until.IsZero()) {
 		return nil, transfer.ErrRecoveryWork
 	}
 	if err := o.prepareSharedAction(ctx, token); err != nil {
@@ -214,13 +217,21 @@ func (o *taskRecoveryOwner) ReserveRecoveryAction(ctx context.Context, token tra
 	if err := o.sharedCurrentLocked(ctx, token); err != nil {
 		return nil, err
 	}
+	if kind == transfer.RecoveryActionRefresh {
+		if err := checkSharedRecoveryUntil(o.record, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	expected, err := o.observeSharedActionLocked(ctx, token, o.record)
 	if err != nil {
 		return nil, err
 	}
+	untilText := ""
+	if kind == transfer.RecoveryActionDeferral {
+		untilText = until.UTC().Format(time.RFC3339Nano)
+	}
 	record, id, fresh, err := reserveSharedRecoveryAction(o.store, o.sharedDataset, expected,
-		recoverySharedAction{Kind: recoveryDeferralAction, Seen: seen, Work: work, Members: members,
-			Until: until.UTC().Format(time.RFC3339Nano)})
+		recoverySharedAction{Kind: recoveryActionKind(kind), Seen: seen, Work: work, Members: members, Until: untilText})
 	if err != nil {
 		o.sharedUnknownLocked()
 		return nil, err
@@ -228,6 +239,32 @@ func (o *taskRecoveryOwner) ReserveRecoveryAction(ctx context.Context, token tra
 	o.record = record
 	if _, err := o.observeSharedActionLocked(ctx, token, record); err != nil {
 		return nil, err
+	}
+	if kind == transfer.RecoveryActionRefresh {
+		if !fresh {
+			permit := o.sharedActionPermit
+			if permit == nil || permit.Kind != kind || permit.Token != token || permit.ActionID != id {
+				return nil, transfer.ErrRecoveryWork
+			}
+			return permit, nil
+		}
+		// Keeping the exact process object is essential: a persisted charged
+		// refresh, a query or a reload cannot reconstruct this resolver grant.
+		var permit *transfer.RecoveryActionPermit
+		permit = transfer.IssueRecoveryActionPermit(token, id, kind, time.Time{}, func(checkCtx context.Context) error {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if err := o.sharedCurrentLocked(checkCtx, token); err != nil {
+				return err
+			}
+			if o.sharedActionPermit != permit || !reflect.DeepEqual(o.record, record) {
+				return transfer.ErrRecoveryStale
+			}
+			return checkSharedRecoveryUntil(o.record, time.Now())
+		})
+		o.sharedContinuation.Store(nil)
+		o.sharedActionPermit = permit
+		return permit, nil
 	}
 	if !fresh {
 		grant := o.sharedContinuation.Load()
@@ -311,7 +348,7 @@ func (o *taskRecoveryOwner) ExtendRecoveryDeferral(ctx context.Context, token tr
 // action version/workset are internal execution markers, not new wire/schema.
 func (o *taskRecoveryOwner) sharedLeaseLocked() *transfer.RecoveryLease {
 	return &transfer.RecoveryLease{Token: o.token, Owner: o, SourceHash: o.record.SourceHash,
-		Round: o.record.NextAction, ActionVersion: recoverySharedVersion, Context: o.runContext,
+		Round: o.record.NextAction, ActionVersion: recoverySharedVersion, Context: o.runContext, ParentContext: o.parentContext,
 		InitialMembers: append([]string(nil), o.sharedInitialMembers...)}
 }
 
@@ -394,7 +431,7 @@ func (o *taskRecoveryOwner) beginShared(ctx context.Context, generation uint64, 
 		freshRetry := false
 		if explicit != nil && record.LastExplicitRetry != nil && explicit.Episode == record.Episode &&
 			explicit.ActionID == record.LastExplicitRetry.ActionID {
-			bound, err := recoverySourceHash(task.Meta.Req, explicit.DefaultsHash)
+			bound, err := recoveryTaskSourceHash(task, explicit.DefaultsHash)
 			freshRetry = err == nil && bound == explicit.SourceHash
 		}
 		if earned != nil && earned.DatasetID != dataset {
@@ -451,6 +488,9 @@ func (o *taskRecoveryOwner) beginShared(ctx context.Context, generation uint64, 
 	if initial && initialCoverage && committed.Coverage == nil {
 		token := o.token
 		o.coverageInstallAuthorization.Store(&token)
+	}
+	if o.parentContext != nil {
+		o.parentRun = &parentRecoveryRun{token:o.token,epoch:generation,protocol:o.parentContext.Protocol(),active:map[string]int{},children:map[string]string{}}
 	}
 	o.active.Store(true)
 	return o.sharedLeaseLocked(), nil
@@ -527,6 +567,9 @@ func (o *taskRecoveryOwner) admitSharedWave(ctx context.Context, dataset string,
 	defer o.mu.Unlock()
 	if err := o.sharedCurrentLocked(ctx, snapshot.Token); err != nil {
 		return nil, err
+	}
+	if snapshot.SourceHash != o.record.SourceHash && o.parentRun != nil && o.parentRun.token == snapshot.Token && o.parentRun.children[snapshot.SourceHash] != "" {
+		snapshot.SourceHash = o.record.SourceHash
 	}
 	if dataset == "" || o.sharedDataset != dataset || snapshot.SourceHash != o.record.SourceHash {
 		return nil, transfer.ErrRecoveryStale

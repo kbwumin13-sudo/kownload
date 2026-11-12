@@ -58,7 +58,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		if record.Episode != o.record.Episode || record.Generation != o.record.Generation || record.SourceRevision != o.record.SourceRevision || record.SourceHash != o.record.SourceHash {
 			return transfer.ErrRecoveryStale
 		}
-		if snapshot.ID != o.taskID || snapshot.Protocol != "http" || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
+		if snapshot.ID != o.taskID || !recoveryProtocolCompatible(snapshot.Protocol, record.Version) || snapshot.Recovery == nil || snapshot.Recovery.Version != record.Version || snapshot.Meta == nil || snapshot.Meta.Req == nil {
 			return transfer.ErrRecoveryHeld
 		}
 		if err := guardCompletionSnapshot(tx, snapshot); err != nil {
@@ -68,7 +68,7 @@ func (o *taskRecoveryOwner) persistSnapshot(snapshot *Task, checkpoint any, writ
 		if len(defaults) > 0 {
 			digest = defaults[0]
 		}
-		hash, err := recoverySourceHash(snapshot.Meta.Req, digest)
+		hash, err := recoveryTaskSourceHash(snapshot, digest)
 		if err != nil {
 			return err
 		}
@@ -224,7 +224,7 @@ func (o *taskRecoveryOwner) markCleanPaused() error {
 func invalidateDeletedRun(task *Task) {
 	cancelVerifiedSuccess(task)
 	invalidateTaskRecovery(task)
-	if task.Protocol == "http" {
+	if task.Protocol == "http" || parentRecoveryProtocol(task.Protocol) {
 		if cancel := task.recoveryRunCancel.Load(); cancel != nil {
 			(*cancel)()
 		}

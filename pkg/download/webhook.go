@@ -98,6 +98,9 @@ func (d *Downloader) getWebhookUrls() []string {
 // sendWebhookToUrl sends webhook data to a single URL
 // Returns the HTTP status code and any error that occurred
 func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData, permits ...*verifiedSuccessPermit) (int, error) {
+	if data == nil || data.Payload == nil || !d.MCPTaskEffectAllowed(data.Payload.Task, "webhook") {
+		return 0, context.Canceled
+	}
 	ctx := context.Background()
 	if len(permits) > 0 {
 		if !d.verifiedSuccessAllowed(permits[0]) {
@@ -136,6 +139,9 @@ func (d *Downloader) sendWebhookToUrl(url string, data *WebhookData, permits ...
 
 // triggerWebhooks sends webhook notifications to all configured URLs
 func (d *Downloader) triggerWebhooks(event WebhookEvent, task *Task, err error, permits ...*verifiedSuccessPermit) {
+	if !d.MCPTaskEffectAllowed(task, "webhook") {
+		return
+	}
 	urls := d.getWebhookUrls()
 	if len(urls) == 0 {
 		return
