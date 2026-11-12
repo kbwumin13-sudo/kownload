@@ -100,13 +100,23 @@ class _ManualBatchAttempt {
   final String input, signature;
   final String? expectedSha256;
   final HttpPathIntent? pathIntent;
+  final bool protocolDialog;
+  final int pathDraftEpoch;
+  final List<int> selection;
+  final CreateTask? captureRequest;
+  ScopedTaskBatchReply? lastReply;
   bool sent = false;
   // A later GET proves only this operation's old history, never acceptance of
   // the draft that already received a conflicting-intent response.
   bool conflicted = false;
   _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
       this.input, this.signature,
-      {this.expectedSha256, this.pathIntent});
+      {this.expectedSha256,
+      this.pathIntent,
+      this.protocolDialog = false,
+      this.pathDraftEpoch = 0,
+      this.selection = const [],
+      this.captureRequest});
 }
 
 class CreateViewState extends State<CreateView> {
@@ -137,8 +147,30 @@ class CreateViewState extends State<CreateView> {
   }
 
   bool _pathInputBlocked() {
-    if (!_pathPolicyOptIn || _manualBatch != null) return false;
+    if (!_pathPolicyOptIn) return false;
+    if (_panelRequest?.browserHandoff != null) {
+      final url = _urlController.text.trim();
+      if (_panelRequest?.req?.url == url && parseProtocol(url) == Protocol.http)
+        return false;
+      _manualNotice.value = 'httpPathInvalidRequest'.tr;
+      return true;
+    }
+    if (_manualBatch != null) return false;
+    if (Get.find<AppController>().pendingUpdateTask.value != null) return false;
     final urls = Util.textToLines(_urlController.text.trim());
+    final variant = _draftPathVariant();
+    if (urls.length == 1 &&
+        const {PathCreateVariant.bt, PathCreateVariant.ed2k}
+            .contains(variant) &&
+        _panelRequest == null &&
+        _originalRequest == null) return false;
+    if (urls.length == 1 &&
+        _panelRequest?.browserOperationId != null &&
+        _panelRequest?.browserHandoff == null &&
+        variant != null) return false;
+    if (urls.length == 1 &&
+        parseProtocol(urls.single) == Protocol.netdisk &&
+        _panelRequest?.browserHandoff == null) return false;
     if (urls.length == 1 &&
         parseProtocol(urls.single) == Protocol.http &&
         const {'http', 'https'}.contains(Uri.tryParse(urls.single)?.scheme) &&
@@ -149,6 +181,22 @@ class CreateViewState extends State<CreateView> {
         Get.find<AppController>().pendingUpdateTask.value == null) return false;
     _manualNotice.value = 'httpPathInvalidRequest'.tr;
     return true;
+  }
+
+  PathCreateVariant? _draftPathVariant() {
+    if (_originalRequest?.protocol == 'media' ||
+        _panelRequest?.req?.protocol == 'media') {
+      return PathCreateVariant.media;
+    }
+    final urls = Util.textToLines(_urlController.text.trim());
+    if (urls.length != 1) return null;
+    return switch (parseProtocol(urls.single)) {
+      Protocol.http => PathCreateVariant.http,
+      Protocol.bt => PathCreateVariant.bt,
+      Protocol.ed2k => PathCreateVariant.ed2k,
+      Protocol.netdisk => PathCreateVariant.netdisk,
+      _ => null,
+    };
   }
 
   String _pathPreviewFingerprint() => jsonEncode({
@@ -198,7 +246,8 @@ class CreateViewState extends State<CreateView> {
       final request = HttpPathCreateRequest(batch,
           pathIntent: HttpPathIntent(
               path: _pathIntent.path, origin: _pathIntent.wireOrigin),
-          expectedSHA256: expected);
+          expectedSHA256: expected,
+          variant: _draftPathVariant() ?? PathCreateVariant.http);
       final identity = await ScopedTaskBatchApi.readIdentity(snapshot!);
       if (!current()) return;
       final bound =
@@ -240,10 +289,12 @@ class CreateViewState extends State<CreateView> {
         if (_pathPolicyOptIn) ...[
           Obx(() => OutlinedButton(
               key: const ValueKey('http-path-preview'),
-              onPressed:
-                  _pathPreviewBusy.value || _manualBusy || _manualBatch != null
-                      ? null
-                      : _previewPath,
+              onPressed: _draftPathVariant() == PathCreateVariant.netdisk ||
+                      _pathPreviewBusy.value ||
+                      _manualBusy ||
+                      _manualBatch != null
+                  ? null
+                  : _previewPath,
               child: Text('httpPathPreview'.tr))),
           Text('httpPathPreviewHint'.tr),
           Obx(() => _pathPreviewNotice.value == null
@@ -315,27 +366,36 @@ class CreateViewState extends State<CreateView> {
       epoch == _manualEpoch &&
       identical(_manualBatch, attempt) &&
       attempt.api.snapshot.isCurrent;
-  bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
-      _manualReferenceCurrent(attempt, epoch) &&
-      _checksumDraftMatches(attempt) &&
-      (attempt.pathIntent == null
-          ? !_pathPolicyOptIn
-          : _pathPolicyOptIn &&
-              attempt.pathIntent!.path == _pathIntent.path &&
-              attempt.pathIntent!.origin == _pathIntent.wireOrigin) &&
-      attempt.input == _urlController.text.trim() &&
-      attempt.signature ==
-          jsonEncode(_manualPayload(
-                  Util.textToLines(attempt.input),
-                  Options(
-                      name: attempt.expectedSha256 == null &&
-                              attempt.pathIntent == null
-                          ? ''
-                          : _renameController.text,
-                      path: _pathController.text,
-                      selectFiles: [],
-                      extra: parseReqOptsExtra()))
-              .toJson());
+  bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) {
+    if (!_manualReferenceCurrent(attempt, epoch)) return false;
+    if (attempt.captureRequest != null &&
+        !identical(attempt.captureRequest, _panelRequest)) return false;
+    if (attempt.protocolDialog)
+      return _netdiskOpen.value &&
+          _pathPolicyOptIn &&
+          attempt.pathDraftEpoch == _pathDraftEpoch &&
+          attempt.input == _urlController.text.trim();
+    return _checksumDraftMatches(attempt) &&
+        (attempt.pathIntent == null
+            ? !_pathPolicyOptIn
+            : _pathPolicyOptIn &&
+                attempt.pathIntent!.path == _pathIntent.path &&
+                attempt.pathIntent!.origin == _pathIntent.wireOrigin) &&
+        attempt.input == _urlController.text.trim() &&
+        attempt.signature ==
+            jsonEncode(_manualPayload(
+                    Util.textToLines(attempt.input),
+                    Options(
+                        name: attempt.expectedSha256 == null &&
+                                attempt.pathIntent == null
+                            ? ''
+                            : _renameController.text,
+                        path: _pathController.text,
+                        selectFiles: attempt.selection,
+                        extra: parseReqOptsExtra()))
+                .toJson());
+  }
+
   bool _checksumDraftMatches(_ManualBatchAttempt attempt) {
     try {
       return normalizedExpectedSha256(_expectedSha256Controller.text) ==
@@ -422,6 +482,7 @@ class CreateViewState extends State<CreateView> {
       return;
     }
     final receipt = reply.receipt;
+    attempt.lastReply = reply;
     if (reply.envelope.message == 'dataset_mismatch') {
       _manualNotice.value = '数据域已变化，原批次引用已隔离保留。';
       TaskBatchGroups.referencesChanged();
@@ -442,6 +503,7 @@ class CreateViewState extends State<CreateView> {
         ? '批次结果尚未确认，请查询原批次。'
         : '已创建 ${receipt.createdCount} 项，失败 ${receipt.failedCount} 项，待创建 ${receipt.pendingCount} 项。';
     TaskBatchGroups.referencesChanged();
+    if (attempt.protocolDialog) return;
     final count = attempt.batch.reqs!.length;
     if (!reply.requiresQuery &&
         receipt?.createdCount == count &&
@@ -490,7 +552,10 @@ class CreateViewState extends State<CreateView> {
   }
 
   Future<void> _submitManualBatch(List<String> urls, Options opts,
-      {String? expectedSha256}) async {
+      {String? expectedSha256,
+      HttpPathCreateRequest? preparedRequest,
+      bool protocolDialog = false,
+      String? operationId}) async {
     if (_manualBatch != null) {
       await _queryManualBatch();
       return;
@@ -501,16 +566,23 @@ class CreateViewState extends State<CreateView> {
       return;
     }
     final input = _urlController.text.trim();
+    final capture = _pathPolicyOptIn &&
+            _panelRequest?.browserHandoff == null &&
+            _panelRequest?.browserOperationId != null
+        ? _panelRequest
+        : null;
     final epoch = ++_manualEpoch;
-    final raw = jsonEncode(_manualPayload(urls, opts).toJson());
+    final raw = jsonEncode(
+        (preparedRequest?.batch ?? _manualPayload(urls, opts)).toJson());
     final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
-    HttpPathCreateRequest? pathRequest;
-    if (_pathPolicyOptIn) {
+    HttpPathCreateRequest? pathRequest = preparedRequest;
+    if (_pathPolicyOptIn && pathRequest == null) {
       try {
         pathRequest = HttpPathCreateRequest(frozen,
             pathIntent: HttpPathIntent(
                 path: _pathIntent.path, origin: _pathIntent.wireOrigin),
-            expectedSHA256: expectedSha256);
+            expectedSHA256: expectedSha256,
+            variant: _draftPathVariant() ?? PathCreateVariant.http);
       } on ArgumentError catch (error) {
         _manualNotice.value = error.message == 'unsupported_option'
             ? 'SHA-256 校验不支持自动加种或自动解压（unsupported_option），请关闭相应选项后重试。'
@@ -559,7 +631,8 @@ class CreateViewState extends State<CreateView> {
         return;
       }
       if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) return;
-      final id =
+      final id = operationId ??
+          capture?.browserOperationId ??
           'manual-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
       final operation = TaskBatchOperationRef(
           namespace: TaskBatchOperationRef.namespaceV1, operationId: id);
@@ -572,7 +645,11 @@ class CreateViewState extends State<CreateView> {
           input,
           raw,
           expectedSha256: expectedSha256,
-          pathIntent: pathRequest?.pathIntent);
+          pathIntent: pathRequest?.pathIntent,
+          protocolDialog: protocolDialog,
+          pathDraftEpoch: _pathDraftEpoch,
+          selection: List.unmodifiable(opts.selectFiles),
+          captureRequest: capture);
       // Preflight is a pure capability/domain query, never a recovered submit permit.
       final preflight = await bound.query(operation);
       if (!mounted ||
@@ -609,6 +686,10 @@ class CreateViewState extends State<CreateView> {
       if (!sameDataset || !_manualDraftCurrent(attempt, epoch)) {
         _manualNotice.value = '连接或数据域已变化，未发送创建请求，原引用已保留。';
         return;
+      }
+      if (capture != null) {
+        await Get.find<AppController>().authorizeBrowserPathSubmission(capture);
+        if (!_manualDraftCurrent(attempt, epoch)) return;
       }
       // Synchronous, one-shot consumption before the only POST. Never restored
       // by finally, query, cancellation, duplicate record or a reopened journal.
@@ -1465,6 +1546,10 @@ class CreateViewState extends State<CreateView> {
                           HttpChecksumInput(
                             controller: _expectedSha256Controller,
                             onChanged: (_) => _checksumChanged(),
+                            helperText: _pathPolicyOptIn &&
+                                    _panelRequest?.browserOperationId != null
+                                ? 'httpPathCapturedHashHint'.tr
+                                : null,
                           ),
                           _pathPolicyControls(),
                           const SizedBox(height: 12),
@@ -2837,8 +2922,8 @@ class CreateViewState extends State<CreateView> {
         parseProtocol(urls.single) != Protocol.http ||
         !const {'http', 'https'}.contains(Uri.tryParse(urls.single)?.scheme) ||
         (Uri.tryParse(urls.single)?.host.isEmpty ?? true) ||
-        _panelRequest != null ||
-        _originalRequest != null ||
+        ((_panelRequest != null || _originalRequest != null) &&
+            !(_pathPolicyOptIn && _panelRequest?.browserOperationId != null)) ||
         _netdiskRequest.value != null ||
         Get.find<AppController>().pendingUpdateTask.value != null) {
       _manualNotice.value = 'SHA-256 校验目前仅支持手动单链接 HTTP(S)，未提交任务。';
@@ -2867,6 +2952,10 @@ class CreateViewState extends State<CreateView> {
     try {
       if (Util.isMacos()) _syncDefaultDownloadPath();
       _confirmController.start();
+      if (_manualBatch?.protocolDialog == true) {
+        await _queryManualBatch();
+        return;
+      }
       final hasInput = _urlController.text.trim().isNotEmpty ||
           controller.fileDataUri.isNotEmpty ||
           _netdiskRequest.value != null ||
@@ -2876,18 +2965,36 @@ class CreateViewState extends State<CreateView> {
       final handoffRequest = _panelRequest;
       if (handoffRequest?.browserHandoff != null &&
           handoffRequest?.req?.url.trim() == _urlController.text.trim()) {
-        final prepared = await Get.find<AppController>().prepareBrowserHandoff(
-            CreateTask(
-                req: _requestForUrl(_urlController.text.trim()),
-                opts: Options(
-                    name: _renameController.text,
-                    path: _pathController.text,
-                    selectFiles: [],
-                    extra: parseReqOptsExtra()))
-              ..browserHandoff = handoffRequest!.browserHandoff
-              ..browserOperationId = handoffRequest.browserOperationId
-              ..browserCapture = true);
+        final fingerprint = _pathPreviewFingerprint();
+        final task = CreateTask(
+            req: _requestForUrl(_urlController.text.trim()),
+            opts: Options(
+                name: _renameController.text,
+                path: _pathController.text,
+                selectFiles: [],
+                extra: parseReqOptsExtra()))
+          ..browserHandoff = handoffRequest!.browserHandoff
+          ..browserOperationId = handoffRequest.browserOperationId
+          ..browserCapture = true;
+        final typed = _pathPolicyOptIn
+            ? HttpPathCreateRequest(
+                CreateTaskBatch(reqs: [
+                  CreateTaskBatchItem(req: task.req, opts: task.opts)
+                ]),
+                pathIntent: HttpPathIntent(
+                    path: _pathIntent.path, origin: _pathIntent.wireOrigin),
+                expectedSHA256:
+                    normalizedExpectedSha256(_expectedSha256Controller.text))
+            : null;
+        final prepared = await Get.find<AppController>()
+            .prepareBrowserHandoff(task, pathCreate: typed);
         _checkCaptureCompletion();
+        if (typed != null &&
+            (!identical(handoffRequest, _panelRequest) ||
+                fingerprint != _pathPreviewFingerprint())) {
+          _manualNotice.value = '原交接已有结果，当前修改后的草稿已保留；请查询原操作。';
+          return;
+        }
         if (prepared.state == 'prepared' || prepared.committed) {
           _clearBrowserDraft();
           await MacPanel.showTaskResult(prepared.taskIds, null);
@@ -2991,18 +3098,34 @@ class CreateViewState extends State<CreateView> {
                 expectedSha256 != null ||
                 _pathPolicyOptIn ||
                 _manualBatch != null) &&
-            _panelRequest == null &&
-            _originalRequest == null &&
+            (_panelRequest == null ||
+                (_pathPolicyOptIn && _panelRequest?.browserHandoff == null)) &&
+            (_originalRequest == null || _pathPolicyOptIn) &&
             _netdiskRequest.value == null &&
             Get.find<AppController>().pendingUpdateTask.value == null &&
-            urls.every((url) => parseProtocol(url) == Protocol.http)) {
+            (urls.every((url) => parseProtocol(url) == Protocol.http) ||
+                (_pathPolicyOptIn &&
+                    const {
+                      PathCreateVariant.bt,
+                      PathCreateVariant.ed2k,
+                      PathCreateVariant.media
+                    }.contains(_draftPathVariant())))) {
           final stop = Completer<void>();
           _manualConfirmationEpoch = confirmation;
           _manualConfirmationStop = stop;
-          await Future.any<void>([
-            _submitManualBatch(urls, opt, expectedSha256: expectedSha256),
-            stop.future
-          ]);
+          Future<void> submit() async {
+            if (_pathPolicyOptIn &&
+                _draftPathVariant() == PathCreateVariant.bt &&
+                !controller.directDownload.value &&
+                _manualBatch == null) {
+              final selected = await _selectPathMembers(urls, opt);
+              if (selected == null) return;
+              opt.selectFiles = selected;
+            }
+            await _submitManualBatch(urls, opt, expectedSha256: expectedSha256);
+          }
+
+          await Future.any<void>([submit(), stop.future]);
           return;
         }
         if (isDirect) {
@@ -3075,6 +3198,10 @@ class CreateViewState extends State<CreateView> {
     try {
       final opts = options ?? Options(extra: parseReqOptsExtra());
       if (opts.path.isEmpty) opts.path = _pathController.text;
+      final protected = _pathPolicyOptIn && onResume == null;
+      if (protected && !await _requirePathCapability(PathCreateVariant.netdisk))
+        return false;
+      if (!mounted) return false;
       return await showDialog<bool>(
             context: Get.context!,
             barrierDismissible: false,
@@ -3086,6 +3213,8 @@ class CreateViewState extends State<CreateView> {
                     : _netdiskRequest.value?.proxy ?? parseProxy(),
                 api: netdiskApi,
                 browserTool: netdiskBrowserTool,
+                pathIntent: protected ? _pathIntent : null,
+                submitPrepared: protected ? _submitPreparedPath : null,
                 onResume: onResume),
           ) ==
           true;
@@ -3093,6 +3222,161 @@ class CreateViewState extends State<CreateView> {
       _netdiskOpen.value = false;
       if (mounted) setState(() {});
     }
+  }
+
+  Future<List<int>?> _selectPathMembers(List<String> urls, Options opts) async {
+    final snapshot = activeApiSnapshot;
+    if (snapshot?.taskBatchRoute?.supported != true || urls.length != 1) {
+      _manualNotice.value = 'httpPathUnavailable'.tr;
+      return null;
+    }
+    final epoch = _manualEpoch, draft = _pathDraftEpoch;
+    final fingerprint = _pathPreviewFingerprint();
+    bool current() =>
+        mounted &&
+        epoch == _manualEpoch &&
+        draft == _pathDraftEpoch &&
+        snapshot!.isCurrent &&
+        fingerprint == _pathPreviewFingerprint();
+    setState(() => _manualBusy = true);
+    _manualNotice.value = 'pathLoadingMembers'.tr;
+    try {
+      final request = HttpPathCreateRequest(_manualPayload(urls, opts),
+          pathIntent: HttpPathIntent(
+              path: _pathIntent.path, origin: _pathIntent.wireOrigin),
+          variant: PathCreateVariant.bt);
+      final identity = await ScopedTaskBatchApi.readIdentity(snapshot!);
+      if (!current()) return null;
+      final bound =
+          HttpPathApi(snapshot: snapshot, identity: identity, request: request);
+      if (!await bound.supported()) {
+        if (current()) _manualNotice.value = 'httpPathUnavailable'.tr;
+        return null;
+      }
+      if (!current()) return null;
+      final operation = TaskBatchOperationRef(
+          namespace: TaskBatchOperationRef.namespaceV1,
+          operationId:
+              'preview-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}');
+      final preview = await bound.preview(operation);
+      if (!current()) return null;
+      final selected =
+          preview.members.where((m) => m.selected).map((m) => m.index).toSet();
+      final indices = await MacPanel.transient(() => showDialog<List<int>>(
+          context: context,
+          builder: (dialogContext) => StatefulBuilder(
+              builder: (context, update) => AlertDialog(
+                    key: const ValueKey('path-native-file-selection'),
+                    title: Text('selectFile'.tr),
+                    content: SizedBox(
+                        width: 500,
+                        height: 360,
+                        child: ListView.builder(
+                            itemCount: preview.members.length,
+                            itemBuilder: (context, index) {
+                              final member = preview.members[index];
+                              return CheckboxListTile(
+                                  key: ValueKey('path-member-${member.index}'),
+                                  title: Text(member.relativePath),
+                                  value: selected.contains(member.index),
+                                  onChanged: (value) => update(() {
+                                        if (value == true) {
+                                          selected.add(member.index);
+                                        } else {
+                                          selected.remove(member.index);
+                                        }
+                                      }));
+                            })),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(dialogContext),
+                          child: Text('cancel'.tr)),
+                      TextButton(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => Navigator.pop(
+                                  dialogContext, selected.toList()..sort()),
+                          child: Text('confirm'.tr)),
+                    ],
+                  ))));
+      if (!current()) return null;
+      if (indices == null) {
+        _manualNotice.value = null;
+        return null;
+      }
+      final same = await bound.stillSameDataset();
+      if (!current()) return null;
+      if (!same) {
+        _manualNotice.value = 'httpPathUnavailable'.tr;
+        return null;
+      }
+      _manualNotice.value = null;
+      return indices;
+    } catch (_) {
+      if (current()) _manualNotice.value = 'httpPathPreviewFailed'.tr;
+      return null;
+    } finally {
+      if (mounted && epoch == _manualEpoch) setState(() => _manualBusy = false);
+    }
+  }
+
+  Future<bool> _requirePathCapability(PathCreateVariant variant) async {
+    final snapshot = activeApiSnapshot;
+    if (snapshot?.taskBatchRoute?.supported != true) {
+      _manualNotice.value = 'httpPathUnavailable'.tr;
+      return false;
+    }
+    final epoch = _pathDraftEpoch;
+    try {
+      final identity = await ScopedTaskBatchApi.readIdentity(snapshot!);
+      final supported = await HttpPathApi.supportedFor(
+          snapshot: snapshot, identity: identity, variant: variant);
+      if (!mounted || epoch != _pathDraftEpoch || !snapshot.isCurrent)
+        return false;
+      if (supported) return true;
+    } catch (_) {}
+    _manualNotice.value = 'httpPathUnavailable'.tr;
+    return false;
+  }
+
+  Future<List<String>> _submitPreparedPath(
+      NetdiskPrepared prepared, PathIntent intent) async {
+    final request = HttpPathCreateRequest.netdisk(
+        reqs: prepared.reqs,
+        batchId: prepared.batchId,
+        pathIntent:
+            HttpPathIntent(path: intent.path, origin: intent.wireOrigin));
+    final existing = _manualBatch;
+    if (existing != null &&
+        (!existing.protocolDialog ||
+            (existing.api is HttpPathApi &&
+                (existing.api as HttpPathApi).request.batchId !=
+                    prepared.batchId))) {
+      throw const NetdiskException(
+          '请先查询原批次；不会创建新的 operation。', 'query_required');
+    }
+    await _submitManualBatch(const [], Options(),
+        preparedRequest: request, protocolDialog: true);
+    final attempt = _manualBatch;
+    final reply = attempt?.lastReply;
+    if (attempt?.protocolDialog == true &&
+        attempt!.conflicted == false &&
+        attempt.api.snapshot.isCurrent &&
+        attempt.pathDraftEpoch == _pathDraftEpoch &&
+        attempt.api is HttpPathApi &&
+        (attempt.api as HttpPathApi).request.batchId == prepared.batchId &&
+        reply != null &&
+        !reply.requiresQuery &&
+        reply.receipt?.createdCount == prepared.reqs.length &&
+        reply.receipt?.failedCount == 0) {
+      final ids = reply.createdTaskIds;
+      _createdIds.addAll(ids);
+      _manualBatch = null;
+      _manualNotice.value = null;
+      return ids;
+    }
+    throw NetdiskException(_manualNotice.value ?? 'queryOriginalBatch'.tr,
+        'query_required', {'taskIds': reply?.createdTaskIds ?? const []});
   }
 
   /// Shows a dialog to ask if user wants to update pending task or create new

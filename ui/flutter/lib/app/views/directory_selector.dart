@@ -85,6 +85,7 @@ class DirectorySelector extends StatefulWidget {
   final bool showPlaceholderButton;
   final VoidCallback? onEditComplete;
   final ValueChanged<String>? onDirectoryPicked;
+  final ValueChanged<String>? onPathEdited;
   final bool showRenderedPlaceholders;
   final bool inlineActions;
 
@@ -97,6 +98,7 @@ class DirectorySelector extends StatefulWidget {
     this.showPlaceholderButton = false,
     this.onEditComplete,
     this.onDirectoryPicked,
+    this.onPathEdited,
     this.showRenderedPlaceholders = false,
     this.inlineActions = false,
   }) : super(key: key);
@@ -352,6 +354,7 @@ class _DirectorySelectorState extends State<DirectorySelector> {
                 return v!.trim().isNotEmpty ? null : 'downloadDirValid'.tr;
               },
               onEditingComplete: widget.onEditComplete,
+              onChanged: widget.onPathEdited,
               onTapOutside: (event) {
                 // Call onEditComplete when user taps outside the field
                 widget.onEditComplete?.call();

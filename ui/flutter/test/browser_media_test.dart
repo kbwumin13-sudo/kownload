@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/app/services/browser_media.dart';
+import 'package:gopeed/api/model/http_path_create.dart';
 import 'package:gopeed/app/modules/create/views/browser_media_view.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
@@ -69,6 +70,82 @@ Future<void> mount(WidgetTester tester, BrowserMedia media) async {
 }
 
 void main() {
+  test(
+      'path claim requires a live declared carrier and owns original confirmation',
+      () async {
+    final media = await open([item('one', kind: 'video', media: true)]);
+    final session = media.active!;
+    final options = <String, dynamic>{
+      'path': '/tmp/owned-media',
+      'name': 'video.mp4',
+      'format': 'picked',
+      'subtitleLanguages': ['en']
+    };
+    final intent =
+        HttpPathIntent(path: '/tmp/owned-media', origin: 'user_selected');
+    await expectLater(
+        media.send(session, 'CREATE',
+            itemId: 'one', options: options, pathIntent: intent),
+        throwsStateError);
+    expect(await poll(media), isNull);
+    expect(media.hasPendingPathCreate, false);
+    await media.handle({
+      'action': 'mediaOpen',
+      'sessionId': session.id,
+      'clientId': session.clientId,
+      'view': session.view,
+      'items': session.items,
+      'pathFreezeVersion': 1
+    });
+    final sending = media.send(session, 'CREATE',
+        itemId: 'one', options: options, pathIntent: intent);
+    final stopped = expectLater(sending, throwsStateError);
+    final command = (await poll(media))!;
+    expect(media.hasPendingPathCreate, true);
+    expect(command['pathFreeze'], true);
+    expect(command.containsKey('pathIntent'), false);
+    options['name'] = 'changed-after-send';
+    (command['options'] as Map)['path'] = '/tmp/changed-after-poll';
+    final request = <String, dynamic>{
+      'req': {
+        'url': 'https://fixture.invalid/media',
+        'protocol': 'media',
+        'extra': {
+          'format': 'picked',
+          'subtitleLanguages': ['en']
+        }
+      },
+      'opts': {'path': '/tmp/owned-media', 'name': 'video.mp4'},
+    };
+    Map<String, dynamic> claim(
+            {String? sessionId, String op = 'media:original', Map? body}) =>
+        media.claimPathCreate(
+            sessionId: sessionId ?? session.id,
+            commandId: command['id'],
+            operationId: op,
+            request: body ?? request);
+    expect(() => claim(sessionId: 'other-session'), throwsStateError);
+    final first = claim();
+    expect(first, intent.toJson());
+    first['path'] = '/tmp/changed-return-value';
+    expect(claim(body: {'opts': request['opts'], 'req': request['req']}),
+        intent.toJson());
+    expect(() => claim(op: 'media:different'), throwsStateError);
+    expect(
+        () => claim(body: {
+              ...request,
+              'req': {
+                ...request['req'] as Map,
+                'extra': {'format': 'changed'}
+              }
+            }),
+        throwsStateError);
+    media.close(session);
+    await stopped;
+    expect(media.hasPendingPathCreate, false);
+    expect(() => claim(), throwsStateError);
+    media.dispose();
+  });
   test(
       'commands dispatch once, results remain session-bound, and close discards the session',
       () async {

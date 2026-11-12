@@ -15,7 +15,8 @@ class _PendingHandoff {
   String? pathDataset, pathFingerprint, preparingFingerprint;
   List<String>? pathCapabilities;
   bool pathConflict = false;
-  Future<Map<String, dynamic>> Function(String, Map<String, dynamic>)? pathRequest;
+  Future<Map<String, dynamic>> Function(String, Map<String, dynamic>)?
+      pathRequest;
   _PendingHandoff(this.context, this.fingerprint, this.url);
 }
 
@@ -65,24 +66,29 @@ class BrowserHandoff {
   }
 
   Map<String, dynamic> _scopedIdentity(Map<String, dynamic> identity) => {
-    ...identity,
-    if (_pending[identity['operationId']]?.pathDataset != null)
-      'datasetId': _pending[identity['operationId']]!.pathDataset,
-  };
-  Future<Map<String, dynamic>> _send(String method, Map<String, dynamic> data) =>
+        ...identity,
+        if (_pending[identity['operationId']]?.pathDataset != null)
+          'datasetId': _pending[identity['operationId']]!.pathDataset,
+      };
+  Future<Map<String, dynamic>> _send(
+          String method, Map<String, dynamic> data) =>
       (_pending[data['operationId']]?.pathRequest ?? request)(method, data);
 
   BrowserHandoffResult _result(Map value, Map<String, dynamic> identity) {
-    final result = BrowserHandoffResult.fromJson(value, operationId: identity['operationId']);
+    final result = BrowserHandoffResult.fromJson(value,
+        operationId: identity['operationId']);
     final entry = _pending[identity['operationId']];
     final dataset = identity['datasetId'] ?? entry?.pathDataset;
     final projection = result.pathCreate;
-    if (dataset != null && (projection == null || projection.datasetId != dataset)) {
+    if (dataset != null &&
+        (projection == null || projection.datasetId != dataset)) {
       throw const FormatException('path_handoff_scope_mismatch');
     }
     if (projection != null && entry != null) {
       final caps = entry.pathCapabilities;
-      if (caps != null && !(result.state == 'unknown' && projection.requiredCapabilities.isEmpty) &&
+      if (caps != null &&
+          !(result.state == 'unknown' &&
+              projection.requiredCapabilities.isEmpty) &&
           jsonEncode(caps) != jsonEncode(projection.requiredCapabilities)) {
         throw const FormatException('path_handoff_capability_mismatch');
       }
@@ -102,14 +108,20 @@ class BrowserHandoff {
     return _result(await _send('POST', {'action': 'query', ...scoped}), scoped);
   }
 
-  Future<Map<String, dynamic>> _mutationIdentity(Map<String, dynamic> identity) async {
+  Future<Map<String, dynamic>> _mutationIdentity(
+      Map<String, dynamic> identity) async {
     final scoped = _scopedIdentity(identity);
-    if (scoped['datasetId'] != null || _pending[identity['operationId']] != null) return scoped;
+    if (scoped['datasetId'] != null ||
+        _pending[identity['operationId']] != null) return scoped;
     // Cold clients may discover a typed operation through the existing query;
     // only its validated projection supplies D for commit/abort.
     final current = await _query(identity);
-    return {...scoped, if (current.pathCreate != null) 'datasetId': current.pathCreate!.datasetId};
+    return {
+      ...scoped,
+      if (current.pathCreate != null) 'datasetId': current.pathCreate!.datasetId
+    };
   }
+
   void _notify(String id, _PendingHandoff? entry, String reason) {
     if (entry?.notified == true) return;
     if (entry != null) {
@@ -259,22 +271,24 @@ class BrowserHandoff {
   }
 
   Future<BrowserHandoffResult> _abortCore(
-          Map<String, dynamic> identity, String reason, dynamic taskId) async {
-      final scoped = await _mutationIdentity(identity);
-      return _result(
-          await _send('POST', {
-            'action': 'abort',
-            ...scoped,
-            'reason': reason,
-            if (taskId is String && taskId.isNotEmpty) 'taskId': taskId
-          }),
-          scoped);
+      Map<String, dynamic> identity, String reason, dynamic taskId) async {
+    final scoped = await _mutationIdentity(identity);
+    return _result(
+        await _send('POST', {
+          'action': 'abort',
+          ...scoped,
+          'reason': reason,
+          if (taskId is String && taskId.isNotEmpty) 'taskId': taskId
+        }),
+        scoped);
   }
 
   Future<BrowserHandoffResult> prepareConfirmed(
       String id, BrowserHandoffContext context, CreateTask task,
-      {Map<String, dynamic>? pathCreate, String? datasetId,
-      Future<Map<String, dynamic>> Function(String, Map<String, dynamic>)? pathRequest}) async {
+      {Map<String, dynamic>? pathCreate,
+      String? datasetId,
+      Future<Map<String, dynamic>> Function(String, Map<String, dynamic>)?
+          pathRequest}) async {
     final identity = {
       'operationId': id,
       'clientId': context.clientId,
@@ -286,52 +300,79 @@ class BrowserHandoff {
         entry.url != null && entry.url != task.req?.url)
       throw StateError('交接上下文已失效，请检查原下载。');
     if (entry.ended != null) return _localAbort(id, entry.ended!);
-    final ownedTask = CreateTask.fromJson(jsonDecode(jsonEncode(task.toJson())));
+    final ownedTask =
+        CreateTask.fromJson(jsonDecode(jsonEncode(task.toJson())));
     Map<String, dynamic>? ownedPath;
     if (pathCreate != null) {
       ownedPath = Map<String, dynamic>.from(jsonDecode(jsonEncode(pathCreate)));
       final body = ownedPath['request'], intent = ownedPath['pathIntent'];
-      if (pathRequest == null || datasetId == null || RegExp(r'^[0-9a-f]{32}$').stringMatch(datasetId) != datasetId ||
-          ownedPath['version'] is! int || ownedPath['version'] != 1 || ownedPath['operationId'] != id ||
-          body is! Map || intent is! Map || intent['version'] is! int || intent['version'] != 1 ||
-          jsonEncode(_ordered(body)) != jsonEncode(_ordered({'req': ownedTask.req!.toJson(),
-            'opts': ownedTask.opts?.toJson() ?? <String, dynamic>{}}))) {
+      if (pathRequest == null ||
+          datasetId == null ||
+          RegExp(r'^[0-9a-f]{32}$').stringMatch(datasetId) != datasetId ||
+          ownedPath['version'] is! int ||
+          ownedPath['version'] != 1 ||
+          ownedPath['operationId'] != id ||
+          body is! Map ||
+          intent is! Map ||
+          intent['version'] is! int ||
+          intent['version'] != 1 ||
+          jsonEncode(_ordered(body)) !=
+              jsonEncode(_ordered({
+                'req': ownedTask.req!.toJson(),
+                'opts': ownedTask.opts?.toJson() ?? <String, dynamic>{}
+              }))) {
         throw const FormatException('invalid_path_handoff_request');
       }
-      final frozen = HttpPathCreateRequest(CreateTaskBatch.fromJson({'reqs': [body]}),
-        pathIntent: HttpPathIntent(path: intent['path'], origin: intent['origin']),
-        expectedSHA256: ownedPath['integrity'] is Map ? ownedPath['integrity']['expectedSHA256'] : null);
-      if (jsonEncode(_ordered(ownedPath)) != jsonEncode(_ordered(frozen.toJson(id)))) {
+      final frozen = HttpPathCreateRequest(
+          CreateTaskBatch.fromJson({
+            'reqs': [body]
+          }),
+          pathIntent:
+              HttpPathIntent(path: intent['path'], origin: intent['origin']),
+          expectedSHA256: ownedPath['integrity'] is Map
+              ? ownedPath['integrity']['expectedSHA256']
+              : null);
+      if (jsonEncode(_ordered(ownedPath)) !=
+          jsonEncode(_ordered(frozen.toJson(id)))) {
         throw const FormatException('invalid_path_handoff_request');
       }
     } else if (datasetId != null) {
       throw const FormatException('invalid_path_handoff_request');
     }
-    final fingerprint = jsonEncode(_ordered({'task': ownedTask.toJson(),
-      'datasetId': datasetId, 'pathCreate': ownedPath}));
+    final fingerprint = jsonEncode(_ordered({
+      'task': ownedTask.toJson(),
+      'datasetId': datasetId,
+      'pathCreate': ownedPath
+    }));
     final running = entry.preparing;
     if (running != null) {
-      if (entry.preparingFingerprint != fingerprint) throw StateError('请查询原交接，不会重发。');
+      if (entry.preparingFingerprint != fingerprint)
+        throw StateError('请查询原交接，不会重发。');
       return running;
     }
     entry.preparingFingerprint = fingerprint;
     final work = () async {
       if (ownedPath != null) {
-        if (entry.pathConflict || entry.pathFingerprint != null && entry.pathFingerprint != fingerprint ||
+        if (entry.pathConflict ||
+            entry.pathFingerprint != null &&
+                entry.pathFingerprint != fingerprint ||
             entry.attempted && entry.pathFingerprint == null) {
           await _query(identity);
           throw StateError('请查询原交接，不会升级或重发。');
         }
         if (!entry.attempted) {
           final carrier = await pathRequest!('GET', {});
-          if (carrier['version'] is! int || carrier['version'] != 1 ||
-              carrier['pathCreateVersion'] is! int || carrier['pathCreateVersion'] != 1) {
+          if (carrier['version'] is! int ||
+              carrier['version'] != 1 ||
+              carrier['pathCreateVersion'] is! int ||
+              carrier['pathCreateVersion'] != 1) {
             throw const FormatException('unsupported_path_handoff');
           }
           if (entry.ended != null) return _localAbort(id, entry.ended!);
           entry.pathDataset = datasetId;
           entry.pathFingerprint = fingerprint;
-          entry.pathCapabilities = List<String>.unmodifiable(ownedPath['requiredCapabilities']);
+          entry.pathCapabilities =
+              List<String>.unmodifiable(ownedPath['requiredCapabilities']);
           entry.pathRequest = pathRequest;
         }
       } else if (entry.pathDataset != null) {

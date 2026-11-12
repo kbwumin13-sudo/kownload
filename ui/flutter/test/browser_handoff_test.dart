@@ -8,6 +8,7 @@ import 'package:get/get.dart' hide Progress;
 import 'package:hive/hive.dart';
 import 'package:gopeed/api/model/browser_handoff.dart';
 import 'package:gopeed/api/model/create_task.dart';
+import 'package:gopeed/api/model/http_path_create.dart';
 import 'package:gopeed/api/model/task.dart';
 import 'package:gopeed/app/services/browser_handoff.dart';
 import 'package:gopeed/app/services/browser_integration.dart';
@@ -19,6 +20,7 @@ import 'package:gopeed/database/database.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
 import 'package:gopeed/macos/mac_onboarding.dart';
+import 'support/scoped_task_batch_fixture.dart';
 
 final download = {
   'id': 10,
@@ -165,6 +167,130 @@ void main() {
           confirmations.add(task);
         },
         ended: (id, reason) => ended.add('$id:$reason'));
+  });
+  testWidgets(
+      'typed capture keeps original operation and queries an unknown prepare before commit',
+      (tester) async {
+    final fixture = ScopedBatchFixture();
+    HttpOverrides.global = null;
+    await tester.runAsync(fixture.start);
+    addTearDown(() => fixture.close());
+    var carrier = false;
+    const caps = [httpPathCapability, 'http-sha256-completion/v1'];
+    fixture.override = (q) async {
+      if (q.uri.path.endsWith('/http-path/v1/capability')) {
+        await fixture.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': fixture.dataset,
+          'kind': httpPathCreateKind,
+          'requestVersion': 1,
+          'supported': true,
+          'requiredCapabilities': caps,
+          'methods': {
+            'create': 'POST',
+            'query': 'GET',
+            'cancel': 'POST',
+            'preview': 'POST'
+          }
+        });
+        return;
+      }
+      if (q.uri.path != '/api/v1/browser/handoff') {
+        await fixture.handle(q);
+        return;
+      }
+      if (q.method == 'GET') {
+        await fixture
+            .respond(q, {'version': 1, if (carrier) 'pathCreateVersion': 1});
+        return;
+      }
+      final data = Map<String, dynamic>.from(fixture.requests.last['body']);
+      final result = await core.call(q.method, data);
+      final typed = {
+        ...result,
+        'pathCreate': {
+          'version': 1,
+          'datasetId': fixture.dataset,
+          'kind': httpPathCreateKind,
+          'requiredCapabilities': result['state'] == 'unknown' ? [] : caps
+        }
+      };
+      // A real HTTP failure after this test backend retained prepared state.
+      // This is an unknown acknowledgement response, not an injected lost ACK.
+      await fixture.respond(q, typed,
+          status: data['action'] == 'prepare' ? 503 : 200,
+          code: data['action'] == 'prepare' ? 1000 : 0,
+          msg: data['action'] == 'prepare' ? 'query_required' : '');
+    };
+    final ui = await mountHandoffUi(tester, core);
+    await ui.flow.command(prepare());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('更多选项'));
+    await tester.pumpAndSettle();
+    final digest = find.byKey(const ValueKey('http-expected-sha256'));
+    await tester.ensureVisible(digest);
+    await tester.enterText(digest, 'A' * 64);
+    final toggle = find.descendant(
+        of: find.byKey(const ValueKey('http-path-opt-in')),
+        matching: find.byType(Checkbox));
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
+    await tester.pump();
+    Future<void> confirm() async {
+      final button = find.text('confirm'.tr);
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pump();
+      for (var i = 0;
+          i < 150 && Get.find<CreateController>().isConfirming.value;
+          i++) {
+        await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)));
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(Get.find<CreateController>().isConfirming.value, false);
+    }
+
+    await confirm();
+    expect(core.creates, 0, reason: 'old carrier may not ignore typed fields');
+    carrier = true;
+    await confirm();
+    expect(core.creates, 1);
+    expect(core.starts, 0,
+        reason: 'prepare is paused and has no IO permission');
+    final sent = core.calls.singleWhere((q) => q['action'] == 'prepare');
+    expect(sent['datasetId'], fixture.dataset);
+    expect(sent['operationId'], 'capture');
+    expect(sent['download'], download);
+    expect(sent['pathCreate']['operationId'], 'capture');
+    expect(sent['pathCreate']['requiredCapabilities'], caps);
+    expect(sent['pathCreate']['integrity']['expectedSHA256'], 'a' * 64);
+    expect(sent['pathCreate']['request'],
+        {'req': sent['req'], 'opts': sent['opts']});
+    expect(sent['req']['extra']['header']['Cookie'], 'synthetic-only');
+    expect(tester.widget<TextFormField>(digest).controller!.text, 'A' * 64);
+    await confirm();
+    expect(core.creates, 1);
+    expect(core.calls.where((q) => q['action'] == 'prepare'), hasLength(1));
+    expect(core.starts, 0);
+    final committed = await tester.runAsync(() => ui.flow.command({
+          ...query(),
+          'action': 'handoffCommit',
+          'taskId': 'task-capture',
+          'download': download,
+          'browserState': {'state': 'interrupted', 'error': 'USER_CANCELED'},
+          'cancelConfirmed': true,
+        }));
+    expect(committed!['state'], 'committed');
+    expect(core.starts, 1);
+    expect(core.calls.singleWhere((q) => q['action'] == 'commit')['datasetId'],
+        fixture.dataset);
+    expect(
+        fixture.requests.where(
+            (q) => q['method'] == 'POST' && q['body']?['action'] == 'prepare'),
+        hasLength(1));
+    expect(ui.createdReceipts, 0);
   });
   test(
       'canonical preference controls next prepare; prepared is not created and old tasks retain JSON',

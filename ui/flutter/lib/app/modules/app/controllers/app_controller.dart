@@ -186,9 +186,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
       return browserHandoff.prepareConfirmed(id, context, task);
     }
     if (pathCreate.variant != PathCreateVariant.http ||
-        !pathCreate.matchesBatch(CreateTaskBatch(reqs: [
-          CreateTaskBatchItem(req: task.req, opts: task.opts)
-        ]))) {
+        !pathCreate.matchesBatch(CreateTaskBatch(
+            reqs: [CreateTaskBatchItem(req: task.req, opts: task.opts)]))) {
       throw StateError('原下载与路径意图不一致，请保留原操作并查询。');
     }
     final snapshot = activeApiSnapshot;
@@ -202,7 +201,8 @@ class AppController extends GetxController with WindowListener, TrayListener {
       throw StateError('当前服务不支持此路径交接，请保留浏览器下载。');
     }
     return browserHandoff.prepareConfirmed(id, context, task,
-        pathCreate: pathCreate.toJson(id), datasetId: identity.datasetId,
+        pathCreate: pathCreate.toJson(id),
+        datasetId: identity.datasetId,
         pathRequest: (method, data) =>
             browserHandoffRequest(method, data, snapshot: snapshot));
   }

@@ -3,7 +3,7 @@ const enUS = {
     "pathPolicyTitle": "Path rules",
     "pathPolicyEnabled": "Enable path rules",
     "pathPolicyScope":
-        "Off by default. Applies only to new single-link HTTP(S) tasks that explicitly select path freezing. Existing files stay in place.",
+        "Off by default. Applies only to new tasks that explicitly select path freezing and whose protocol is supported by the service. Existing files stay in place.",
     "pathPolicyUnsupportedConfig":
         "This rule configuration is unsupported. Its original value is preserved and cannot be overwritten here.",
     "pathPolicyRuleKind": "Match type",
@@ -20,17 +20,27 @@ const enUS = {
     "pathPolicySaveFailed": "Path rules were not saved. Please try again.",
     "httpPathOptIn": "Freeze the destination for this download",
     "httpPathOptInHint":
-        "For one manual HTTP(S) link. Uses saved rules without changing existing tasks.",
+        "Uses saved rules after protocol capability confirmation. Existing tasks stay unchanged.",
     "httpPathPreview": "Preview destination",
     "httpPathPreviewHint":
         "Preview creates no task and grants no execution permission. The service confirms the final path.",
     "httpPathUnavailable":
         "The download service has not confirmed the required path-freezing capability. No create request was sent.",
     "httpPathInvalidRequest":
-        "Path freezing requires one direct HTTP(S) link. Check the current draft.",
+        "This input does not support the required path-freezing flow. No task was submitted.",
     "httpPathPreviewFailed":
         "The destination preview could not be confirmed for this draft.",
     "httpPathPreviewResult": "Preview root: @root\nFile name: @name",
+    "queryOriginalBatch": "Query original batch",
+    "httpPathCapturedHashHint":
+        "Optional SHA-256 for this HTTP capture; path freezing and the original browser handoff must both be supported.",
+    "mediaPathUnavailable":
+        "The helper has not confirmed media path freezing. No create command was sent.",
+    "mediaPathNewOnly":
+        "Path freezing is for new video or audio tasks. Existing tasks and images retain their original flow.",
+    "pathPreviewAfterSelection":
+        "Select the files in the drive confirmation page first. The tree destination will be frozen together.",
+    "pathLoadingMembers": "Reading the file list…",
     'label': 'English',
     'error': 'Error',
     'httpRecoveryCooldown':

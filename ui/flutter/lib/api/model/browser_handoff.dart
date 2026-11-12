@@ -57,22 +57,34 @@ bool validHandoffId(dynamic value) =>
 class BrowserPathHandoffProjection {
   final String datasetId;
   final List<String> requiredCapabilities;
-  const BrowserPathHandoffProjection._(this.datasetId, this.requiredCapabilities);
-  factory BrowserPathHandoffProjection.fromJson(Map value, {required bool unknown}) {
+  const BrowserPathHandoffProjection._(
+      this.datasetId, this.requiredCapabilities);
+  factory BrowserPathHandoffProjection.fromJson(Map value,
+      {required bool unknown}) {
     final caps = value['requiredCapabilities'];
-    if (value['version'] is! int || value['version'] != 1 ||
+    if (value['version'] is! int ||
+        value['version'] != 1 ||
         value['datasetId'] is! String ||
-        RegExp(r'^[0-9a-f]{32}$').stringMatch(value['datasetId']) != value['datasetId'] ||
-        value['kind'] != 'http-path-create/v1' || caps is! List ||
+        RegExp(r'^[0-9a-f]{32}$').stringMatch(value['datasetId']) !=
+            value['datasetId'] ||
+        value['kind'] != 'http-path-create/v1' ||
+        caps is! List ||
         !(unknown && caps.isEmpty ||
-          caps.length == 1 && caps[0] == 'single-http-path-freeze/v1' ||
-          caps.length == 2 && caps[0] == 'single-http-path-freeze/v1' && caps[1] == 'http-sha256-completion/v1')) {
+            caps.length == 1 && caps[0] == 'single-http-path-freeze/v1' ||
+            caps.length == 2 &&
+                caps[0] == 'single-http-path-freeze/v1' &&
+                caps[1] == 'http-sha256-completion/v1')) {
       throw const FormatException('invalid_path_handoff_projection');
     }
-    return BrowserPathHandoffProjection._(value['datasetId'], List<String>.unmodifiable(caps));
+    return BrowserPathHandoffProjection._(
+        value['datasetId'], List<String>.unmodifiable(caps));
   }
-  Map<String, dynamic> toJson() => {'version': 1, 'datasetId': datasetId,
-    'kind': 'http-path-create/v1', 'requiredCapabilities': requiredCapabilities};
+  Map<String, dynamic> toJson() => {
+        'version': 1,
+        'datasetId': datasetId,
+        'kind': 'http-path-create/v1',
+        'requiredCapabilities': requiredCapabilities
+      };
 }
 
 class BrowserHandoffRequestFailure implements Exception {
@@ -81,7 +93,8 @@ class BrowserHandoffRequestFailure implements Exception {
   const BrowserHandoffRequestFailure(this.statusCode, this.code, this.reason);
   bool get conflicted => statusCode == 409 || reason == 'operation_conflict';
   @override
-  String toString() => 'BrowserHandoffRequestFailure(${reason ?? 'query_required'})';
+  String toString() =>
+      'BrowserHandoffRequestFailure(${reason ?? 'query_required'})';
 }
 
 class BrowserHandoffResult {
@@ -95,7 +108,8 @@ class BrowserHandoffResult {
   factory BrowserHandoffResult.fromJson(Map value,
       {String? operationId, bool allowLocalAbort = false}) {
     final state = value['state'], ids = value['taskIds'];
-    if (value['version'] is! int || value['version'] != 1 ||
+    if (value['version'] is! int ||
+        value['version'] != 1 ||
         !validHandoffId(value['operationId']) ||
         operationId != null && value['operationId'] != operationId ||
         !const ['prepared', 'committed', 'aborted', 'unknown']
@@ -119,7 +133,8 @@ class BrowserHandoffResult {
             ? BrowserDownloadIdentity.fromJson(value['download'])
             : null,
         pathCreate: value['pathCreate'] is Map
-            ? BrowserPathHandoffProjection.fromJson(value['pathCreate'], unknown: state == 'unknown')
+            ? BrowserPathHandoffProjection.fromJson(value['pathCreate'],
+                unknown: state == 'unknown')
             : null);
   }
   Map<String, dynamic> toJson() => {

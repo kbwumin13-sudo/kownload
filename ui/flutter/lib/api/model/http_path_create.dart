@@ -9,10 +9,13 @@ enum PathCreateVariant {
   http('http-path', httpPathCreateKind, httpPathCapability, 'http'),
   bt('bt-path', 'bt-path-create/v1', 'bt-path-freeze/v1', 'bt'),
   ed2k('ed2k-path', 'ed2k-path-create/v1', 'ed2k-path-freeze/v1', 'ed2k'),
-  netdisk('netdisk-path', 'netdisk-path-create/v1', 'netdisk-path-freeze/v1', 'netdisk'),
+  netdisk('netdisk-path', 'netdisk-path-create/v1', 'netdisk-path-freeze/v1',
+      'netdisk'),
   media('media-path', 'media-path-create/v1', 'media-path-freeze/v1', 'media');
+
   final String prefix, kind, capability, protocol;
-  const PathCreateVariant(this.prefix, this.kind, this.capability, this.protocol);
+  const PathCreateVariant(
+      this.prefix, this.kind, this.capability, this.protocol);
 }
 
 /// Caller provenance, never a frozen Core decision or an IO permission.
@@ -45,17 +48,23 @@ class HttpPathCreateRequest {
   final String? _request, _reqs;
 
   HttpPathCreateRequest(CreateTaskBatch batch,
-      {required this.pathIntent, this.expectedSHA256,
+      {required this.pathIntent,
+      this.expectedSHA256,
       this.variant = PathCreateVariant.http})
-      : batchId = null, _reqs = null,
+      : batchId = null,
+        _reqs = null,
         _request = _validate(batch, pathIntent, expectedSHA256, variant);
 
   /// Retains the original prepared array, including session/account/deferred
   /// metadata. It does not prepare again or split a directory into operations.
-  HttpPathCreateRequest.netdisk({required List<Map<String, dynamic>> reqs,
-      required String batchId, required this.pathIntent})
-      : variant = PathCreateVariant.netdisk, expectedSHA256 = null,
-        batchId = batchId, _request = null,
+  HttpPathCreateRequest.netdisk(
+      {required List<Map<String, dynamic>> reqs,
+      required String batchId,
+      required this.pathIntent})
+      : variant = PathCreateVariant.netdisk,
+        expectedSHA256 = null,
+        batchId = batchId,
+        _request = null,
         _reqs = _validatePrepared(reqs, batchId, pathIntent);
 
   List<String> get requiredCapabilities => [
@@ -64,15 +73,14 @@ class HttpPathCreateRequest {
       ];
 
   CreateTaskBatch get batch => CreateTaskBatch.fromJson({
-    'reqs': _reqs == null ? [jsonDecode(_request!)] : jsonDecode(_reqs!),
-  });
+        'reqs': _reqs == null ? [jsonDecode(_request!)] : jsonDecode(_reqs!),
+      });
   bool matchesBatch(CreateTaskBatch batch) => _reqs == null
       ? _validate(batch, pathIntent, expectedSHA256, variant) == _request
       : jsonEncode(batch.toJson()) == jsonEncode(this.batch.toJson());
 
-  static String _validate(
-      CreateTaskBatch batch, HttpPathIntent intent, String? expected,
-      PathCreateVariant variant) {
+  static String _validate(CreateTaskBatch batch, HttpPathIntent intent,
+      String? expected, PathCreateVariant variant) {
     if (batch.reqs?.length != 1 || batch.opts != null) {
       throw ArgumentError('http_path_single_request_required');
     }
@@ -85,14 +93,16 @@ class HttpPathCreateRequest {
       throw ArgumentError('unsupported_integrity_variant');
     }
     final uri = Uri.tryParse(req?.url ?? '');
-    if (req == null || req.url.isEmpty ||
+    if (req == null ||
+        req.url.isEmpty ||
         (req.protocol != null && req.protocol != variant.protocol)) {
       throw ArgumentError('path_variant_protocol_mismatch');
     }
-    if (variant == PathCreateVariant.http && (uri == null ||
-        !const {'http', 'https'}.contains(uri.scheme) ||
-        uri.host.isEmpty ||
-        item.opts?.selectFiles.isNotEmpty == true)) {
+    if (variant == PathCreateVariant.http &&
+        (uri == null ||
+            !const {'http', 'https'}.contains(uri.scheme) ||
+            uri.host.isEmpty ||
+            item.opts?.selectFiles.isNotEmpty == true)) {
       throw ArgumentError('http_path_direct_request_required');
     }
     if (item.opts == null || item.opts!.path != intent.path) {
@@ -112,15 +122,19 @@ class HttpPathCreateRequest {
     return jsonEncode(raw);
   }
 
-  static String _validatePrepared(List<Map<String, dynamic>> reqs,
-      String batchId, HttpPathIntent intent) {
-    if (batchId.isEmpty || reqs.isEmpty) throw ArgumentError('invalid_prepared_batch');
+  static String _validatePrepared(
+      List<Map<String, dynamic>> reqs, String batchId, HttpPathIntent intent) {
+    if (batchId.isEmpty || reqs.isEmpty)
+      throw ArgumentError('invalid_prepared_batch');
     final copy = jsonDecode(jsonEncode(reqs)) as List;
     for (final item in copy) {
       final req = item is Map ? item['req'] : null;
       final opts = item is Map ? item['opts'] : null;
-      if (req is! Map || req['protocol'] != 'netdisk' || opts is! Map ||
-          opts['path'] != intent.path || req['extra'] is! Map ||
+      if (req is! Map ||
+          req['protocol'] != 'netdisk' ||
+          opts is! Map ||
+          opts['path'] != intent.path ||
+          req['extra'] is! Map ||
           req['extra']['batchId'] != batchId) {
         throw ArgumentError('prepared_path_intent_mismatch');
       }

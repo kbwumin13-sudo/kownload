@@ -29,29 +29,40 @@ class HttpPathApi extends ScopedTaskBatchApi {
       {required super.snapshot,
       required super.identity,
       required this.request});
-  String get _root => '/api/v1/datasets/${identity.datasetId}/${request.variant.prefix}/v1';
+  String get _root =>
+      '/api/v1/datasets/${identity.datasetId}/${request.variant.prefix}/v1';
   Future<bool> supported({CancelToken? cancelToken}) => supportedFor(
-      snapshot: snapshot, identity: identity, variant: request.variant,
-      withIntegrity: request.expectedSHA256 != null, cancelToken: cancelToken);
+      snapshot: snapshot,
+      identity: identity,
+      variant: request.variant,
+      withIntegrity: request.expectedSHA256 != null,
+      cancelToken: cancelToken);
 
   /// A read-only probe before protocol prepare/capture. It grants no R, send
   /// permission or IO. The actual frozen request is checked again at submit.
-  static Future<bool> supportedFor({required api.ActiveApiSnapshot snapshot,
-      required DatasetIdentity identity, required PathCreateVariant variant,
-      bool withIntegrity = false, CancelToken? cancelToken}) async {
-    if (!snapshot.isCurrent || !identity.supported || !identity.persistent ||
+  static Future<bool> supportedFor(
+      {required api.ActiveApiSnapshot snapshot,
+      required DatasetIdentity identity,
+      required PathCreateVariant variant,
+      bool withIntegrity = false,
+      CancelToken? cancelToken}) async {
+    if (!snapshot.isCurrent ||
+        !identity.supported ||
+        !identity.persistent ||
         (withIntegrity && variant != PathCreateVariant.http)) return false;
-    final requiredCaps = [variant.capability,
-      if (withIntegrity) 'http-sha256-completion/v1'];
-    final response = await api.scopedTaskBatchRequest(
-        snapshot, 'GET', '/api/v1/datasets/${identity.datasetId}/${variant.prefix}/v1/capability',
-        queryParameters:
-            withIntegrity ? {'integrity': 'sha256'} : null,
+    final requiredCaps = [
+      variant.capability,
+      if (withIntegrity) 'http-sha256-completion/v1'
+    ];
+    final response = await api.scopedTaskBatchRequest(snapshot, 'GET',
+        '/api/v1/datasets/${identity.datasetId}/${variant.prefix}/v1/capability',
+        queryParameters: withIntegrity ? {'integrity': 'sha256'} : null,
         cancelToken: cancelToken);
     final body = _json(response.data);
     if (!snapshot.isCurrent ||
         response.statusCode != 200 ||
         body is! Map ||
+        body['code'] is! int ||
         body['code'] != 0 ||
         body['data'] is! Map) return false;
     final data = body['data'] as Map;
@@ -80,6 +91,7 @@ class HttpPathApi extends ScopedTaskBatchApi {
     if (!snapshot.isCurrent ||
         response.statusCode != 200 ||
         body is! Map ||
+        body['code'] is! int ||
         body['code'] != 0 ||
         body['data'] is! Map) {
       throw const FormatException('path_preview_unavailable');
@@ -215,27 +227,38 @@ class HttpPathPreview {
       throw const FormatException('invalid_path_preview');
     }
     final members = layout['members'] as List;
-    if (members.isEmpty) throw const FormatException('invalid_path_preview_layout');
+    if (members.isEmpty)
+      throw const FormatException('invalid_path_preview_layout');
     final paths = <String>{};
     for (var i = 0; i < members.length; ++i) {
       final item = members[i];
       final relative = item is Map ? item['relativePath'] : null;
-      if (item is! Map || item['index'] is! int || item['index'] != i ||
-          item['selected'] is! bool || relative is! String ||
-          relative.isEmpty || relative.contains(RegExp(r'[\\\x00]')) ||
+      if (item is! Map ||
+          item['index'] is! int ||
+          item['index'] != i ||
+          item['selected'] is! bool ||
+          relative is! String ||
+          relative.isEmpty ||
+          relative.contains(RegExp(r'[\\\x00]')) ||
           relative.split('/').any((p) => p.isEmpty || p == '.' || p == '..') ||
           !paths.add(relative)) {
         throw const FormatException('invalid_path_preview_layout');
       }
     }
-    if (variant == PathCreateVariant.http && (members.length != 1 ||
-        members.single['selected'] != true || members.single['relativePath'] != name)) {
+    if (variant == PathCreateVariant.http &&
+        (members.length != 1 ||
+            members.single['selected'] != true ||
+            members.single['relativePath'] != name)) {
       throw const FormatException('invalid_path_preview_layout');
     }
-    return HttpPathPreview._(decision['root'], name, List.unmodifiable([
-      for (final member in members)
-        PathPreviewMember(member['index'], member['relativePath'], member['selected'])
-    ]));
+    return HttpPathPreview._(
+        decision['root'],
+        name,
+        List.unmodifiable([
+          for (final member in members)
+            PathPreviewMember(
+                member['index'], member['relativePath'], member['selected'])
+        ]));
   }
 }
 

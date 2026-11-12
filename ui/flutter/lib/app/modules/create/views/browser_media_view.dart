@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import '../../../../api/model/http_path_create.dart';
 import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_widgets.dart';
 import '../../../services/browser_media.dart';
+import '../../../views/directory_selector.dart';
+import 'create_path_intent.dart';
 
 List<Map<String, dynamic>> _records(dynamic value) => value is List
     ? value.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
@@ -47,6 +51,49 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
       _filter = TextEditingController();
   String _kind = 'all', _notice = '';
   bool _busy = false, _advanced = false, _recoveryOpen = false;
+  bool _pathFreeze = false;
+  int _pathRevision = 0;
+  PathIntent _pathIntent =
+      const PathIntent(path: '', origin: PathOrigin.defaultPath);
+  void _pathEdited(String value) {
+    if (!mounted) return;
+    setState(() => _setPathValue(value));
+  }
+
+  void _setPathValue(String value) {
+    _pathIntent = PathIntent(
+        path: value,
+        origin:
+            value.isEmpty ? PathOrigin.defaultPath : PathOrigin.userSelected);
+    ++_pathRevision;
+  }
+
+  ValueChanged<String> _directoryPicked() {
+    final current = session, revision = _pathRevision;
+    return (path) {
+      if (!mounted ||
+          !identical(session, current) ||
+          session.closed ||
+          _busy ||
+          revision != _pathRevision) return;
+      setState(() {
+        _path.text = path;
+        _setPathValue(path);
+      });
+    };
+  }
+
+  @override
+  void didUpdateWidget(covariant BrowserMediaView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.session, widget.session)) {
+      ++_pathRevision;
+      _path.clear();
+      _pathIntent = const PathIntent(path: '', origin: PathOrigin.defaultPath);
+      _pathFreeze = false;
+    }
+  }
+
   final _footerKey = GlobalKey(),
       _kindKey = GlobalKey(),
       _filterKey = GlobalKey();
@@ -109,7 +156,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
     final footer = height(
         _footerKey,
         96 +
-            (_advanced ? 88 : 0) +
+            (_advanced ? 160 : 0) +
             (_recoveryOpen ? 88 : 0) +
             (_notice.isEmpty ? 0 : 32));
     MacPanel.resize((44 + filters + content + footer)
@@ -118,6 +165,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
 
   @override
   void dispose() {
+    ++_pathRevision;
     if (!session.closed) scheduleMicrotask(() => widget.media.close(session));
     _name.dispose();
     _path.dispose();
@@ -127,8 +175,15 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
 
   void _failed(Object error) {
     if (mounted)
-      setState(() => _notice =
-          error is StateError ? error.message.toString() : '操作未完成，请返回来源页面重试。');
+      setState(() => _notice = error is StateError &&
+              error.message == 'media_path_carrier_unsupported'
+          ? 'mediaPathUnavailable'.tr
+          : error is StateError &&
+                  error.message == 'media_path_request_unsupported'
+              ? 'mediaPathNewOnly'.tr
+              : error is StateError
+                  ? error.message.toString()
+                  : '操作未完成，请返回来源页面重试。');
   }
 
   Future<void> _inspect(Map<String, dynamic> item) async {
@@ -167,7 +222,8 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
       unawaited(_inspect(item).catchError(_failed));
   }
 
-  Map<String, dynamic> _options(Map<String, dynamic> item) {
+  Map<String, dynamic> _options(Map<String, dynamic> item,
+      {bool freezePath = false}) {
     final id = item['id'] as String;
     final info = _inspected[id];
     final format = _formats[id] ?? '';
@@ -189,7 +245,7 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
       'embedSubtitles': sub.first.isNotEmpty,
       if ((_variants[id] ?? '').isNotEmpty) 'imageVariant': _variants[id],
       'name': _name.text.trim(),
-      'path': _path.text.trim(),
+      'path': freezePath ? _pathIntent.path : _path.text.trim(),
       if (_taskId != null) 'taskId': _taskId,
     };
   }
@@ -202,11 +258,22 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
     });
     final messages = <String>[];
     try {
+      if (type == 'CREATE' &&
+          _pathFreeze &&
+          (_taskId != null || chosen.any((item) => item['kind'] == 'image'))) {
+        throw StateError('media_path_request_unsupported');
+      }
       for (final item in chosen) {
         if (_requiresInspect(item)) await _inspect(item);
-        final options = _options(item);
-        final result = await widget.media
-            .send(session, type, itemId: item['id'], options: options);
+        final options =
+            _options(item, freezePath: type == 'CREATE' && _pathFreeze);
+        final result = await widget.media.send(session, type,
+            itemId: item['id'],
+            options: options,
+            pathIntent: type == 'CREATE' && _pathFreeze
+                ? HttpPathIntent(
+                    path: _pathIntent.path, origin: _pathIntent.wireOrigin)
+                : null);
         if (!mounted || session.closed) return;
         if (type == 'CREATE' &&
             (result is! Map ||
@@ -659,24 +726,54 @@ class _BrowserMediaViewState extends State<BrowserMediaView> {
                             size: 12),
                         label: Text(_advanced ? '收起选项' : '更多选项'))),
                 if (_advanced)
-                  Row(children: [
-                    Expanded(
-                        child: TextField(
-                            controller: _name,
-                            decoration: const InputDecoration(
-                                isDense: true,
-                                labelText: '名称',
-                                hintText: '留空使用原名'))),
-                    const SizedBox(width: 12),
-                    Expanded(
-                        child: TextField(
-                            controller: _path,
-                            decoration: InputDecoration(
-                                isDense: true,
-                                labelText: '保存位置',
-                                hintText: widget.defaultDirectory.isEmpty
-                                    ? 'kownload 默认目录'
-                                    : widget.defaultDirectory)))
+                  Column(mainAxisSize: MainAxisSize.min, children: [
+                    Row(children: [
+                      Expanded(
+                          child: TextField(
+                              controller: _name,
+                              enabled: !_pathFreeze || !_busy,
+                              decoration: const InputDecoration(
+                                  isDense: true,
+                                  labelText: '名称',
+                                  hintText: '留空使用原名'))),
+                      const SizedBox(width: 12),
+                      Expanded(
+                          child: _pathFreeze
+                              ? IgnorePointer(
+                                  ignoring: _busy,
+                                  child: DirectorySelector(
+                                      controller: _path,
+                                      allowEdit: !_busy,
+                                      inlineActions: true,
+                                      onDirectoryPicked: _directoryPicked(),
+                                      onPathEdited: _pathEdited))
+                              : TextField(
+                                  controller: _path,
+                                  onChanged: _pathEdited,
+                                  decoration: InputDecoration(
+                                      isDense: true,
+                                      labelText: '保存位置',
+                                      hintText: widget.defaultDirectory.isEmpty
+                                          ? 'kownload 默认目录'
+                                          : widget.defaultDirectory)))
+                    ]),
+                    CheckboxListTile(
+                      key: const ValueKey('media-path-opt-in'),
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: Text('httpPathOptIn'.tr),
+                      subtitle: Text(session.pathFreezeVersion == 1
+                          ? 'mediaPathNewOnly'.tr
+                          : 'mediaPathUnavailable'.tr),
+                      value: _pathFreeze,
+                      onChanged: _busy ||
+                              (session.pathFreezeVersion != 1 && !_pathFreeze)
+                          ? null
+                          : (value) => setState(() {
+                                _pathFreeze = value == true;
+                                ++_pathRevision;
+                              }),
+                    ),
                   ]),
                 if (_advanced && chosen.length == 1)
                   ExpansionTile(

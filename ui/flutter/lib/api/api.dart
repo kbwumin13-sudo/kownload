@@ -190,20 +190,21 @@ Future<Response<dynamic>> scopedTaskBatchRequest(
       queryParameters == null) {
     allowed = true;
   }
-  final pathCap =
-      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/(http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/capability$')
-          .firstMatch(path);
+  final pathCap = RegExp(
+          r'^/api/v1/datasets/[0-9a-f]{32}/(http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/capability$')
+      .firstMatch(path);
   if (pathCap != null &&
       pathCap[0] == path &&
       method == 'GET' &&
       data == null) {
     allowed = queryParameters == null ||
-        (pathCap[1] == 'http-path' && queryParameters.length == 1 &&
+        (pathCap[1] == 'http-path' &&
+            queryParameters.length == 1 &&
             queryParameters['integrity'] == 'sha256');
   }
-  final preview =
-      RegExp(r'^/api/v1/datasets/[0-9a-f]{32}/(?:http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/preview$')
-          .firstMatch(path);
+  final preview = RegExp(
+          r'^/api/v1/datasets/[0-9a-f]{32}/(?:http-path|bt-path|ed2k-path|netdisk-path|media-path)/v1/preview$')
+      .firstMatch(path);
   if (preview != null &&
       preview[0] == path &&
       method == 'POST' &&
@@ -419,16 +420,22 @@ Future<ResolveResult> resolve(ResolveTask resolveTask) async {
 
 /// Fixed core endpoint; no fallback to ordinary create on unsupported cores.
 Future<Map<String, dynamic>> browserHandoffRequest(
-        String method, Map<String, dynamic> data,
-        {ActiveApiSnapshot? snapshot}) async {
-  if (snapshot == null) return _parse<Map<String, dynamic>>(
+    String method, Map<String, dynamic> data,
+    {ActiveApiSnapshot? snapshot}) async {
+  if (snapshot == null && data.containsKey('datasetId')) {
+    snapshot = activeApiSnapshot;
+    if (snapshot == null) throw StateError('handoff_route_changed');
+  }
+  if (snapshot == null)
+    return _parse<Map<String, dynamic>>(
         () => method == 'GET'
             ? _client.dio.get('/api/v1/browser/handoff')
             : _client.dio.post('/api/v1/browser/handoff', data: data),
         (value) => value is Map
             ? Map<String, dynamic>.from(value)
             : throw const FormatException('invalid_handoff_result'));
-  if (!const {'GET', 'POST'}.contains(method) || method == 'GET' && data.isNotEmpty) {
+  if (!const {'GET', 'POST'}.contains(method) ||
+      method == 'GET' && data.isNotEmpty) {
     throw ArgumentError('invalid_handoff_endpoint');
   }
   if (!snapshot.isCurrent) throw StateError('handoff_route_changed');
@@ -444,7 +451,10 @@ Future<Map<String, dynamic>> browserHandoffRequest(
   if (!snapshot.isCurrent) throw StateError('handoff_route_changed');
   final body = response.data;
   final code = body is Map && body['code'] is int ? body['code'] as int : null;
-  if (response.statusCode != 200 || code != 0 || body is! Map || body['data'] is! Map) {
+  if (response.statusCode != 200 ||
+      code != 0 ||
+      body is! Map ||
+      body['data'] is! Map) {
     throw BrowserHandoffRequestFailure(response.statusCode, code,
         body is Map && body['msg'] is String ? body['msg'] : null);
   }

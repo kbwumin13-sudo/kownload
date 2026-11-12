@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/http_path_api.dart';
@@ -86,6 +87,102 @@ void main() {
     expect(() => HttpPathIntent(path: '/tmp/fixture', origin: 'rule'),
         throwsArgumentError);
     expect(f.requests, isEmpty);
+  });
+
+  test(
+      'protocol capability stays isolated and prepared directory bytes are owned',
+      () async {
+    final prepared = <Map<String, dynamic>>[
+      for (final name in ['a.bin', 'b.bin'])
+        {
+          'req': {
+            'url': 'https://fixture.invalid/share',
+            'protocol': 'netdisk',
+            'extra': {
+              'batchId': 'original-batch',
+              'sessionId': 'original-session',
+              'accountId': 'original-account',
+              'deferred': true,
+              'file': {'path': 'Folder/Sub', 'name': name}
+            }
+          },
+          'opts': {'path': '/tmp/fixture', 'name': name},
+        }
+    ];
+    final raw = jsonEncode(prepared);
+    final r = HttpPathCreateRequest.netdisk(
+        reqs: prepared,
+        batchId: 'original-batch',
+        pathIntent: HttpPathIntent(path: '/tmp/fixture', origin: 'default'));
+    prepared.first['req']['extra']['sessionId'] = 'changed-after-snapshot';
+    var wrongKind = true, floatCode = false;
+    f.override = (q) async {
+      if (q.uri.path.endsWith('/capability')) {
+        q.response.headers.contentType = ContentType.json;
+        q.response.write(jsonEncode({
+          'code': floatCode ? 0.0 : 0,
+          'data': {
+            'scopeVersion': 1,
+            'datasetId': f.dataset,
+            'kind': wrongKind ? httpPathCreateKind : r.variant.kind,
+            'requestVersion': 1,
+            'supported': true,
+            'requiredCapabilities': r.requiredCapabilities,
+            'methods': {
+              'create': 'POST',
+              'query': 'GET',
+              'cancel': 'POST',
+              'preview': 'POST'
+            },
+          }
+        }));
+        await q.response.close();
+      } else {
+        await f.respond(q, {
+          ...f.wrapper(f.receipt(op.operationId)),
+          'kind': r.variant.kind,
+          'requiredCapabilities': r.requiredCapabilities
+        });
+      }
+    };
+    final bound = HttpPathApi(
+        snapshot: api.activeApiSnapshot!,
+        identity:
+            DatasetIdentity(version: 1, datasetId: f.dataset, persistent: true),
+        request: r);
+    expect(await bound.supported(), false);
+    wrongKind = false;
+    floatCode = true;
+    expect(await bound.supported(), false);
+    floatCode = false;
+    expect(await bound.supported(), true);
+    await bound.create(op, r.batch);
+    final post = f.requests.singleWhere((q) => q['method'] == 'POST');
+    expect(post['uri'].path, endsWith('/netdisk-path/v1/operations'));
+    final body = post['body'] as Map;
+    expect(body['request'], isNull);
+    expect(jsonEncode(body['reqs']), raw);
+    expect(body['batchId'], 'original-batch');
+    expect(body['requiredCapabilities'], ['netdisk-path-freeze/v1']);
+    final count = f.requests.length;
+    await expectLater(
+        api.scopedTaskBatchRequest(api.activeApiSnapshot!, 'GET',
+            '/api/v1/datasets/${f.dataset}/netdisk-path/v1/capability',
+            queryParameters: {'integrity': 'sha256'}),
+        throwsArgumentError);
+    expect(
+        () => HttpPathCreateRequest(
+            CreateTaskBatch(reqs: [
+              CreateTaskBatchItem(
+                  req: Request(
+                      url: 'magnet:?xt=urn:btih:fixture', protocol: 'bt'),
+                  opts: Options(path: '/tmp/fixture'))
+            ]),
+            pathIntent: HttpPathIntent(path: '/tmp/fixture', origin: 'default'),
+            variant: PathCreateVariant.bt,
+            expectedSHA256: 'a' * 64),
+        throwsArgumentError);
+    expect(f.requests.length, count);
   });
 
   test(

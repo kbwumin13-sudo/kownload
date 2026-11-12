@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 
 import '../../../../api/model/options.dart';
 import '../../../../api/model/request.dart';
@@ -12,6 +13,7 @@ import '../../../../macos/mac_panel.dart';
 import '../../../../util/browser_profile_access.dart';
 import '../../../../util/netdisk_browser.dart';
 import '../../../views/directory_selector.dart';
+import 'create_path_intent.dart';
 
 /// A foreground, cancellable confirmation. Nothing is saved to configuration
 /// or ordinary URL history, and preparing a batch requires an explicit click.
@@ -22,6 +24,9 @@ class NetdiskView extends StatefulWidget {
   final NetdiskApi? api;
   final NetdiskBrowserTool? browserTool;
   final Duration pollInterval;
+  final PathIntent? pathIntent;
+  final Future<List<String>> Function(NetdiskPrepared, PathIntent)?
+      submitPrepared;
 
   /// After browser capture, continue the original task without preparing a
   /// batch or listing files against a source whose file may be transferred.
@@ -34,6 +39,8 @@ class NetdiskView extends StatefulWidget {
       this.api,
       this.browserTool,
       this.onResume,
+      this.pathIntent,
+      this.submitPrepared,
       this.pollInterval = const Duration(seconds: 2)});
 
   @override
@@ -46,6 +53,35 @@ class _NetdiskViewState extends State<NetdiskView> {
       widget.browserTool ?? NetdiskBrowserTool();
   late final TextEditingController _path =
       TextEditingController(text: widget.options.path);
+  late PathIntent _pathIntent = widget.pathIntent ??
+      PathIntent(path: widget.options.path, origin: PathOrigin.unknown);
+  int _pathRevision = 0;
+  NetdiskPrepared? _preparedPathBatch;
+  PathIntent? _preparedPathIntent;
+
+  ValueChanged<String> _directoryPicked() {
+    final generation = _generation, revision = _pathRevision;
+    return (path) {
+      if (!_active ||
+          _locked ||
+          generation != _generation ||
+          revision != _pathRevision) return;
+      setState(() {
+        _path.text = path;
+        _pathIntent = PathIntent(path: path, origin: PathOrigin.userSelected);
+        ++_pathRevision;
+      });
+    };
+  }
+
+  void _pathEdited(String path) {
+    if (!_active || _locked) return;
+    setState(() {
+      _pathIntent = PathIntent(path: path, origin: PathOrigin.userSelected);
+      ++_pathRevision;
+    });
+  }
+
   late NetdiskSource _source = widget.input.source;
   late String _sessionId = widget.input.sessionId;
   late List<NetdiskFile> _files = List.of(widget.input.files);
@@ -441,6 +477,10 @@ class _NetdiskViewState extends State<NetdiskView> {
   }
 
   Future<void> _confirm() async {
+    if (_preparedPathBatch != null) {
+      await _queryPrepared();
+      return;
+    }
     if (_resumeOnly || _locked || _selected.isEmpty || _sessionId.isEmpty)
       return;
     if (_path.text.trim().isEmpty) {
@@ -455,7 +495,9 @@ class _NetdiskViewState extends State<NetdiskView> {
     });
     try {
       final opts = Options.fromJson(widget.options.toJson())
-        ..path = renderPathPlaceholders(_path.text.trim());
+        ..path = widget.submitPrepared == null
+            ? renderPathPlaceholders(_path.text.trim())
+            : _pathIntent.path;
       final prepared = await _api.prepare(
           _source, _sessionId, _selected.values.toList(), opts,
           proxy: widget.proxy);
@@ -463,7 +505,13 @@ class _NetdiskViewState extends State<NetdiskView> {
         throw const NetdiskException('所选目录没有可下载文件', 'empty_selection');
       }
       _batchAttempted = true;
-      await _api.createBatch(prepared);
+      if (widget.submitPrepared == null) {
+        await _api.createBatch(prepared);
+      } else {
+        _preparedPathBatch = prepared;
+        _preparedPathIntent = _pathIntent;
+        await widget.submitPrepared!(prepared, _preparedPathIntent!);
+      }
       if (!_active) return;
       setState(() {
         _submitting = false;
@@ -483,6 +531,30 @@ class _NetdiskViewState extends State<NetdiskView> {
             ? '${_message(e)}\n$batchMessage请先检查任务列表；临时转存副本会保留，避免重复提交。'
             : _message(e);
       });
+    }
+  }
+
+  Future<void> _queryPrepared() async {
+    final prepared = _preparedPathBatch, intent = _preparedPathIntent;
+    if (_submitting ||
+        prepared == null ||
+        intent == null ||
+        widget.submitPrepared == null) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      await widget.submitPrepared!(prepared, intent);
+      if (!_active) return;
+      setState(() => _submitting = false);
+      _close(true);
+    } catch (error) {
+      if (_active)
+        setState(() {
+          _submitting = false;
+          _error = '${_message(error)}\n${'queryOriginalBatch'.tr}';
+        });
     }
   }
 
@@ -822,7 +894,14 @@ class _NetdiskViewState extends State<NetdiskView> {
                             ignoring: _submitting || _batchAttempted,
                             child: DirectorySelector(
                                 controller: _path,
-                                allowEdit: true,
+                                onDirectoryPicked: widget.submitPrepared == null
+                                    ? null
+                                    : _directoryPicked(),
+                                onPathEdited: widget.submitPrepared == null
+                                    ? null
+                                    : _pathEdited,
+                                allowEdit:
+                                    widget.submitPrepared == null || !_locked,
                                 showLabel: false,
                                 inlineActions: true,
                                 showPlaceholderButton: false,
@@ -848,14 +927,20 @@ class _NetdiskViewState extends State<NetdiskView> {
                               child: Text('正在继续任务…')),
                         if (!_resumeOnly) ...[
                           const SizedBox(width: 10),
-                          MacButton(
-                              primary: true,
-                              onPressed: _locked ||
-                                      _selected.isEmpty ||
-                                      _sessionId.isEmpty
-                                  ? null
-                                  : _confirm,
-                              child: Text(_submitting ? '正在创建任务…' : '确认下载')),
+                          if (_preparedPathBatch != null)
+                            MacButton(
+                                key: const ValueKey('netdisk-query-original'),
+                                onPressed: _submitting ? null : _queryPrepared,
+                                child: Text('queryOriginalBatch'.tr))
+                          else
+                            MacButton(
+                                primary: true,
+                                onPressed: _locked ||
+                                        _selected.isEmpty ||
+                                        _sessionId.isEmpty
+                                    ? null
+                                    : _confirm,
+                                child: Text(_submitting ? '正在创建任务…' : '确认下载')),
                         ],
                       ]),
                     ])),

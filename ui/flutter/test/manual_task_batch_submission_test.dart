@@ -1310,7 +1310,8 @@ void main() {
     await checksum(t);
     final toggle = find.byKey(const ValueKey('http-path-opt-in'));
     Future<void> togglePath(bool value) async {
-      final checkbox = find.descendant(of: toggle, matching: find.byType(Checkbox));
+      final checkbox =
+          find.descendant(of: toggle, matching: find.byType(Checkbox));
       await t.ensureVisible(checkbox);
       await t.pumpAndSettle();
       expect(checkbox.hitTestable(), findsOneWidget,
@@ -1319,6 +1320,7 @@ void main() {
       await t.pump();
       expect(t.widget<CheckboxListTile>(toggle).value, value);
     }
+
     await togglePath(true);
     await confirmChecksum(t);
     await spin(t, () => !Get.find<CreateController>().isConfirming.value);
@@ -1358,6 +1360,109 @@ void main() {
     expect(f.posts, 1);
     expect(input(t), 'https://fixture.invalid/single');
     expect(MacPanel.taskResult.value, isNull);
+  });
+  testWidgets('BT path selection uses preview before a journaled single POST',
+      (t) async {
+    const variant = PathCreateVariant.bt;
+    var posted = false;
+    f.override = (q) async {
+      if (!q.uri.path.contains('/bt-path/v1/')) {
+        await f.handle(q);
+        return;
+      }
+      if (q.uri.path.endsWith('/capability')) {
+        await f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'kind': variant.kind,
+          'requestVersion': 1,
+          'supported': true,
+          'requiredCapabilities': [variant.capability],
+          'methods': {
+            'create': 'POST',
+            'query': 'GET',
+            'cancel': 'POST',
+            'preview': 'POST'
+          }
+        });
+      } else if (q.uri.path.endsWith('/preview')) {
+        expect(journalBox.puts, 0);
+        await f.respond(q, {
+          'version': 1,
+          'decision': {
+            'version': 1,
+            'root': dir.path,
+            'origin': 'default',
+            'ruleId': '',
+            'ruleVersion': null
+          },
+          'name': 'fixture-tree',
+          'layoutHash': 'a' * 64,
+          'layout': {
+            'version': 1,
+            'parentRoot': dir.path,
+            'members': [
+              {'index': 0, 'relativePath': 'tree/a.bin', 'selected': true},
+              {'index': 1, 'relativePath': 'tree/b.bin', 'selected': true},
+            ]
+          }
+        });
+      } else {
+        final op = q.method == 'POST'
+            ? f.requests.last['body']['operationId'] as String
+            : q.uri.pathSegments.last;
+        if (q.method == 'POST') {
+          expect(journalBox.puts, 1);
+          expect(
+              f.requests.last['body']['request']['opts']['selectFiles'], [1]);
+          posted = true;
+          await f.respond(q, null,
+              status: 503, code: 1000, msg: 'query_required');
+        } else {
+          await f.respond(q, {
+            ...f.wrapper(f.receipt(op, state: 'unknown')),
+            'kind': variant.kind,
+            'requiredCapabilities': posted ? [variant.capability] : []
+          });
+        }
+      }
+    };
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        'magnet:?xt=urn:btih:0123456789012345678901234567890123456789');
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final toggle = find.descendant(
+        of: find.byKey(const ValueKey('http-path-opt-in')),
+        matching: find.byType(Checkbox));
+    await t.ensureVisible(toggle);
+    await t.pumpAndSettle();
+    await t.tap(toggle);
+    await t.pump();
+    expect(Get.find<CreateController>().directDownload.value, false);
+    await confirmChecksum(t);
+    final selection = find.byKey(const ValueKey('path-native-file-selection'));
+    await spin(t, () => selection.evaluate().isNotEmpty);
+    expect(journalBox.puts, 0);
+    expect(
+        f.requests.where((q) =>
+            q['method'] == 'POST' && q['uri'].path.endsWith('/operations')),
+        isEmpty);
+    await t.tap(find.byKey(const ValueKey('path-member-0')));
+    await t.pump();
+    await t
+        .tap(find.descendant(of: selection, matching: find.text('confirm'.tr)));
+    await spin(
+        t, () => posted && !Get.find<CreateController>().isConfirming.value);
+    await queryOriginal(t);
+    expect(
+        f.requests.where((q) =>
+            q['method'] == 'POST' && q['uri'].path.endsWith('/operations')),
+        hasLength(1));
+    expect(
+        f.requests.where((q) => q['uri'].path.contains('/resolve')), isEmpty);
+    expect(journalBox.puts, 1);
+    expect(singles, 0);
   });
   testWidgets(
       'single and mixed BT multi retain their original single creator path',
