@@ -44,6 +44,8 @@ type BrowserDownloadState struct {
 	Error string `json:"error"`
 }
 type BrowserHandoffRequest struct {
+	PathCreate *HTTPPathCreateRequest `json:"pathCreate,omitempty"`
+	DatasetID string `json:"datasetId,omitempty"`
 	Action          string                 `json:"action"`
 	OperationID     string                 `json:"operationId"`
 	ClientID        string                 `json:"clientId"`
@@ -57,7 +59,15 @@ type BrowserHandoffRequest struct {
 	Reason          string                 `json:"reason,omitempty"`
 	Pending         bool                   `json:"pending,omitempty"`
 }
+type BrowserPathHandoffProjection struct {
+	Version int `json:"version"`
+	DatasetID string `json:"datasetId"`
+	Kind string `json:"kind"`
+	RequiredCapabilities []string `json:"requiredCapabilities"`
+}
+
 type BrowserHandoffResult struct {
+	PathCreate *BrowserPathHandoffProjection `json:"pathCreate,omitempty"`
 	Version     int                     `json:"version"`
 	OperationID string                  `json:"operationId"`
 	State       string                  `json:"state"`
