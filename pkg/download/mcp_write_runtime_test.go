@@ -150,7 +150,7 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 		t.Fatalf("create failed: %+v %v", receipt, err)
 	}
 	id := *receipt.Result.TaskID
-	waitWritten := func() {
+	waitWritten := func(baseline int64) {
 		t.Helper()
 		for ctx.Err() == nil {
 			task := d.getTask(id)
@@ -165,7 +165,8 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 				if task.getStatus() == base.DownloadStatusError {
 					t.Fatalf("Task error: %+v", d.GetTask(id))
 				}
-				if written > 16384 {
+				owner := task.recoveryOwner.Load()
+				if written > baseline+16384 && owner != nil && owner.active.Load() && task.getStatus() == base.DownloadStatusRunning {
 					return
 				}
 			}
@@ -173,7 +174,7 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 		}
 		t.Fatal("actual writer did not make progress", ctx.Err())
 	}
-	waitWritten()
+	waitWritten(0)
 	creation := d.GetTask(id).MCPWrite.CreationBinding
 	if _, err := d.SubmitMCPWrite(ctx, create); err != nil || len(d.taskList()) != 1 {
 		t.Fatal("same op replay changed Task count", err)
@@ -192,12 +193,14 @@ func TestMCPWriteRealCoreCreatePauseResume(t *testing.T) {
 		command := MCPWriteRequest{Version: 1, DatasetID: identity.DatasetID, PolicyID: *capability.PolicyID, OperationID: op, Kind: kind, Action: &MCPWriteActionRequest{TaskID: id, Expected: capability.Task.Expected}}
 		result, err := d.SubmitMCPWrite(ctx, command)
 		if err != nil || result.Result == nil || result.Result.Outcome != MCPWriteApplied {
-			t.Fatalf("%s action failed: %+v %v", kind, result, err)
+			_, current, captureErr := d.sharedRecoveryExpected(identity.DatasetID, id)
+			t.Fatalf("%s action failed: %+v %v expected=%+v current=%+v capture=%v", kind, result, err, command.Action.Expected, current.Token, captureErr)
 		}
 		return result
 	}
+	prefix := d.GetTask(id).Progress.Downloaded
 	act(MCPWriteResume, "mcp-real-resume-1")
-	waitWritten()
+	waitWritten(prefix)
 	act(MCPWritePause, "mcp-real-pause")
 	if task := d.GetTask(id); task.Status != base.DownloadStatusPause {
 		t.Fatal("pause did not stop same Task", task.Status)
