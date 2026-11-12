@@ -1,4 +1,4 @@
-// kownload-mcp is a read-only stdio adapter. It never owns downloader state.
+// kownload-mcp is a stdio adapter. It never owns downloader state.
 package main
 
 import (
@@ -42,6 +42,7 @@ func run() error {
 	flags.SetOutput(io.Discard)
 	socket := flags.String("socket", filepath.Join(home, "Library", "Application Support", "io.github.kbwumin13-sudo.kownload", "ipc", "api.sock"), "trusted application socket")
 	tokenFile := flags.String("api-token-file", "", "explicit private API token file (read once)")
+	policyFile := flags.String("write-policy-file", "", "explicit private write policy file (read once; otherwise only five read tools)")
 	showVersion := flags.Bool("version", false, "print bridge version")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
@@ -58,7 +59,11 @@ func run() error {
 	}
 	var apiToken string
 	var tokenFileSet bool
+	var policyFileSet bool
 	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "write-policy-file" {
+			policyFileSet = true
+		}
 		if f.Name == "api-token-file" {
 			tokenFileSet = true
 		}
@@ -69,9 +74,16 @@ func run() error {
 			return err
 		}
 	}
+	var policy *writePolicy
+	if policyFileSet {
+		policy, err = readWritePolicyFile(*policyFile)
+		if err != nil {
+			return err
+		}
+	}
 	backend := newBackend(*socket, apiToken)
 	defer backend.close()
-	server := newServer(backend)
+	server := newServerWithPolicy(backend, policy)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	input, err := pollableFile(os.Stdin)

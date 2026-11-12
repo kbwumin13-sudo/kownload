@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/controller"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 	"golang.org/x/net/publicsuffix"
@@ -59,7 +60,34 @@ func (t scopedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 		}
 	}
-	return t.base.RoundTrip(copy)
+	lease := transfer.RecoveryLeaseFromContext(req.Context())
+	if lease == nil {
+		return t.base.RoundTrip(copy)
+	}
+	owner, ok := lease.Owner.(transfer.RecoveryParentController)
+	if !ok {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	scope, err := owner.EnterRecoveryWork(req.Context(), lease.Token, "media/inspect")
+	if err != nil {
+		return nil, err
+	}
+	if err = scope.Check(); err != nil {
+		scope.Leave()
+		return nil, err
+	}
+	response, err := t.base.RoundTrip(copy.WithContext(scope.Context()))
+	if err != nil {
+		scope.Leave()
+		return nil, err
+	}
+	if err = scope.Check(); err != nil {
+		response.Body.Close()
+		scope.Leave()
+		return nil, err
+	}
+	response.Body = &mediaRecoveryBody{ReadCloser: response.Body, scope: scope}
+	return response, nil
 }
 
 type manifestRef struct {
@@ -147,10 +175,22 @@ func manifestRefs(raw string, baseURL *url.URL) []manifestRef {
 }
 
 func discoverContext(ctx context.Context, req *base.Request, ctl *controller.Controller, info *model.Inspection) []string {
+	urls, _ := discoverContextChecked(ctx, req, ctl, info)
+	return urls
+}
+
+func discoverContextChecked(ctx context.Context, req *base.Request, ctl *controller.Controller, info *model.Inspection) ([]string, error) {
 	extra := req.Extra.(*model.ReqExtra)
 	scopes, err := contextScopes(req, extra)
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	managed := transfer.RecoveryLeaseFromContext(ctx) != nil
+	if managed {
+		ctl, _, err = mediaExecutionContext(ctx, ctl, model.Config{})
+		if err != nil {
+			return nil, err
+		}
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
@@ -237,6 +277,9 @@ func discoverContext(ctx context.Context, req *base.Request, ctl *controller.Con
 		}
 		response, err := client.Do(request)
 		if err != nil {
+			if managed {
+				return nil, err
+			}
 			continue
 		}
 		limit := int64(1024 * 1024)
@@ -246,6 +289,9 @@ func discoverContext(ctx context.Context, req *base.Request, ctl *controller.Con
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, limit))
 		_ = response.Body.Close()
 		total -= int64(len(data))
+		if managed && (readErr != nil || response.StatusCode >= 400) {
+			return nil, transfer.ErrRecoveryWork
+		}
 		if readErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 || int64(len(data)) >= limit {
 			continue
 		}
@@ -255,5 +301,5 @@ func discoverContext(ctx context.Context, req *base.Request, ctl *controller.Con
 			}
 		}
 	}
-	return output
+	return output, nil
 }

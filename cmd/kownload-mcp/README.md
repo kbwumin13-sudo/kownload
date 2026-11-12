@@ -1,6 +1,6 @@
-# Kownload MCP 五读薄桥（S7a）
+# Kownload MCP Helper
 
-独立 Go 模块，目标 macOS arm64。只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也没有写工具或任意 HTTP/shell 代理。
+独立 Go 模块，目标 macOS arm64。默认只注册五个读取工具，经 stdio 调用已有 App 的固定 UDS HTTP 服务。显式可信 `--write-policy-file` 可额外注册创建、暂停、继续三个工具，仍须 Core 的实际能力与逐次授权；不初始化 Downloader、不监听端口、不启动 App、不读取数据库或日志，也不提供任意 HTTP/shell 代理。
 
 **当前源码已在实际 `BuildServer` 的 UDS 路由上接入读取适配器，沿用原 API 鉴权；已用合成数据、私有 UDS 和实际 mcporter 验证。仍是部分五读：`totalBytes` 仅在合法 done 快照中提供记录的最终 Downloaded 总量，其余状态为 null；直接 HTTP 的 activeStreams/targetStreams 与已接受的分类错误已由既有采样和当前 run/source 门禁发布；暂停、自动冷却让槽、新 run、换源、成功和删除均清理旧缓存。其它协议未提供的 peers 等字段仍为 unavailable，未用零补齐。真实 BuildServer/HTTP/stdio/mcporter 专项通过，正式 App 中这条新 publisher 链尚未验收。** 已安装 build 39 没有这些端点；默认受管 IPC 父目录的私有权限增量已并入源码；f1a54d8 同源隔离 App、包内 Helper、实际 mcporter 十次 GET 与 socket 自愈已验证。该 preview 无合法非空 token 入口，401 矩阵仅有实际 BuildServer 夹具证据。桥不会降级到旧任务 API 或会恢复 fetcher 的 `Stats`。
 
@@ -57,7 +57,7 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 - retryable 原样复制生产侧接受的 typed 策略，不按任务状态推测。occurredAt 由真实事件的 Unix 毫秒转换为 UTC RFC3339；已知事件的毫秒范围为 1…253402300799999，越界或未知分类返回 snapshot unavailable。
 - producer 负责当前 run/sourceRevision 守卫，以及新 run、换 source、暂停失效和成功时清空；迟到旧事件不得发布。读取侧不映射原始错误、不发明重试策略、不重建历史。生产薄点尚未接入，纯值/锁行为测试不算真实传输、错误或恢复的端到端验收。
 
-读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / app_authentication_failed / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。只有以上五个注册工具；annotations 是提示，不承担权限控制。
+读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / app_authentication_failed / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。默认只有以上五个注册工具；annotations 是提示，不承担权限控制。
 
 ## 传输与权限边界
 
@@ -73,7 +73,7 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 
 文件在启动时只读一次：规范绝对路径，逐级无符号链接、可信且非共享可写祖先（sticky 临时祖先例外），当前 UID 的私有父目录；常规文件、当前 UID、无硬链接，权限严格 0400/0600。采用逐级目录 FD + no-follow 打开并核对文件身份，拒绝 FIFO/目录/链接，最多读取 4096 字节；内容是非空可打印 ASCII 单 token，可有一个结尾 LF，拒绝空白、CRLF、控制符和多行。文件不可用或不安全即启动失败，只输出固定结束信息，不输出文件路径/内容。轮换文件不会改变运行中桥的凭据，新进程读取新值。
 
-内存 token 只加入固定五个 GET 的 `X-Api-Token`，不跟随重定向，不使用 HTTP 代理，不将请求头、错误正文或凭据返回到 MCP。原 API token 是全局 API 凭据，**没有被降权为只读 token**；五读限制属于桥的工具与固定请求集合，不能改变持有该凭据的其他进程权限。凭据文件私有检查不因 socket 权限组合调整而放宽。
+内存 token 只加入上述固定读端点与显式启用后的专用写端点的 `X-Api-Token`，不跟随重定向，不使用 HTTP 代理，不将请求头、错误正文或凭据返回到 MCP。原 API token 是全局 API 凭据，**没有被降权为只读 token**；权限限制属于桥的可信 policy、Core 授权和固定请求集合，不能改变持有该凭据的其他进程权限。凭据文件私有检查不因 socket 权限组合调整而放宽。
 
 客户端配置只可包含显式文件路径，不内嵌 token。mcporter `list --json` 的外层 `transport` 会展示其本地启动参数；它属于客户端配置元数据，与 MCP `tools` schema、工具结果和错误输出分开核验。桥工具 schema/结果不含 token 文件路径或内容。
 
@@ -124,11 +124,29 @@ S0：旧桥忽略该 xattr，旧 CLI 不支持此命令；App 与桥须按 manif
 {"imports":[],"mcpServers":{"kownload":{"command":"/ABSOLUTE/NEW-DATA-ROOT/bin/kownload-mcp","args":[]}}}
 ```
 
-## 后续三写的合同，当前均未实现/启用
+## 显式三写 v1
 
-必须先复用 D3 持久 operationId+规范化请求指纹和回执，不得 fallback 旧 create；首版仅 HTTP/HTTPS。magnet/ED2K 新建另审网络与权限政策。网络目标策略必须覆盖重定向与最终地址，路径策略覆盖最终输出，不以桥只验首 URL 宣称完整 SSRF 防护。
+默认启动仍仅五读。只有本机可信启动参数 `--write-policy-file /ABSOLUTE/PRIVATE/policy.json` 才注册 `kownload_create_task`、`kownload_pause_task`、`kownload_resume_task`。文件沿共享安全 loader 在启动时只读一次，当前 UID、0400/0600、单硬链接常规文件、私有父目录及逐级 no-follow，最多 4096 字节。文件错误即启动失败；模型不能传 policy、文件路径、token、`confirmed` 或 `allowedEffects` 授权。配置更新须显式重新启动；桥不写入客户端全局配置。
 
-新 MCP 任务默认禁用完成脚本、自动打开、外发 Webhook、自动执行后处理等高风险副作用；只有可信用户配置独立授权才可继承。策略必须绑定 Task 并持久化；模型参数和桥隐藏参数都不能替代 core enforcement。旧 core 忽略该字段的回退风险先进入 S0 清单；GUI 既有行为保持。当前模块不添加这些字段/策略或任何三写注册。
+三个工具各有三种 `mode`，没有通用 REST 或独立第九个查询工具：
+
+| mode | 必需字段 | 固定 backend 行为 |
+| --- | --- | --- |
+| `inspect` | `datasetId`；create 加 `outputRootId`，action 加 `taskId` | 只 GET `/api/v1/mcp-write/v1/capabilities`，取得当前 P 及实际可信任务 tuple |
+| `submit` | `datasetId,policyId,operationId`；create 加 `create:{url,outputRootId,fileName}`，action 加 `action:{taskId,expected:{episode,generation,sourceRevision}}` | 唯一一次 POST `/api/v1/mcp-write/v1/operations` |
+| `query` | 原 `datasetId,policyId,operationId` | 只 GET `/api/v1/mcp-write/v1/operations/{operationId}`；不提交、不恢复、不换 ID |
+
+参数精确区分大小写，拒绝未知/重复键、两个互斥 payload、错误类型和越界整数；operation ID 为 1…128 个字母数字及 `._:-`，首位须字母数字。初版创建仅 HTTP(S)、无 URL userinfo/fragment，文件名必须单一组件；不接任意 headers、Options、目标路径或模型指定副作用。网络、实际重定向/IP、输出根身份和 noReplace 仍由 Core 执行边界负责，首 URL 的词法检查不代替它们。
+
+回执状态为 `unknown/pending/settled/not_recorded`：unknown/pending 要求继续同 op 查询；not_recorded 只表示同 D 权威读确认没有 R，kind/result 为 null，不能据此授权新执行。created/applied 必须有真实 task ID，rejected 可以没有尚未创建的 task；未配置的 cap P/network ID 为 null 且全部操作 false。
+
+响应仍为 `{version:1,data:...}`，工具结果为 `{mode,capability,receipt}`，未使用的一项显式 null。capability 的 P 仅标识当前可信 authority，不是凭据。三写结果只含 dataset/policy/operation/task ID、固定状态/错误码及 tuple；不回传 URL、路径、原请求、ExecutionBinding、headers、错误原文或摘要。
+
+提交超时、断连、非鉴权错误响应或无法验证的回执均按 ACK 未知处理：保原 operation ID、`state:unknown,queryRequired:true`。后续只查询原操作；桥无 POST 重试、旧 create fallback、自动换 ID 或后台轮询。Core 在同 `(D,mcp-write/v1,op)` 下对 kind 与 caller raw 做幂等裁决，首次 ExecutionBinding 独立持久冻结；同 op 不能换 kind 或刷新 expected tuple 伪装新动作。HTTP 401 仅输出固定鉴权失败，不回显正文。
+
+暂停/继续仍须当前可信 policy 显式 task ID 范围及真实 D/E/G/sourceRevision。新创建的回执不自动扩 scope。P 更新后可用原 P 查询旧回执；新提交必须核当前 P。继续不是 Retry，不重置恢复预算。新 MCP 任务的完成脚本、自动打开、webhook、自动后处理默认抑制，Core 持久绑定其创建上限；后续授权不能扩张历史上限。GUI 任务行为与专用 MCP 创建标签分开。
+
+本节描述 Helper 的已实现请求边界；Core/REST/state 与最终同源 App 三写验收须在成套集成后核证，不能用受控 UDS 的协议测试代替真实创建、暂停和继续。
 
 ## 验证范围
 

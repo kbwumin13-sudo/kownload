@@ -338,4 +338,7 @@ def scoped_video_result(self, info, download=True):
 
 
 yt_dlp.YoutubeDL.process_video_result = scoped_video_result
+# KOWNLOAD_RECOVERY_BRIDGE
+if context.get('recovery') is not None:
+    install_recovery_bridge()
 yt_dlp.main(context['args'] + ['--downloader', 'native'])

@@ -11,12 +11,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
 
 //go:embed context.py
 var contextWrapper string
+
+//go:embed recovery_bridge.py
+var recoveryWrapper string
 
 func cloneRequest(req *base.Request) (*base.Request, error) {
 	if req == nil {
@@ -157,21 +161,39 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 		}
 	}
 	if interpreter == "" {
+		if transfer.RecoveryLeaseFromContext(ctx) != nil {
+			return nil, nil, transfer.ErrRecoveryHeld
+		}
 		return standaloneCommand(ctx, cfg, extra, scopes, args)
 	}
-	payload, err := json.Marshal(struct {
-		Args   []string            `json:"args"`
-		Scopes []model.HeaderScope `json:"scopes"`
-		Probe  string              `json:"probe"`
-	}{args, scopes, probePath(cfg)})
+	program := strings.Replace(contextWrapper, "# KOWNLOAD_RECOVERY_BRIDGE", recoveryWrapper, 1)
+	cmd := exec.CommandContext(ctx, interpreter, "-c", program)
+	bridge, err := newMediaRecoveryBridge(ctx, cmd)
 	if err != nil {
+		return nil, nil, err
+	}
+	var recovery map[string]int
+	if bridge != nil {
+		recovery = map[string]int{"read": 3, "write": 4}
+		args = append([]string{"--retries", "0", "--fragment-retries", "0", "--extractor-retries", "0", "--file-access-retries", "0", "--abort-on-unavailable-fragments"}, args...)
+	}
+	payload, err := json.Marshal(struct {
+		Args     []string            `json:"args"`
+		Scopes   []model.HeaderScope `json:"scopes"`
+		Probe    string              `json:"probe"`
+		Recovery map[string]int      `json:"recovery,omitempty"`
+	}{args, scopes, probePath(cfg), recovery})
+	if err != nil {
+		bridge.Close()
 		return nil, nil, errors.New("invalid media context")
 	}
+
 	file, err := os.CreateTemp("", "gopeed-media-context-*")
 	if err != nil {
+		bridge.Close()
 		return nil, nil, errors.New("cannot create media context")
 	}
-	cleanup := func() { _ = os.Remove(file.Name()) }
+	cleanup := func() { bridge.Close(); _ = os.Remove(file.Name()) }
 	if err = file.Chmod(0600); err == nil {
 		_, err = file.Write(payload)
 	}
@@ -180,7 +202,7 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 		cleanup()
 		return nil, nil, errors.New("cannot secure media context")
 	}
-	cmd := exec.CommandContext(ctx, interpreter, "-c", contextWrapper, file.Name())
+	cmd.Args = append(cmd.Args, file.Name())
 	cmd.Env = cleanEnvironment()
 	return cmd, cleanup, nil
 }
