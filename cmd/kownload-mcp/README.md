@@ -55,7 +55,7 @@ LastError：`{available:false}`，或 `{available:true,category,retryable,occurr
 
 - category：`network | authentication | integrity | storage | cancelled | unknown`；由 App 明确分类，不传错误原文。
 - retryable 原样复制生产侧接受的 typed 策略，不按任务状态推测。occurredAt 由真实事件的 Unix 毫秒转换为 UTC RFC3339；已知事件的毫秒范围为 1…253402300799999，越界或未知分类返回 snapshot unavailable。
-- producer 负责当前 run/sourceRevision 守卫，以及新 run、换 source、暂停失效和成功时清空；迟到旧事件不得发布。读取侧不映射原始错误、不发明重试策略、不重建历史。生产薄点尚未接入，纯值/锁行为测试不算真实传输、错误或恢复的端到端验收。
+- HTTP 的 activeStreams/targetStreams 及真实接受的分类错误已接入生产快照。producer 负责当前 run/sourceRevision 守卫，以及新 run、换 source、暂停失效和成功时清空；迟到旧事件不得发布。其他协议或字段仅返回实际已发布且 known 的值，没有观测时为 unavailable，不补零、不调用 restore/fetcher。读取侧不映射原始错误、不发明重试策略、不重建重启前历史；各次传输、错误和恢复验收仍以对应源码与真实观测为准，纯值/锁行为测试不代替端到端验收。
 
 读取端实现必须不触发 restore/Start/Prepare/持久写入或网络，不在主锁内等待客户端/协议统计。桥端通过 schema 和类型重建 DTO，额外检查 id、重复记录、时间及 unavailable 语义。API 任意错误正文、路径、堆栈均丢弃。工具错误仅返回固定分类：`busy / app_unavailable / app_authentication_failed / cancelled / endpoint_or_task_unavailable / incompatible_read_api / invalid_app_response`。输入非法为 JSON-RPC -32602。默认只有以上五个注册工具；annotations 是提示，不承担权限控制。
 

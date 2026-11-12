@@ -4,6 +4,37 @@ S0 基线：现用 build39 / `5babaf7b2a9e90a7a58e9ff690228c2664f430ea`；开发
 `446b474cdffd70c887c300fb01ea3b4e6fab5277`。本清单区分数据读取、执行与自动续跑。
 JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧版可以执行新版任务。
 
+## 本轮完整候选的新增状态（.32 / build45，未发布）
+
+本轮仍沿同一数据域与原D3桶，不给旧R1或既有live Task加可忽略字段冒充新能力。
+运行Core冻结为 `29887fd1f010640a81ad85223ec9762e97621c56` / tree `e430fdd6524836e13db6b9dd86b490c2aa554fec`；
+UI来源 `afa698df05e4d95fe54597b54a1f2f6d3d7d1ad5`，REST新薄接来源 `aec60316`、`a7d385af`。
+本次版本/文档提交的最终sourceCommit与整树由发布清单记录，不将下面契约当作旧App冷启动验证。
+旧版不识别新记录时禁止裸库回退，须配对App/data/prefs。
+
+| 新状态 | 持久关联与执行边界 | 旧reader及回退边界 |
+| --- | --- | --- |
+| D6具名R2/ref2/reverse2；`Task.pathFreeze` version1 | `http-path-create/v1`只接固定[path]或[path,sha]序列；BT/ED2K/netdisk/media分别只接其具名kind/单cap。原请求、ordered配置快照与默认解释首R冻结；Task/member/F与完整layout/tree hash强关联。已有F不再Evaluate/改名；未知ACK或query不恢复首写资格 | 原R1 reader严格拒R/ref非1；当前R2 reader也按namespace/kind/caps/实际protocol派发，未知或混版held。不能把识别R2等同识别MCP/D6全部variant；pre-S2旧core仍不能保证held |
+| D6输出身份及`LayoutOutput.phase` | noSHA Output的planned/staging/publishing/published/uncertain及LayoutOutput的staging/publishing/published/uncertain均与真实opened文件/目录身份Save ACK关联；媒体完整字幕表和独立workspace、native整树文件均不能仅凭Layout存在取得写许可。publishing/unknown/published不回RW staging；SHA仍原Completion三方，不伪造expected | 旧writer丢槽、逆索引错配或输出身份不一致由当前strict reader拒绝。FS文件与DB快照须共同保全；已发布文件不因数据库回退被覆盖或清理 |
+| ED2K `protocol_state.pathFrozenTransfers` | 原native ClientState/legacy `transfers`保留；D6记录按真实Task owner独立carrier保存，不进入旧自动Load。只有F/整组身份ACK后显式激活；known deleteACK且Quiesce成功才Forget元数据，保输出 | 旧reader只看原transfers，因而不会从此新增carrier自动打开D6；这条源码边界不证明旧App可安全执行整个新版库 |
+| MCP严格R2 `mcp-write/v1` 与 `Task.mcpWrite` version2 | create同事务R/M/Task/ref/reverse/recovery；action receipt不是create member。CreationBinding永久保留，resume须当前可信P显式Task scope/可信E-G-S及兼容root/network，同事务保存CurrentExecutionBinding/receipt；effects不超过创建上限与当前许可交集 | unknown/pending/query不授RAM或执行。旧P可按原D/P/op只读历史，不能重铸旧授权；只识别D6的R2 reader不得放行MCP，缺坏binding/required held |
+| 原Handoff version1 + HTTP typed PathCreate projection | 原operationId/client/browser/download/context/bridgeBinding保持；新R2/M prepared零IO，原浏览器取消确认后的commit phase ACK才排队。未知ACK仅原op query，旧R1/history不升级。projection是域/kind/caps投影，不是许可 | 旧carrier不声明pathCreateVersion时新客户端零typed prepare；已存在R1或未知结果保原查询，不能换op或静默旧路径创建。浏览器profile pending不随App快照自动回退 |
+
+D4 shared recovery v4仍按Task/ledger/required三方、same-D/token/full record/CURRENT checkpoint CAS执行。
+普通/scoped新transport可合法升4；GET/Setup不据查询升级。concrete Mem/Bolt先初始化/严格读取D；
+结构上无可信same-view能力的custom storage仅保原合法managed1–3，既有4或坏D/读错保持held。
+Mail.ru refresh/失败后的原URL再解析使用已收费refresh与source commit，普通重试使用transport，
+不换episode或清余额。已完成的旧reader实证及AF2↔normal44源码关联仍各归原段落；
+本轮新增native carrier/MCP CurrentBinding/D6输出边界仅静态核证，不倒写成旧App实测。
+
+新F任务的连文件强制删除保守拒绝并保留Task、输出与foreign文件；正常移除保留文件。
+MCP默认只注册五读；可信policy显式启用才注册创建、暂停、继续三写，缺策略不自动授权。
+媒体严格能力要求实际可用的Python yt-dlp入口；standalone不支持时在R前拒绝，不降级创建。
+
+D8五读保持按Task、有界、noRestore及每字段known；跨协议recorded total已有通用Progress投影。
+HTTP streams/errors有真实producer；非HTTP未观测字段available:false合法，不新增全局stats端点
+或全协议publisher作为本版门槛。
+
 ## 状态清单
 
 每次增加持久字段、bucket 或执行阶段，先补齐本表，再合入该状态的写入端。
