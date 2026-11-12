@@ -165,3 +165,16 @@ func TestRecoveryTaskStorageExactOwnedRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryTaskExecutionMetaPreservesExactOwnedExtras(t *testing.T) {
+	task := exactRecoveryTask(t)
+	copied, err := task.cloneExecutionMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRecoveryTaskExact(t, &Task{Meta: copied})
+	copied.Opts.Extra.(map[string]any)["nested"].(map[string]any)["keep"] = "foreign"
+	if task.Meta.Opts.Extra.(map[string]any)["nested"].(map[string]any)["keep"] != "original" {
+		t.Fatal("execution metadata aliases Task")
+	}
+}

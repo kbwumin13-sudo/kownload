@@ -122,7 +122,7 @@ func (d *Downloader) initOperationOptions(input *base.Options) (*base.Options, e
 
 // Caller owns the task's metadata lock when it may change concurrently.
 func (t *Task) cloneExecutionMeta() (*fetcher.FetcherMeta, error) {
-	if t.CreationOperation != nil {
+	if t.CreationOperation != nil || t.Recovery != nil {
 		return cloneOperationJSON(t.Meta)
 	}
 	return util.DeepClone(t.Meta), nil
