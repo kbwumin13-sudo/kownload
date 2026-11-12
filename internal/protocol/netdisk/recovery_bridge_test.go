@@ -3,6 +3,8 @@ package netdisk
 import (
 	"context"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -96,8 +98,9 @@ func (provider *bridgeAPIProvider) Info() model.ProviderInfo {
 	info := provider.fixtureProvider.Info(); info.APIHosts = []string{"127.0.0.1"}; return info
 }
 func (provider *bridgeAPIProvider) Resolve(ctx context.Context, client *cloud.APIClient, _ *cloud.Session, _ model.Source, file model.File) (*cloud.Download, error) {
-	var result struct { URL string `json:"url"` }
+	var result struct { URL string `json:"url"`; Hash string `json:"hash"` }
 	if err := client.JSON(ctx, "GET", provider.api, nil, nil, &result); err != nil { return nil, err }
+	file.Hash = result.Hash
 	return &cloud.Download{URL: result.URL, File: file}, nil
 }
 
@@ -108,13 +111,14 @@ func TestParentRecoveryProviderRefresh(t *testing.T) {
 	for _, unknown := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unknownACK=%v", unknown), func(t *testing.T) {
 			body := []byte(strings.Repeat("parent-recovery-", 2048))
+			digest := sha256.Sum256(body)
 			var apiCalls, childCalls atomic.Int32
 			var baseURL string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/api":
 					link := apiCalls.Add(1)
-					_ = json.NewEncoder(w).Encode(map[string]string{"url": fmt.Sprintf("%s/file?link=%d", baseURL, link)})
+					_ = json.NewEncoder(w).Encode(map[string]string{"url": fmt.Sprintf("%s/file?link=%d", baseURL, link), "hash": "sha256:"+hex.EncodeToString(digest[:])})
 				case "/file":
 					if r.URL.Query().Get("link") == "1" { w.WriteHeader(http.StatusForbidden); return }
 					childCalls.Add(1)
@@ -143,6 +147,7 @@ func TestParentRecoveryProviderRefresh(t *testing.T) {
 			req := &base.Request{URL: capture.Source.URL, Protocol: "netdisk", Extra: &model.ReqExtra{Provider: "quark", Source: capture.Source, SessionID: capture.SessionID, AccountID: "fixture", File: model.File{ID: "file", Name: "a.bin", Size: int64(len(body))}}}
 			dir := t.TempDir()
 			if err = f.ResolveTask(ctx, req, &base.Options{Path: dir}); err != nil { t.Fatal(err) }
+			rawParent, _ := json.Marshal(f.Meta().Req)
 			sentinel := []byte("untouched-before-source-ACK")
 			if err = os.WriteFile(filepath.Join(dir,"a.bin"), sentinel, 0600); err != nil { t.Fatal(err) }
 			wait := f.BindRunWait(ctx)
@@ -152,6 +157,8 @@ func TestParentRecoveryProviderRefresh(t *testing.T) {
 			select { case err = <-done: case <-time.After(5*time.Second): t.Fatal("provider/child run blocked") }
 			got, readErr := os.ReadFile(filepath.Join(dir,"a.bin"))
 			if readErr != nil { t.Fatal(readErr) }
+			afterParent, _ := json.Marshal(f.Meta().Req)
+			if !bytes.Equal(rawParent, afterParent) { t.Fatal("provider metadata rewrote frozen parent raw request") }
 			if unknown {
 				if err == nil || childCalls.Load() != 0 || !bytes.Equal(got,sentinel) { t.Fatalf("unknown ACK sent IO or changed bytes: err=%v requests=%d",err,childCalls.Load()) }
 			} else if err != nil || !bytes.Equal(got,body) { t.Fatalf("refresh failed or wrong bytes: %v bytes=%d",err,len(got)) }
