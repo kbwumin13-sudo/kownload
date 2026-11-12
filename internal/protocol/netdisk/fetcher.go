@@ -463,6 +463,7 @@ func (f *Fetcher) Start() error {
 	f.publishViewLocked()
 	f.runDone = make(chan struct{})
 	runDone := f.runDone
+	result := f.done
 	select {
 	case <-f.done:
 	default:
@@ -537,7 +538,7 @@ func (f *Fetcher) Start() error {
 			return
 		}
 		select {
-		case f.done <- safeError(err):
+		case result <- safeError(err):
 		default:
 		}
 	}()
