@@ -193,6 +193,10 @@ func TestMCPWriteBuildServerUDSCreatePauseResume(t *testing.T) {
 	_, port, _ := net.SplitHostPort(source.Listener.Addr().String())
 	t.Setenv("KOWNLOAD_MCP_WRITE_ALLOWED_PORTS", port)
 	f := mcpLiveStart(t, root)
+	if handoff := os.Getenv("KOWNLOAD_MCP_CLIENT_HANDOFF"); handoff != "" {
+		mcpLiveClientHandoff(t, f, root, handoff, identity.DatasetID, policyPath, source.URL+"/owned", payload, &allow, writePolicy)
+		return
+	}
 	var capability download.MCPWriteCapability
 	capPath := mcpWritePrefix + "/capabilities?datasetId=" + identity.DatasetID
 	f.call(t, "GET", capPath, nil, &capability)
@@ -289,4 +293,122 @@ func TestMCPWriteBuildServerUDSCreatePauseResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("actual UDS same Task create/pause/resume, full SHA %x, range requests %d", sha256.Sum256(data), ranges.Load())
+}
+
+// Optional test-only rendezvous for the independently operated stdio client.
+// It introduces no product route, authority or persistent request mechanism.
+func mcpLiveClientHandoff(t *testing.T, f *mcpLiveUDS, root, handoff, dataset, policyPath, target string, payload []byte, allow *atomic.Bool, writePolicy func([]string)) {
+	t.Helper()
+	if err := os.MkdirAll(handoff, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, value any) {
+		t.Helper()
+		raw, e := json.MarshalIndent(value, "", "  ")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(filepath.Join(handoff, name), raw, 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	waitFile := func(name string, out any) {
+		t.Helper()
+		deadline := time.Now().Add(100 * time.Second)
+		for {
+			raw, e := os.ReadFile(filepath.Join(handoff, name))
+			if e == nil {
+				if out != nil && json.Unmarshal(raw, out) != nil {
+					t.Fatal("invalid client handoff", name)
+				}
+				return
+			}
+			if !os.IsNotExist(e) {
+				t.Fatal(e)
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("client handoff timed out", name)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	capPath := mcpWritePrefix + "/capabilities?datasetId=" + dataset
+	var cap download.MCPWriteCapability
+	f.call(t, "GET", capPath, nil, &cap)
+	if cap.PolicyID == nil || !cap.Operations.Create {
+		t.Fatal("actual create capability unavailable")
+	}
+	oldP := *cap.PolicyID
+	config, _ := f.core.GetConfig()
+	before, _ := json.Marshal(config)
+	write("create-ready.json", map[string]any{"version": 1, "source": os.Getenv("KOWNLOAD_MCP_FIXTURE_SOURCE"), "sourceRoot": os.Getenv("KOWNLOAD_MCP_FIXTURE_SOURCE_ROOT"), "uds": filepath.Join(root, "api.sock"), "datasetId": dataset, "policyId": oldP, "apiToken": verifiedLiveToken, "policyFile": policyPath, "outputRootId": "owned", "outputRoot": filepath.Join(root, "out"), "url": target, "fileName": "one.bin", "bytes": len(payload), "sha256": fmt.Sprintf("%x", sha256.Sum256(payload))})
+	var created struct {
+		TaskID      string `json:"taskId"`
+		OperationID string `json:"operationId"`
+		PolicyID    string `json:"policyId"`
+	}
+	waitFile("create-result.json", &created)
+	if created.TaskID == "" || created.OperationID == "" || created.PolicyID != oldP || len(f.core.GetTasks()) != 1 {
+		t.Fatal("client did not create exactly one scoped task")
+	}
+	var task download.Task
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		f.call(t, "GET", "/api/v1/tasks/"+created.TaskID, nil, &task)
+		if task.MCPWrite != nil && task.MCPWrite.Output.Phase == download.MCPWriteOutputStaging && task.Progress != nil && task.Progress.Downloaded >= 16384 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client create has no real prefix")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	creation := task.MCPWrite.CreationBinding
+	if err := f.close(); err != nil {
+		t.Fatal("paired normal close", err)
+	}
+	writePolicy([]string{created.TaskID})
+	f = mcpLiveStart(t, root)
+	f.call(t, "GET", capPath+"&taskId="+created.TaskID, nil, &cap)
+	if cap.PolicyID == nil || *cap.PolicyID == oldP || cap.Task == nil {
+		t.Fatal("explicit current policy/tuple not installed")
+	}
+	newP := *cap.PolicyID
+	write("actions-ready.json", map[string]any{"version": 1, "uds": filepath.Join(root, "api.sock"), "datasetId": dataset, "policyId": newP, "oldPolicyId": oldP, "taskId": created.TaskID, "createOperationId": created.OperationID, "expected": cap.Task.Expected, "normalReopen": true})
+	waitFile("release-body.json", nil)
+	allow.Store(true)
+	deadline = time.Now().Add(8 * time.Second)
+	for {
+		f.call(t, "GET", "/api/v1/tasks/"+created.TaskID, nil, &task)
+		if task.Status == base.DownloadStatusDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client resumed task did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "out", "one.bin"))
+	if err != nil || sha256.Sum256(data) != sha256.Sum256(payload) {
+		t.Fatal("full client output SHA mismatch", err)
+	}
+	if task.MCPWrite == nil || !reflect.DeepEqual(creation, task.MCPWrite.CreationBinding) || task.MCPWrite.CurrentExecutionBinding.PolicyID != newP {
+		t.Fatal("client current/creation binding mismatch")
+	}
+	for _, effect := range []string{"script", "webhook", "auto_open", "post_process"} {
+		if f.core.MCPTaskEffectAllowed(&task, effect) {
+			t.Fatal("default effect granted", effect)
+		}
+	}
+	config, _ = f.core.GetConfig()
+	after, _ := json.Marshal(config)
+	if !bytes.Equal(before, after) || len(f.core.GetTasks()) != 1 {
+		t.Fatal("client changed original config/task set")
+	}
+	write("terminal-ready.json", map[string]any{"version": 1, "taskId": created.TaskID, "status": "done", "sha256": fmt.Sprintf("%x", sha256.Sum256(data)), "bytes": len(data), "configPreserved": true, "creationPreserved": true, "defaultEffectsAllowed": false})
+	waitFile("client-result.json", nil)
+	if err = f.close(); err != nil {
+		t.Fatal(err)
+	}
+	write("fixture-closed.json", map[string]any{"version": 1, "normalClose": true, "taskId": created.TaskID, "taskCount": 1, "appStarted": false})
 }
