@@ -210,6 +210,8 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		meta.Opts.Extra = stored[i].Meta.Opts.Extra
 		meta.Opts.SelectFiles = stored[i].Meta.Opts.SelectFiles
 		meta.Opts.Path = decision.Root
+		// F replaces the old creation branch, including its selected-byte total.
+		meta.Res.CalcSize(meta.Opts.SelectFiles)
 		if t.Protocol == "http" && len(meta.Res.Files) == 1 && meta.Res.Name == "" {
 			name := meta.Opts.Name
 			if name == "" {
