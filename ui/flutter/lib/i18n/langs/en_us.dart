@@ -2,6 +2,8 @@ const enUS = {
   'en_US': {
     'label': 'English',
     'error': 'Error',
+    'httpRecoveryCooldown':
+        'The task is still cooling down and cannot be retried yet. Check its state again later.',
     'tip': 'Tip',
     'confirm': 'Confirm',
     'confirmDelete': 'Are you sure you want to delete?',

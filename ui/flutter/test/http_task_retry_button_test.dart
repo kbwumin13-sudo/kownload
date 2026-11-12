@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:get/get.dart' show GetMaterialApp;
 import 'package:gopeed/api/model/task.dart';
 import 'package:gopeed/api/model/meta.dart';
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/app/modules/task/views/http_task_retry_button.dart';
+import 'package:gopeed/i18n/message.dart' as i18n;
 import 'support/http_recovery_fixture.dart';
 import 'manual_task_batch_submission_test.dart' show spin;
 
@@ -28,8 +30,12 @@ void main() {
       createdAt: DateTime.utc(2026),
       updatedAt: DateTime.utc(2026))
     ..protocol = Protocol.http;
-  Future<void> mount(WidgetTester t, {Task? task}) async =>
-      t.pumpWidget(MaterialApp(
+  Future<void> mount(WidgetTester t,
+          {Task? task, Locale locale = const Locale('zh', 'CN')}) async =>
+      t.pumpWidget(GetMaterialApp(
+          translations: i18n.messages,
+          locale: locale,
+          fallbackLocale: const Locale('en', 'US'),
           home: Scaffold(
               body: HttpTaskRetryButton(
                   task: task ?? sample(),
@@ -129,6 +135,28 @@ void main() {
     expect(body['expectedEpisode'], 'ep-a');
     expect(body['expectedSourceRevision'], 1);
     expect(messages.last, contains('已受理'));
+  });
+  widgetTest('cooldown notice uses the selected English locale without a POST',
+      (t) async {
+    f.override = (q) async {
+      if (q.uri.path.contains('/recovery/v1')) {
+        return f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'recovery': f.view()
+            ..['reason'] = 'cooldown'
+            ..['retryAllowed'] = false
+        });
+      }
+      await f.handle(q);
+    };
+    await mount(t, locale: const Locale('en', 'US'));
+    await click(t, '重试');
+    await spin(t, () => messages.isNotEmpty);
+    expect(messages.single,
+        'The task is still cooling down and cannot be retried yet. Check its state again later.');
+    expect(f.posts, 0);
+    expect(legacy, 0);
   });
   widgetTest('unknown recovery reason sends no POST or legacy Continue',
       (t) async {
