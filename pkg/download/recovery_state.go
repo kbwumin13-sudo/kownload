@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	bucketTaskRecovery     = "task_recovery_v1"
-	bucketRecoveryRequired = "task_recovery_required_v1"
-	recoveryCapability     = "http-transport-recovery/v1"
-	recoveryMaxTotal       = 16
-	recoveryMaxTransport   = 6
-	recoveryMaxWork        = 1024
+	bucketTaskRecovery         = "task_recovery_v1"
+	bucketRecoveryRequired     = "task_recovery_required_v1"
+	recoveryCapability         = "http-transport-recovery/v1"
+	recoveryMaxTotal           = 16
+	recoveryMaxTransport       = 6
+	recoveryMaxWork            = 1024
+	recoveryCoverageRangeLimit = 4096
 )
 
 type TaskRecoveryRef struct {
@@ -52,25 +53,26 @@ type recoveryExplicitRetry struct {
 	SourceRevision uint64 `json:"sourceRevision"`
 }
 type recoveryRecord struct {
-	Version               int                    `json:"version"`
-	TaskID                string                 `json:"taskId"`
-	Episode               string                 `json:"episode"`
-	Generation            uint64                 `json:"generation"`
-	SourceRevision        uint64                 `json:"sourceRevision"`
-	SourceHash            string                 `json:"sourceHash"`
-	ExecutionDefaultsHash string                 `json:"executionDefaultsHash"`
-	InitialAttempt        recoveryInitialAttempt `json:"initialAttempt"`
-	TotalUsed             int                    `json:"totalUsed"`
-	TransportUsed         int                    `json:"transportUsed"`
-	RefreshUsed           int                    `json:"refreshUsed"`
-	DeferralUsed          int                    `json:"deferralUsed"`
-	NotBefore             string                 `json:"notBefore,omitempty"`
-	NextAction            uint64                 `json:"nextAction"`
-	Actions               []recoveryAction       `json:"actions"`
-	LastExplicitRetry     *recoveryExplicitRetry `json:"lastExplicitRetry,omitempty"`
+	Version               int                         `json:"version"`
+	TaskID                string                      `json:"taskId"`
+	Episode               string                      `json:"episode"`
+	Generation            uint64                      `json:"generation"`
+	SourceRevision        uint64                      `json:"sourceRevision"`
+	SourceHash            string                      `json:"sourceHash"`
+	ExecutionDefaultsHash string                      `json:"executionDefaultsHash"`
+	InitialAttempt        recoveryInitialAttempt      `json:"initialAttempt"`
+	TotalUsed             int                         `json:"totalUsed"`
+	TransportUsed         int                         `json:"transportUsed"`
+	RefreshUsed           int                         `json:"refreshUsed"`
+	DeferralUsed          int                         `json:"deferralUsed"`
+	NotBefore             string                      `json:"notBefore,omitempty"`
+	NextAction            uint64                      `json:"nextAction"`
+	Actions               []recoveryAction            `json:"actions"`
+	LastExplicitRetry     *recoveryExplicitRetry      `json:"lastExplicitRetry,omitempty"`
+	Coverage              *transfer.HTTPCoverageState `json:"coverage,omitempty"`
 }
 
-func supportedRecoveryVersion(version int) bool { return version == 1 || version == 2 }
+func supportedRecoveryVersion(version int) bool { return version == 1 || version == 2 || version == 3 }
 
 // The projection is shared with HTTP's capture/send checks. Pure owner tests
 // use a synthetic direct/empty-UA context; Core always supplies a captured D.
@@ -92,16 +94,19 @@ func (r *recoveryRecord) valid(id string) bool {
 	if !supportedRecoveryVersion(r.Version) || r.TaskID != id || r.NotBefore != "" || r.Episode == "" || r.SourceRevision == 0 || !validRecoveryHash(r.SourceHash) || !validRecoveryHash(r.ExecutionDefaultsHash) || r.TotalUsed < 0 || r.TotalUsed > recoveryMaxTotal || r.TransportUsed < 0 || r.TransportUsed > recoveryMaxTransport || r.RefreshUsed != 0 || r.DeferralUsed != 0 || len(r.Actions) > recoveryMaxTotal {
 		return false
 	}
-	if r.Version == 1 && r.LastExplicitRetry != nil || r.Version == 2 && r.LastExplicitRetry == nil {
+	if r.Version < 3 && r.Coverage != nil || r.Version == 1 && r.LastExplicitRetry != nil || r.Version == 2 && r.LastExplicitRetry == nil {
 		return false
 	}
-	if r.Version == 2 && (r.Generation == 0 || r.InitialAttempt.State == "ungranted" || r.InitialAttempt.State == "uncertain") {
+	if r.Version >= 2 && (r.Generation == 0 || r.InitialAttempt.State == "ungranted" || r.InitialAttempt.State == "uncertain") {
+		return false
+	}
+	if r.Version == 3 && (r.Coverage == nil || transfer.ValidateHTTPCoverageState(*r.Coverage, recoveryCoverageRangeLimit) != nil) {
 		return false
 	}
 	if last := r.LastExplicitRetry; last != nil {
 		// The receipt is historical. Later legitimate source/default CAS may
 		// advance SourceRevision without rewriting the original user action.
-		if last.Version != 1 || !operationIDPattern.MatchString(last.ActionID) || last.FromEpisode == "" || last.ToEpisode != r.Episode || last.FromEpisode == last.ToEpisode || last.SourceRevision == 0 || last.SourceRevision > r.SourceRevision {
+		if last.Version != 1 || !operationIDPattern.MatchString(last.ActionID) || last.FromEpisode == "" || last.ToEpisode == "" || (r.Version < 3 && last.ToEpisode != r.Episode) || last.FromEpisode == last.ToEpisode || last.SourceRevision == 0 || last.SourceRevision > r.SourceRevision {
 			return false
 		}
 	}
