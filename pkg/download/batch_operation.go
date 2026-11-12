@@ -611,9 +611,9 @@ func (d *Downloader) attachOperationSnapshotLocked(task *Task, createdNow bool) 
 		d.tasks = append(d.tasks, task)
 		return nil
 	}
-	// Only this process's successful M authorizes the first unresolved HTTP
+	// Only this process's successful M authorizes the first unresolved managed
 	// request. Q readback/replay and startup do not recover that authority.
-	task.initialHTTPExecution.Store(createdNow && task.Protocol == "http" && task.Meta.Res == nil)
+	task.initialHTTPExecution.Store(createdNow && (task.Protocol == "http" || task.Protocol == "netdisk" || task.Protocol == "media") && task.Meta.Res == nil)
 	task.updateStatus(base.DownloadStatusWait)
 	d.tasks = append(d.tasks, task)
 	d.enqueueLocked(task)

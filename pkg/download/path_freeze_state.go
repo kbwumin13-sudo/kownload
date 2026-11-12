@@ -31,7 +31,7 @@ type pathVariant struct {
 // Closed variants describe durable formats, not active producer capabilities.
 // Core advertises support only after its real first-write guard is installed.
 var pathVariants = []pathVariant{
-	{HTTPPathCreateKind, HTTPPathCapability, "http", false},
+	{HTTPPathCreateKind, HTTPPathRequiredCapability, "http", false},
 	{"bt-path-create/v1", "bt-path-freeze/v1", "bt", true},
 	{"ed2k-path-create/v1", "ed2k-path-freeze/v1", "ed2k", true},
 	{"netdisk-path-create/v1", "netdisk-path-freeze/v1", "netdisk", false},
@@ -153,7 +153,7 @@ func pathFrozenValid(s TaskPathFreeze) bool {
 			return false
 		}
 		if s.Output != nil {
-			if s.RequiredCapability != HTTPPathCapability || len(s.Layout.Members) != 1 || !mcpWriteName(s.Layout.Members[0].RelativePath) || !mcpWriteName(s.Output.StagingName) || strings.EqualFold(s.Output.StagingName, s.Layout.Members[0].RelativePath) {
+			if s.RequiredCapability != HTTPPathRequiredCapability || len(s.Layout.Members) != 1 || !mcpWriteName(s.Layout.Members[0].RelativePath) || !mcpWriteName(s.Output.StagingName) || strings.EqualFold(s.Output.StagingName, s.Layout.Members[0].RelativePath) {
 				return false
 			}
 			switch s.Output.Phase {
@@ -197,8 +197,11 @@ func pathRecordValid(r *batchOperationRecord) bool {
 		return false
 	}
 	allFrozen := true
+	if r.Path.TreeDecision != nil && !pathDecisionMatches(TaskPathFreeze{Phase: PathFreezeFrozen, Decision: r.Path.TreeDecision}, *r.Path) {
+		return false
+	}
 	for _, m := range r.Members {
-		if m.Protocol != v.Protocol || m.PathFreeze == nil || m.PathFreeze.RequiredCapability != v.Capability || !pathFrozenValid(*m.PathFreeze) || !pathDecisionMatches(*m.PathFreeze, *r.Path) {
+		if m.Protocol != v.Protocol || m.PathFreeze == nil || m.PathFreeze.RequiredCapability != v.Capability || !pathFrozenValid(*m.PathFreeze) {
 			return false
 		}
 		frozen := m.PathFreeze.Phase == PathFreezeFrozen
@@ -307,72 +310,94 @@ func pathResourceLayout(meta *fetcher.FetcherMeta) (pathpolicy.LayoutV1, error) 
 // ReadPathFreeze is an owned same-view read. Frozen values bind R/Task/source
 // and actual layout, never an obsolete execution generation. No implicit F.
 func ReadPathFreeze(reader datasetReader, id string) (*Task, TaskPathFreeze, error) {
-	var empty TaskPathFreeze
 	if reader == nil || id == "" {
-		return nil, empty, ErrPathFreezeHeld
+		return nil, TaskPathFreeze{}, ErrPathFreezeHeld
 	}
 	task := new(Task)
 	present, err := reader.Get(bucketTask, id, task)
 	if err != nil {
-		return nil, empty, ErrPathFreezeUnavailable
+		return nil, TaskPathFreeze{}, ErrPathFreezeUnavailable
 	}
-	if !present || task.ID != id || task.PathFreeze == nil || task.MCPWrite != nil || task.CreationOperation == nil {
-		return nil, empty, ErrPathFreezeHeld
+	if !present || task.ID != id || task.CreationOperation == nil {
+		return nil, TaskPathFreeze{}, ErrPathFreezeHeld
 	}
-	ref := task.CreationOperation
-	if ref.Version != 2 || ref.Namespace != batchOperationNamespace || (ref.Index < 0) {
-		return nil, empty, ErrPathFreezeHeld
-	}
-	r, err := loadOperationFrom(reader, ref.OperationID)
-	if err != nil || r == nil || !r.valid() || r.Path == nil {
-		return nil, empty, ErrPathFreezeHeld
+	r, err := loadOperationFrom(reader, task.CreationOperation.OperationID)
+	if err != nil || r == nil || r.Path == nil {
+		return nil, TaskPathFreeze{}, ErrPathFreezeHeld
 	}
 	if err = requireDataset(reader, r.Path.DatasetID); err != nil {
-		return nil, empty, err
+		return nil, TaskPathFreeze{}, err
+	}
+	state, err := pathTaskFromRecord(reader, task, r)
+	if err != nil {
+		return nil, TaskPathFreeze{}, err
+	}
+	return task, state, nil
+}
+
+// r has already been decoded/validated once in this same view. This local
+// member guard never reloads or hashes the full operation/tree.
+func pathTaskFromRecord(reader datasetReader, task *Task, r *batchOperationRecord) (TaskPathFreeze, error) {
+	var empty TaskPathFreeze
+	if task == nil || task.PathFreeze == nil || task.MCPWrite != nil || task.CreationOperation == nil {
+		return empty, ErrPathFreezeHeld
+	}
+	ref := task.CreationOperation
+	if ref.Version != 2 || ref.Namespace != batchOperationNamespace || ref.OperationID != r.OperationID || ref.Index < 0 || ref.Index >= len(r.Members) {
+		return empty, ErrPathFreezeHeld
 	}
 	var reverse operationTaskLink
-	linked, err := reader.Get(bucketOperationTasks, id, &reverse)
+	linked, err := reader.Get(bucketOperationTasks, task.ID, &reverse)
 	if err != nil {
-		return nil, empty, ErrPathFreezeUnavailable
-	}
-	if ref.Index >= len(r.Members) {
-		return nil, empty, ErrPathFreezeHeld
+		return empty, ErrPathFreezeUnavailable
 	}
 	m := r.Members[ref.Index]
-	if !linked || reverse.TaskID != id || reverse.Ref != *ref || m.State != "created" || m.TaskID != id || m.Protocol != task.Protocol || !reflect.DeepEqual(m.PathFreeze, task.PathFreeze) || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[ref.Index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) {
-		return nil, empty, ErrPathFreezeHeld
+	if !linked || reverse.TaskID != task.ID || reverse.Ref != *ref || m.State != "created" || m.TaskID != task.ID || m.Protocol != task.Protocol || !reflect.DeepEqual(m.PathFreeze, task.PathFreeze) || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[ref.Index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) {
+		return empty, ErrPathFreezeHeld
 	}
-	s := *task.PathFreeze
-	if !pathFrozenValid(s) {
-		return nil, empty, ErrPathFreezeHeld
+	state := *task.PathFreeze
+	if !pathFrozenValid(state) {
+		return empty, ErrPathFreezeHeld
 	}
-	if s.Phase == PathFreezeFrozen {
+	if state.Phase == PathFreezeFrozen {
 		layout, err := pathResourceLayout(task.Meta)
 		if err != nil {
-			return nil, empty, err
+			return empty, err
 		}
 		hash, err := pathpolicy.LayoutFingerprint(layout)
-		if err != nil || hash != s.LayoutHash {
-			return nil, empty, ErrPathFreezeHeld
+		if err != nil || hash != state.LayoutHash {
+			return empty, ErrPathFreezeHeld
 		}
-		if s.Output != nil {
-			if s.Output.Binding != nil && s.Output.Binding.OwnerID != task.ID {
-				return nil, empty, ErrPathFreezeHeld
+		if state.Output != nil {
+			if state.Output.Binding != nil && state.Output.Binding.OwnerID != task.ID {
+				return empty, ErrPathFreezeHeld
 			}
-			if (task.Status == base.DownloadStatusDone) != (s.Output.Phase == MCPWriteOutputPublished) {
-				return nil, empty, ErrPathFreezeHeld
+			if (task.Status == base.DownloadStatusDone) != (state.Output.Phase == MCPWriteOutputPublished) {
+				return empty, ErrPathFreezeHeld
 			}
 		}
 	}
 	if r.Integrity != nil {
-		ct, completion, err := readTaskCompletion(reader, id)
+		ct, completion, err := readTaskCompletion(reader, task.ID)
 		if err != nil || ct == nil || completion.ID != m.CompletionID || completion.ExpectedSHA256 != r.Integrity.ExpectedSHA256 {
-			return nil, empty, ErrPathFreezeHeld
+			return empty, ErrPathFreezeHeld
 		}
-	} else if task.Completion != nil {
-		return nil, empty, ErrPathFreezeHeld
+	} else {
+		if task.Completion != nil {
+			return empty, ErrPathFreezeHeld
+		}
+		for _, bucket := range []string{bucketTaskCompletion, bucketCompletionRequired} {
+			var raw json.RawMessage
+			present, err := reader.Get(bucket, task.ID, &raw)
+			if err != nil {
+				return empty, ErrPathFreezeUnavailable
+			}
+			if present {
+				return empty, ErrPathFreezeHeld
+			}
+		}
 	}
-	return task, s, nil
+	return state, nil
 }
 
 // pathMetaReq avoids dereferencing malformed task metadata in strict guards.
@@ -455,7 +480,7 @@ func pathRecordCAS(tx StorageTransaction, dataset string, expected batchOperatio
 	if err != nil {
 		return nil, ErrPathFreezeHeld
 	}
-	if r == nil || !pathRecordValid(r) || r.Path.DatasetID != dataset || !reflect.DeepEqual(*r, expected) {
+	if r == nil || r.Version != 2 || r.Path == nil || r.Path.DatasetID != dataset || !reflect.DeepEqual(*r, expected) {
 		return nil, ErrPathFreezeConflict
 	}
 	return r, nil
@@ -464,85 +489,122 @@ func createPathOperationTask(store AtomicStorage, dataset string, expected batch
 	return createPathOperationMember(store, dataset, expected, 0, owned, initial)
 }
 func createPathOperationMember(store AtomicStorage, dataset string, expected batchOperationRecord, index int, owned *Task, initial recoveryRecord) (*Task, bool, error) {
-	if store == nil || owned == nil || !expected.valid() || expected.Path == nil || index < 0 || index >= len(expected.Members) {
+	if len(expected.Members) != 1 || index != 0 {
+		return nil, false, ErrPathFreezeInvalid
+	}
+	tasks, fresh, err := createPathOperationTree(store, dataset, expected, []*Task{owned}, []recoveryRecord{initial})
+	if err != nil {
+		return nil, false, err
+	}
+	return tasks[0], fresh, nil
+}
+
+// Tree M owns one R snapshot/transaction. No full-R clone/decode/Put occurs
+// inside the per-member loop, preserving D3's bounded large-directory work.
+func createPathOperationTree(store AtomicStorage, dataset string, expected batchOperationRecord, owned []*Task, initial []recoveryRecord) ([]*Task, bool, error) {
+	if store == nil || !expected.valid() || expected.Path == nil || len(owned) != len(expected.Members) || len(initial) != len(owned) {
 		return nil, false, ErrPathFreezeInvalid
 	}
 	expected, err := cloneOperationJSON(expected)
 	if err != nil {
 		return nil, false, ErrPathFreezeInvalid
 	}
-	task, err := cloneOperationJSON(owned)
+	tasks, err := cloneOperationJSON(owned)
 	if err != nil {
 		return nil, false, ErrPathFreezeInvalid
+	}
+	// Native candidates are not declared yet. Preserve their opaque metadata
+	// through the existing owned UseNumber decoder without changing legacy Task
+	// decoding or manufacturing a Recovery/Creation marker to select a codec.
+	for i, input := range owned {
+		if input == nil || tasks[i] == nil {
+			return nil, false, ErrPathFreezeInvalid
+		}
+		tasks[i].Meta, err = cloneOperationJSON(input.Meta)
+		if err != nil {
+			return nil, false, ErrPathFreezeInvalid
+		}
 	}
 	initial, err = cloneOperationJSON(initial)
 	if err != nil {
 		return nil, false, ErrPathFreezeInvalid
 	}
-	var result *Task
+	var result []*Task
 	err = store.UpdateAtomic(func(tx StorageTransaction) error {
 		r, err := pathRecordCAS(tx, dataset, expected)
 		if err != nil {
 			return err
 		}
-		m := &r.Members[index]
-		v, _ := pathVariantForCaps(r.RequiredCapabilities)
-		if m.State != "pending" || task.ID != m.TaskID || task.Protocol != v.Protocol || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) || task.Meta.Res != nil || task.CreationOperation != nil || task.MCPWrite != nil || task.PathFreeze != nil || task.Completion != nil || task.Status == base.DownloadStatusDone {
-			return ErrPathFreezeInvalid
-		}
-		for _, bucket := range []string{bucketTask, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired, bucketSave, bucketTaskCompletion, bucketCompletionRequired} {
-			var raw json.RawMessage
-			present, e := tx.Get(bucket, task.ID, &raw)
-			if e != nil {
-				return e
-			}
-			if present {
-				return ErrPathFreezeConflict
-			}
-		}
-		ref := CreationOperation{Version: 2, Namespace: batchOperationNamespace, OperationID: r.OperationID, Index: index}
-		task.CreationOperation = &ref
-		task.PathFreeze = m.PathFreeze
-		task.Status = base.DownloadStatusPause
-		task.Progress = &Progress{}
-		if v.Native {
-			if task.Recovery != nil || !reflect.DeepEqual(initial, recoveryRecord{}) {
+		for i, task := range tasks {
+			if task == nil {
 				return ErrPathFreezeInvalid
 			}
-		} else {
-			required, e := recoveryRequirementFor(initial)
-			if e != nil || initial.Version != 4 || initial.TaskID != task.ID || initial.Generation != 0 || initial.SourceRevision != 1 || initial.InitialAttempt.State != "ungranted" || initial.TotalUsed != 0 || initial.NextAction != 0 || initial.Actions == nil || len(initial.Actions) != 0 || initial.Coverage != nil || initial.LastExplicitRetry != nil || validateRecoveryTriplet(task, initial, required) != nil {
-				return ErrPathFreezeInvalid
-			}
-			if e = tx.Put(bucketTaskRecovery, task.ID, &initial); e != nil {
-				return e
-			}
-			if e = tx.Put(bucketRecoveryRequired, task.ID, &required); e != nil {
-				return e
-			}
-		}
-		if r.Integrity != nil {
-			if err = prepareTaskCompletion(tx, dataset, task, transfer.VerifiedCompletionRecord{Version: 1, ID: m.CompletionID, Phase: transfer.CompletionPrepared, Size: -1, ExpectedSHA256: r.Integrity.ExpectedSHA256}); err != nil {
+			if err = preparePathMember(tx, dataset, r, i, task, initial[i]); err != nil {
 				return err
 			}
-		} else if err = tx.Put(bucketTask, task.ID, task); err != nil {
-			return err
 		}
-		if err = tx.Put(bucketOperationTasks, task.ID, &operationTaskLink{task.ID, ref}); err != nil {
-			return err
-		}
-		m.State = "created"
 		r.UpdatedAt = time.Now()
 		if err = tx.Put(bucketTaskOperations, operationKey(r.OperationID), r); err != nil {
 			return err
 		}
-		result = task
+		result = tasks
 		return nil
 	})
 	if err != nil {
 		return nil, false, pathStoreError(err)
 	}
 	return result, true, nil
+}
+func preparePathMember(tx StorageTransaction, dataset string, r *batchOperationRecord, index int, task *Task, initial recoveryRecord) error {
+	var err error
+	m := &r.Members[index]
+	v, _ := pathVariantForCaps(r.RequiredCapabilities)
+	if m.State != "pending" || task.ID != m.TaskID || task.Protocol != v.Protocol || !pathReqEqual(pathMetaReq(task), pathItems(r.Path.Request)[index].Req) || task.Meta == nil || task.Meta.Opts == nil || !reflect.DeepEqual(task.Meta.Opts, m.Options) || task.Meta.Res != nil || task.CreationOperation != nil || task.MCPWrite != nil || task.PathFreeze != nil || task.Completion != nil || task.Status == base.DownloadStatusDone {
+		return ErrPathFreezeInvalid
+	}
+	for _, bucket := range []string{bucketTask, bucketOperationTasks, bucketTaskRecovery, bucketRecoveryRequired, bucketSave, bucketTaskCompletion, bucketCompletionRequired} {
+		var raw json.RawMessage
+		present, e := tx.Get(bucket, task.ID, &raw)
+		if e != nil {
+			return e
+		}
+		if present {
+			return ErrPathFreezeConflict
+		}
+	}
+	ref := CreationOperation{Version: 2, Namespace: batchOperationNamespace, OperationID: r.OperationID, Index: index}
+	task.CreationOperation = &ref
+	task.PathFreeze = m.PathFreeze
+	task.Status = base.DownloadStatusPause
+	task.Progress = &Progress{}
+	if v.Native {
+		if task.Recovery != nil || !reflect.DeepEqual(initial, recoveryRecord{}) {
+			return ErrPathFreezeInvalid
+		}
+	} else {
+		required, e := recoveryRequirementFor(initial)
+		if e != nil || initial.Version != 4 || initial.TaskID != task.ID || initial.Generation != 0 || initial.SourceRevision != 1 || initial.InitialAttempt.State != "ungranted" || initial.TotalUsed != 0 || initial.NextAction != 0 || initial.Actions == nil || len(initial.Actions) != 0 || initial.Coverage != nil || initial.LastExplicitRetry != nil || validateRecoveryTriplet(task, initial, required) != nil {
+			return ErrPathFreezeInvalid
+		}
+		if e = tx.Put(bucketTaskRecovery, task.ID, &initial); e != nil {
+			return e
+		}
+		if e = tx.Put(bucketRecoveryRequired, task.ID, &required); e != nil {
+			return e
+		}
+	}
+	if r.Integrity != nil {
+		if err = prepareTaskCompletion(tx, dataset, task, transfer.VerifiedCompletionRecord{Version: 1, ID: m.CompletionID, Phase: transfer.CompletionPrepared, Size: -1, ExpectedSHA256: r.Integrity.ExpectedSHA256}); err != nil {
+			return err
+		}
+	} else if err = tx.Put(bucketTask, task.ID, task); err != nil {
+		return err
+	}
+	if err = tx.Put(bucketOperationTasks, task.ID, &operationTaskLink{task.ID, ref}); err != nil {
+		return err
+	}
+	m.State = "created"
+	return nil
 }
 func pathCheckpointCAS(reader datasetReader, id string, present bool, hash string) error {
 	if present && !validRecoveryHash(hash) || !present && hash != "" {
@@ -618,10 +680,20 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 	if len(expected) == 0 || len(expected) != len(prepared) {
 		return nil, false, ErrPathFreezeInvalid
 	}
-	expected, err := cloneOperationJSON(expected)
+	sharedRecord, err := cloneOperationJSON(expected[0].Record)
 	if err != nil {
 		return nil, false, ErrPathFreezeInvalid
 	}
+	ownedExpected := make([]PathFreezeExpected, len(expected))
+	for i, member := range expected {
+		member.Record = batchOperationRecord{}
+		member, err = cloneOperationJSON(member)
+		if err != nil {
+			return nil, false, ErrPathFreezeInvalid
+		}
+		ownedExpected[i] = member
+	}
+	expected = ownedExpected
 	prepared, err = cloneOperationJSON(prepared)
 	if err != nil {
 		return nil, false, ErrPathFreezeInvalid
@@ -632,22 +704,33 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 		if err := requireDataset(tx, dataset); err != nil {
 			return err
 		}
-		first, _, err := ReadPathFreeze(tx, expected[0].Token.TaskID)
-		if err != nil {
-			return err
+		r, err := loadOperationFrom(tx, sharedRecord.OperationID)
+		if err != nil || r == nil || r.Path == nil || r.Path.DatasetID != dataset || len(r.Members) != len(expected) {
+			return ErrPathFreezeConflict
 		}
-		r, err := loadOperationFrom(tx, first.CreationOperation.OperationID)
-		if err != nil || r == nil || len(r.Members) != len(expected) {
+		if r.RequestHash != sharedRecord.RequestHash || sharedRecord.Path == nil || r.Path.PolicyHash != sharedRecord.Path.PolicyHash {
+			return ErrPathFreezeConflict
+		}
+		if r.Path.TreeDecision == nil && !reflect.DeepEqual(*r, sharedRecord) {
 			return ErrPathFreezeConflict
 		}
 		v, _ := pathVariantForCaps(r.RequiredCapabilities)
 		tasks := make([]*Task, len(expected))
 		already := r.Path.TreeDecision != nil
 		for i, e := range expected {
-			task, s, err := ReadPathFreeze(tx, e.Token.TaskID)
+			task := new(Task)
+			present, err := tx.Get(bucketTask, e.Token.TaskID, task)
+			if err != nil {
+				return ErrPathFreezeUnavailable
+			}
+			if !present || task.ID != e.Token.TaskID {
+				return ErrPathFreezeHeld
+			}
+			state, err := pathTaskFromRecord(tx, task, r)
 			if err != nil {
 				return err
 			}
+			s := state
 			if task.CreationOperation.OperationID != r.OperationID || task.CreationOperation.Index != i || r.Members[i].TaskID != task.ID {
 				return ErrPathFreezeConflict
 			}
@@ -658,14 +741,8 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 				return err
 			}
 			if already {
-				if e.Record.Path == nil || r.RequestHash != e.Record.RequestHash || r.Path.PolicyHash != e.Record.Path.PolicyHash {
-					return ErrPathFreezeConflict
-				}
 				tasks[i] = task
 				continue
-			}
-			if _, err = pathRecordCAS(tx, dataset, e.Record); err != nil {
-				return err
 			}
 			if !reflect.DeepEqual(task.Meta, e.Meta) {
 				return ErrPathFreezeConflict
@@ -693,7 +770,7 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 			if v.Protocol == "http" && r.Integrity == nil {
 				s.Output = &PathOutputState{Phase: MCPWriteOutputPlanned, StagingName: p.StagingName}
 			}
-			if !pathDecisionMatches(s, *r.Path) {
+			if i == 0 && !pathDecisionMatches(s, *r.Path) {
 				return ErrPathFreezeInvalid
 			}
 			if r.Integrity != nil {
@@ -706,12 +783,14 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 			task.PathFreeze = &s
 			task.UpdatedAt = time.Now()
 			tasks[i] = task
-			r.Members[i].Options = task.Meta.Opts
-			r.Members[i].PathFreeze = &s
 		}
 		if already {
 			result = tasks
 			return nil
+		}
+		for i, task := range tasks {
+			r.Members[i].Options = task.Meta.Opts
+			r.Members[i].PathFreeze = task.PathFreeze
 		}
 		layout, err := pathTreeLayout(r.Members)
 		if err != nil {
@@ -728,9 +807,9 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 		for i, task := range tasks {
 			task.PathFreeze.TreeLayoutHash = hash
 			r.Members[i].PathFreeze = task.PathFreeze
-		}
-		if !r.valid() {
-			return ErrPathFreezeInvalid
+			if !pathFrozenValid(*task.PathFreeze) {
+				return ErrPathFreezeInvalid
+			}
 		}
 		r.UpdatedAt = time.Now()
 		for _, task := range tasks {
