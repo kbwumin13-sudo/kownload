@@ -217,9 +217,10 @@ type taskRecoveryOwner struct {
 	sharedDataset                   string // mu; immutable dataset binding after inactive preparation
 	sharedInitialEligible           atomic.Bool
 	sharedContinuation              atomic.Pointer[sharedRecoveryContinuation]
-	sharedActionPermit              *transfer.RecoveryActionPermit // mu; one waiting transition per confirmed debit
-	sharedInitialMembers            []string                       // mu; frozen continuation workset, not durable authority
-	sharedAdmission                 sharedWaveAdmission            // mu; bound once to the owning Core lifecycle
+	sharedActionPermit              *transfer.RecoveryActionPermit                      // mu; one waiting transition per confirmed debit
+	sharedInitialMembers            []string                                            // mu; frozen continuation workset, not durable authority
+	sharedCheckpoint                func(context.Context, transfer.RecoveryToken) error // mu; Core drains pending Store before the lock-free owned capture
+	sharedAdmission                 sharedWaveAdmission                                 // mu; bound once to the owning Core lifecycle
 }
 
 type recoveryReader interface {
