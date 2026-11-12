@@ -285,6 +285,24 @@ func (f *Fetcher) Progress() fetcher.Progress {
 }
 
 func (f *Fetcher) Wait() error {
+	return f.waitContext(context.Background(), false)
+}
+
+// BindRunWait reuses the native subscription with this Core run's lifetime.
+// It creates no goroutine, new episode, token or retry allowance.
+func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
+	return func() error {
+		if ctx == nil {
+			return transfer.ErrLayoutStorageHeld
+		}
+		return f.waitContext(ctx, true)
+	}
+}
+
+func (f *Fetcher) waitContext(ctx context.Context, bound bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	client, err := f.getClient()
 	if err != nil {
 		return err
@@ -296,8 +314,11 @@ func (f *Fetcher) Wait() error {
 	}
 
 	handle := f.currentHandle()
+	if bound && !handle.IsValid() {
+		return transfer.ErrLayoutStorageHeld
+	}
 	if handle.IsValid() && handle.IsFinished() {
-		return nil
+		return ctx.Err()
 	}
 
 	progressCh, cancel := client.SubscribeTransferProgress()
@@ -305,10 +326,21 @@ func (f *Fetcher) Wait() error {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-f.waitCtx.Done():
+			if bound {
+				return context.Canceled
+			}
 			return nil
 		case event, ok := <-progressCh:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !ok {
+				if bound {
+					return context.Canceled
+				}
 				return nil
 			}
 			for _, transfer := range event.Transfers {
@@ -318,6 +350,18 @@ func (f *Fetcher) Wait() error {
 				// Removal can happen during task deletion or client shutdown, both of
 				// which should unblock Wait without treating it as a download failure.
 				if transfer.Removed || transfer.State == goed2k.Finished {
+					if bound {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+						if transfer.Removed {
+							return context.Canceled
+						}
+						// A late event for the same hash cannot finish another run.
+						if !handle.IsFinished() {
+							continue
+						}
+					}
 					return nil
 				}
 			}

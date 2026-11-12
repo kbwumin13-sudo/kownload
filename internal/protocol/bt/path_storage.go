@@ -6,9 +6,12 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/pathpolicy"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/anacrolix/torrent/metainfo"
@@ -50,8 +53,12 @@ func (f *Fetcher) pathFreezeLayoutLocked() (pathpolicy.LayoutV1, []int64, error)
 		return pathpolicy.LayoutV1{}, nil, transfer.ErrLayoutStorageHeld
 	}
 	res, opts := f.meta.Res, f.meta.Opts
-	selected := make(map[int]bool, len(opts.SelectFiles))
-	for _, index := range opts.SelectFiles {
+	selection := opts.SelectFiles
+	if f.pathSelection != nil {
+		selection = f.pathSelection
+	}
+	selected := make(map[int]bool, len(selection))
+	for _, index := range selection {
 		if index < 0 || index >= len(res.Files) {
 			return pathpolicy.LayoutV1{}, nil, pathpolicy.ErrLayout
 		}
@@ -80,7 +87,7 @@ func (f *Fetcher) pathFreezeLayoutLocked() (pathpolicy.LayoutV1, []int64, error)
 			parts = append(parts, file.Path)
 		}
 		parts = append(parts, name)
-		members[i] = pathpolicy.Member{Index: i, RelativePath: strings.Join(parts, "/"), Selected: len(opts.SelectFiles) == 0 || selected[i]}
+		members[i] = pathpolicy.Member{Index: i, RelativePath: strings.Join(parts, "/"), Selected: len(selection) == 0 || selected[i]}
 		sizes[i] = file.Size
 	}
 	layout, err := pathpolicy.BuildLayoutV1(opts.Path, members)
@@ -107,8 +114,15 @@ func (f *Fetcher) BindPathFreeze(ctx context.Context, layout pathpolicy.LayoutV1
 		err = output.Ready()
 	}
 	store, t := f.pathStorage, f.torrent
+	var selection []int
+	if err == nil {
+		selection, err = f.pathSelectionLocked()
+	}
 	if err == nil {
 		err = store.bind(output, sizes)
+	}
+	if err == nil {
+		f.pathSelection = selection
 	}
 	f.opMu.Unlock()
 	if err != nil {
@@ -116,6 +130,115 @@ func (f *Fetcher) BindPathFreeze(ctx context.Context, layout pathpolicy.LayoutV1
 	}
 	// No opMu is held while the torrent library drains/rechecks pieces.
 	return t.VerifyDataContext(ctx)
+}
+
+func (f *Fetcher) pathSelectionLocked() ([]int, error) {
+	if f.pathSelection != nil {
+		return slices.Clone(f.pathSelection), nil
+	}
+	if f.meta == nil || f.meta.Opts == nil || f.meta.Res == nil || len(f.meta.Res.Files) == 0 {
+		return nil, transfer.ErrLayoutStorageHeld
+	}
+	selection := slices.Clone(f.meta.Opts.SelectFiles)
+	if len(selection) == 0 {
+		selection = make([]int, len(f.meta.Res.Files))
+		for i := range selection {
+			selection[i] = i
+		}
+	}
+	seen := make(map[int]bool, len(selection))
+	for _, index := range selection {
+		if index < 0 || index >= len(f.meta.Res.Files) || seen[index] {
+			return nil, pathpolicy.ErrLayout
+		}
+		seen[index] = true
+	}
+	return selection, nil
+}
+
+// Raw empty selection means all files. Restored progress already has entries,
+// so it cannot be used to decide whether runtime selection is initialized.
+// Before Bind, return the stored native snapshot without indexing raw options.
+func (f *Fetcher) pathProgress() fetcher.Progress {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if !f.torrentReady.Load() || len(f.pathSelection) == 0 {
+		return slices.Clone(f.data.Progress)
+	}
+	files := f.torrent.Files()
+	progress := make(fetcher.Progress, len(f.pathSelection))
+	for i, index := range f.pathSelection {
+		progress[i] = files[index].BytesCompleted()
+	}
+	f.data.Progress = progress
+	return slices.Clone(progress)
+}
+
+// BindRunWait creates no goroutine or new recovery identity. Core invokes the
+// closure after Start; it captures that run's torrent, selection and output,
+// rather than polling a future run on the same Fetcher. Metadata waiting keeps
+// its original policy, and the legacy Wait branch above is unchanged.
+func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
+	return func() error {
+		if ctx == nil {
+			return transfer.ErrLayoutStorageHeld
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		f.opMu.Lock()
+		t, selection, drop := f.torrent, slices.Clone(f.pathSelection), f.torrentDropCtx
+		var output *transfer.VerifiedLayoutStorage
+		if f.pathStorage != nil {
+			f.pathStorage.mu.RLock()
+			output = f.pathStorage.output
+			f.pathStorage.mu.RUnlock()
+		}
+		f.opMu.Unlock()
+		if t == nil || len(selection) == 0 || output == nil || drop == nil {
+			return transfer.ErrLayoutStorageHeld
+		}
+		files := t.Files()
+		for _, index := range selection {
+			if index < 0 || index >= len(files) {
+				return transfer.ErrLayoutStorageHeld
+			}
+		}
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-drop.Done():
+				return context.Canceled
+			case <-t.Closed():
+				return context.Canceled
+			case <-tick.C:
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				done := true
+				for _, index := range selection {
+					if files[index].BytesCompleted() < files[index].Length() {
+						done = false
+						break
+					}
+				}
+				if !done {
+					continue
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				err := output.Sync()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return err
+			}
+		}
+	}
 }
 
 // QuiescePathFreeze joins all adapter IO before the Core releases its root
