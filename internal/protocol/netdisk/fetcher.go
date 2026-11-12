@@ -111,6 +111,7 @@ type fetcherView struct {
 
 type Fetcher struct {
 	recovery atomic.Pointer[transfer.RecoveryLease]
+	runController atomic.Pointer[controller.Controller]
 	viewMu     sync.RWMutex
 	view       fetcherView
 	mu         sync.Mutex
@@ -237,8 +238,12 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		return ctx, err
 	}
 	started := time.Now()
+	ctl, err := f.controllerForContext(ctx)
+	if err != nil {
+		return ctx, err
+	}
 	providerCtx, providerCancel := context.WithTimeout(f.deferrable(ctx), resolveBudget(e))
-	d, err := f.service.Resolve(providerCtx, f.ctl, req, e)
+	d, err := f.service.Resolve(providerCtx, ctl, req, e)
 	providerCancel()
 	linkTime := time.Since(started)
 	if err != nil {
@@ -295,6 +300,10 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		if commitErr != nil {
 			return ctx, commitErr
 		}
+		ctl, err = f.controllerForContext(ctx)
+		if err != nil {
+			return ctx, err
+		}
 	}
 	jar, _ := cookiejar.New(nil)
 	cloud.SeedCookies(jar, d.Cookies, []string{u.Hostname()})
@@ -305,7 +314,7 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 
 	hreq := &base.Request{URL: d.URL, Extra: &httpmodel.ReqExtra{}, Proxy: req.Proxy, SkipVerifyCert: req.SkipVerifyCert}
 	hm := &httpfetch.FetcherManager{}
-	httpCtl := *f.ctl
+	httpCtl := *ctl
 	// Streams of one provider account share its download limit, whatever CDN
 	// host a link points to; without an account ID the origin decides.
 	if e.AccountID != "" {
@@ -314,8 +323,8 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 	httpCtl.GetConfig = func(v any) {
 		b, _ := json.Marshal(hm.DefaultConfig())
 		_ = json.Unmarshal(b, v)
-		if f.ctl.GetConfig != nil {
-			f.ctl.GetConfig(v)
+		if ctl.GetConfig != nil {
+			ctl.GetConfig(v)
 		}
 	}
 	integrity := &baiduResponseDigest{enabled: e.Provider == "baidu" && !req.SkipVerifyCert, total: e.File.Size}
@@ -511,7 +520,9 @@ func (f *Fetcher) Start() error {
 		}
 		if err == nil {
 			cleanctx, c := context.WithTimeout(ctx, 40*time.Second)
-			f.service.Complete(cleanctx, f.ctl, f.meta.Req, e)
+			if ctl, ctlErr := f.controllerForContext(cleanctx); ctlErr == nil {
+				f.service.Complete(cleanctx, ctl, f.meta.Req, e)
+			}
 			c()
 		}
 		f.mu.Lock()

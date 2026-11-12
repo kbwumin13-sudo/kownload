@@ -75,7 +75,7 @@ func (owner *bridgeParentOwner) BindRecoveryChild(ctx context.Context, token tra
 	if err := owner.CheckRecovery(token); err != nil { return nil, err }
 	if work != "netdisk/http" { return nil, transfer.ErrRecoveryWork }
 	owner.mu.Lock(); defer owner.mu.Unlock()
-	return &transfer.RecoveryLease{Token: token, Owner: owner, SourceHash: snapshot.SourceHash(), Round: uint64(owner.refreshes), Context: owner.lease.Context}, ctx.Err()
+	return &transfer.RecoveryLease{Token: token, Owner: owner, SourceHash: snapshot.SourceHash(), Round: uint64(owner.refreshes), Context: owner.lease.Context, ParentContext: owner.lease.ParentContext}, ctx.Err()
 }
 func (owner *bridgeParentOwner) CommitRecoverySource(ctx context.Context, token transfer.RecoveryToken, action uint64, seal transfer.RecoverySourceSeal, checkpoint json.RawMessage) (*transfer.RecoveryLease, error) {
 	snapshot, err := seal.Snapshot(ctx)
@@ -120,6 +120,7 @@ func TestParentRecoveryProviderRefresh(t *testing.T) {
 					link := apiCalls.Add(1)
 					_ = json.NewEncoder(w).Encode(map[string]string{"url": fmt.Sprintf("%s/file?link=%d", baseURL, link), "hash": "sha256:"+hex.EncodeToString(digest[:])})
 				case "/file":
+					if r.UserAgent() != "frozen-fixture" { t.Errorf("child read mutable/default UA: %q", r.UserAgent()) }
 					if r.URL.Query().Get("link") == "1" { w.WriteHeader(http.StatusForbidden); return }
 					childCalls.Add(1)
 					w.Header().Set("Content-Length", fmt.Sprint(len(body)))
@@ -140,11 +141,17 @@ func TestParentRecoveryProviderRefresh(t *testing.T) {
 			t.Cleanup(func() { _ = f.Close() })
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			req := &base.Request{URL: capture.Source.URL, Protocol: "netdisk", Extra: &model.ReqExtra{Provider: "quark", Source: capture.Source, SessionID: capture.SessionID, AccountID: "fixture", File: model.File{ID: "file", Name: "a.bin", Size: int64(len(body))}}}
+			parentSnapshot, snapshotErr := transfer.NewProtocolExecutionContext("netdisk", req, json.RawMessage(`{"userAgent":"frozen-fixture","connections":1}`), "fixture", nil)
+			if snapshotErr != nil { t.Fatal(snapshotErr) }
 			owner := &bridgeParentOwner{unknown: unknown}
-			owner.lease = &transfer.RecoveryLease{Token: transfer.RecoveryToken{TaskID: "fixture", Episode: "episode", Generation: 1, SourceRevision: 1}, Owner: owner, SourceHash: strings.Repeat("a",64), ActionVersion: 4, Context: ctx}
+			owner.lease = &transfer.RecoveryLease{Token: transfer.RecoveryToken{TaskID: "fixture", Episode: "episode", Generation: 1, SourceRevision: 1}, Owner: owner, SourceHash: parentSnapshot.SourceHash(), ActionVersion: 4, Context: ctx, ParentContext: parentSnapshot}
 			ctx = transfer.WithRecoveryLease(ctx, owner.lease)
 			if err = f.SetParentRecoveryContext(ctx); err != nil { t.Fatal(err) }
-			req := &base.Request{URL: capture.Source.URL, Protocol: "netdisk", Extra: &model.ReqExtra{Provider: "quark", Source: capture.Source, SessionID: capture.SessionID, AccountID: "fixture", File: model.File{ID: "file", Name: "a.bin", Size: int64(len(body))}}}
+			ctl.GetConfig = func(any) { panic("mutable global config consulted after parent capture") }
+			ctl.GetProxy = func(*base.RequestProxy) func(*http.Request) (*url.URL,error) { panic("mutable global proxy consulted after parent capture") }
+			ctl.GetProxyPolicy = func(*base.RequestProxy) (func(*http.Request) (*url.URL,error),string) { panic("mutable global proxy policy consulted after parent capture") }
+			ctl.GetRecoveryProxySnapshot = func(*base.RequestProxy) (func(*http.Request) (*url.URL,error),string,bool) { panic("mutable global recovery proxy consulted after parent capture") }
 			dir := t.TempDir()
 			if err = f.ResolveTask(ctx, req, &base.Options{Path: dir}); err != nil { t.Fatal(err) }
 			rawParent, _ := json.Marshal(f.Meta().Req)

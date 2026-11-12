@@ -251,6 +251,9 @@ func checkRecoveryContext(ctx context.Context) error {
 		return err
 	}
 	if lease := transfer.RecoveryLeaseFromContext(ctx); lease != nil {
+		if lease.ParentContext == nil {
+			return transfer.ErrRecoveryHeld
+		}
 		return lease.Check()
 	}
 	return nil

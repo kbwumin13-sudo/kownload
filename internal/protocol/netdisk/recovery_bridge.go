@@ -3,12 +3,57 @@ package netdisk
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"time"
 
+	"github.com/GopeedLab/gopeed/internal/controller"
 	httpfetch "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 )
+
+// The proxy function and interpreted configuration are the actual captured
+// values, not new reads from global settings with an old defaults digest.
+func (f *Fetcher) frozenController(snapshot *transfer.ProtocolExecutionContext) (*controller.Controller, error) {
+	if snapshot == nil {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	config := (&httpfetch.FetcherManager{}).DefaultConfig()
+	if err := snapshot.Config(config); err != nil {
+		return nil, err
+	}
+	owned, err := json.Marshal(config)
+	if err != nil {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	f.mu.Lock()
+	copy := *f.ctl
+	f.mu.Unlock()
+	copy.GetConfig = func(out any) { _ = json.Unmarshal(owned, out) }
+	copy.GetProxy = func(*base.RequestProxy) func(*http.Request) (*url.URL, error) { return snapshot.Proxy() }
+	copy.GetProxyPolicy = func(*base.RequestProxy) (func(*http.Request) (*url.URL, error), string) {
+		return snapshot.Proxy(), snapshot.ProxyID()
+	}
+	copy.GetRecoveryProxySnapshot = func(*base.RequestProxy) (func(*http.Request) (*url.URL, error), string, bool) {
+		return snapshot.Proxy(), snapshot.ProxyID(), true
+	}
+	return &copy, nil
+}
+
+func (f *Fetcher) controllerForContext(ctx context.Context) (*controller.Controller, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if lease := transfer.RecoveryLeaseFromContext(ctx); lease != nil {
+		current := f.recovery.Load()
+		ctl := f.runController.Load()
+		if current == nil || current.Token != lease.Token || ctl == nil || lease.ParentContext == nil {
+			return nil, transfer.ErrRecoveryHeld
+		}
+		return ctl, ctx.Err()
+	}
+	return f.ctl, ctx.Err()
+}
 
 func (f *Fetcher) checkOperationLocked(ctx context.Context, operation uint64) error {
 	if err := ctx.Err(); err != nil {
@@ -56,6 +101,13 @@ func (f *Fetcher) SetParentRecoveryContext(ctx context.Context) error {
 	if _, ok := lease.Owner.(transfer.RecoveryParentController); !ok {
 		return transfer.ErrRecoveryHeld
 	}
+	if lease.ParentContext == nil || lease.ParentContext.SourceHash() != lease.SourceHash {
+		return transfer.ErrRecoveryHeld
+	}
+	ctl, err := f.frozenController(lease.ParentContext)
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -70,6 +122,7 @@ func (f *Fetcher) SetParentRecoveryContext(ctx context.Context) error {
 	copy := *lease
 	copy.Context = ctx
 	f.SetRecoveryLease(&copy)
+	f.runController.Store(ctl)
 	return nil
 }
 
@@ -346,9 +399,17 @@ func (f *Fetcher) commitRefresh(ctx context.Context, operation uint64, plan *net
 		lease.Token.Episode != plan.lease.Token.Episode || lease.Token.Generation != plan.lease.Token.Generation {
 		return ctx, transfer.ErrRecoveryStale
 	}
+	if lease.ParentContext == nil || lease.ParentContext.SourceHash() != lease.SourceHash {
+		return ctx, transfer.ErrRecoveryHeld
+	}
+	ctl, err := f.frozenController(lease.ParentContext)
+	if err != nil {
+		return ctx, err
+	}
 	f.mu.Lock()
 	if err = f.checkOperationLocked(ctx, operation); err == nil {
 		f.SetRecoveryLease(lease)
+		f.runController.Store(ctl)
 	}
 	f.mu.Unlock()
 	if err != nil {
