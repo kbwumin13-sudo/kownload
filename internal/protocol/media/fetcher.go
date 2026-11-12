@@ -20,11 +20,13 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
 
 type fetcherData struct {
+	PathLayout   *mediaPathLayout         `json:"pathLayout,omitempty"`
 	WorkPrefix   string                   `json:"workPrefix,omitempty"`
 	Identity     string                   `json:"identity,omitempty"`
 	WorkID       string                   `json:"workId,omitempty"`
@@ -62,17 +64,19 @@ func (*FetcherManager) Store(item fetcher.Fetcher) (any, error) {
 	for key, value := range f.tracks {
 		tracks[key] = value
 	}
-	return &fetcherData{Downloaded: f.downloaded, Total: f.total, Format: f.format, Tracks: tracks, Identity: f.identity, WorkID: f.workID, NeedsResolve: f.needsResolve, WorkPrefix: f.workPrefix}, nil
+	return &fetcherData{PathLayout: cloneMediaPathLayout(f.pathLayout), Downloaded: f.downloaded, Total: f.total, Format: f.format, Tracks: tracks, Identity: f.identity, WorkID: f.workID, NeedsResolve: f.needsResolve, WorkPrefix: f.workPrefix}, nil
 }
 func (*FetcherManager) Restore() (any, func(*fetcher.FetcherMeta, any) fetcher.Fetcher) {
 	return &fetcherData{}, func(meta *fetcher.FetcherMeta, data any) fetcher.Fetcher {
 		d := data.(*fetcherData)
-		return &Fetcher{meta: meta, downloaded: d.Downloaded, total: d.Total, format: d.Format, tracks: d.Tracks, identity: d.Identity, workID: d.WorkID, needsResolve: d.NeedsResolve, workPrefix: d.WorkPrefix}
+		return &Fetcher{pathLayout: cloneMediaPathLayout(d.PathLayout), meta: meta, downloaded: d.Downloaded, total: d.Total, format: d.Format, tracks: d.Tracks, identity: d.Identity, workID: d.WorkID, needsResolve: d.NeedsResolve, workPrefix: d.WorkPrefix}
 	}
 }
 func (*FetcherManager) Close() error { return nil }
 
 type Fetcher struct {
+	pathOwner     string
+	pathLayout    *mediaPathLayout
 	workPrefix    string
 	starting      bool
 	needsResolve  bool
@@ -211,6 +215,17 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 			size += n
 		}
 	}
+	f.mu.Lock()
+	pathOwner := f.pathOwner
+	f.mu.Unlock()
+	var layout *mediaPathLayout
+	if pathOwner != "" {
+		meta := &fetcher.FetcherMeta{Req: req, Opts: opts, Res: &base.Resource{Files: []*base.FileInfo{{Name: name, Size: size}}, Size: size}}
+		layout, err = resolvedMediaLayout(pathOwner, meta.SingleFilepath(), extra, info)
+		if err != nil {
+			return err
+		}
+	}
 	identity := mediaIdentity(req, extra, info)
 	if err := mediaRecoveryCheck(ctx); err != nil {
 		return err
@@ -219,6 +234,13 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 	if err := ctx.Err(); err != nil {
 		f.mu.Unlock()
 		return err
+	}
+	if pathOwner != f.pathOwner || (f.pathLayout != nil && !sameMediaPathLayout(f.pathLayout, layout)) {
+		f.mu.Unlock()
+		return transfer.ErrRecoveryHeld
+	}
+	if layout != nil {
+		f.pathLayout = cloneMediaPathLayout(layout)
 	}
 	if f.identity != "" && f.identity != identity || f.identity == "" && f.needsResolve {
 		f.workID = fmt.Sprintf("%x", time.Now().UnixNano())
