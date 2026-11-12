@@ -118,7 +118,15 @@ func (h pathOperationHandler) preview(w http.ResponseWriter, r *http.Request) {
 		writePathOperationError(w, err)
 		return
 	}
-	if pathpolicy.ValidatePreparation(prepared) != nil {
+	valid := pathpolicy.ValidatePreparation(prepared) == nil
+	if h.variant.prefix != "http-path" {
+		layout, layoutErr := pathpolicy.BuildLayoutV1(prepared.Layout.ParentRoot, prepared.Layout.Members)
+		hash, hashErr := pathpolicy.LayoutFingerprint(prepared.Layout)
+		valid = prepared.Decision.Version == pathpolicy.Version && prepared.Layout.Version == pathpolicy.LayoutVersion &&
+			prepared.Name != "" && prepared.Decision.Root == prepared.Layout.ParentRoot &&
+			layoutErr == nil && hashErr == nil && reflect.DeepEqual(layout, prepared.Layout) && hash == prepared.LayoutHash
+	}
+	if !valid {
 		pathOperationFailure(w, 503, "path_freeze_unconfirmed")
 		return
 	}

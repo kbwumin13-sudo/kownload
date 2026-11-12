@@ -112,3 +112,45 @@ func TestPathSettingsPreserveUnsupportedValue(t *testing.T) {
 		t.Fatal("explicit null became default OFF")
 	}
 }
+
+type fullLayoutPreviewFixture struct {
+	pathReceiverFixture
+	prepared pathpolicy.Preparation
+}
+
+func (f *fullLayoutPreviewFixture) PreviewPathForDataset(context.Context, string, string, download.HTTPPathCreateRequest) (pathpolicy.Preparation, error) {
+	return f.prepared, nil
+}
+
+func TestPathReceiverFullProtocolPreview(t *testing.T) {
+	p, err := pathpolicy.PrepareSingleFile(pathpolicy.Input{Path: "/synthetic/root", Origin: pathpolicy.APIExplicit, Name: "bundle"}, pathpolicy.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Layout, err = pathpolicy.BuildLayoutV1(p.Decision.Root, []pathpolicy.Member{{Index: 0, RelativePath: "bundle/a.bin", Selected: true}, {Index: 1, RelativePath: "bundle/empty", Selected: false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.LayoutHash, err = pathpolicy.LayoutFingerprint(p.Layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fullLayoutPreviewFixture{prepared: p}
+	router := mux.NewRouter()
+	registerPathOperationRoutes(router, f)
+	call := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/api/v1/datasets/"+strings.Repeat("a", 32)+"/bt-path/v1/preview", strings.NewReader(`{"version":1,"operationId":"bt:original","requiredCapabilities":["bt-path-freeze/v1"],"request":{"req":{"url":"magnet:?xt=urn:btih:synthetic"},"opts":{"path":"/synthetic/root"}},"pathIntent":{"version":1,"path":"/synthetic/root","origin":"api_explicit"}}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		return w
+	}
+	w := call()
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"relativePath":"bundle/empty","selected":false`) || f.creates != 0 {
+		t.Fatal("full protocol layout was reduced or executed", w.Body.String())
+	}
+	f.prepared.LayoutHash = strings.Repeat("0", 64)
+	if call().Code != 503 || f.creates != 0 {
+		t.Fatal("unbound full layout was exposed")
+	}
+}
