@@ -101,7 +101,9 @@ func TestUnsupportedCompletionPresenceNeverExecutes(t *testing.T) {
 					if backend == "bolt" {
 						s = NewBoltStorage(filepath.Join(dir, "db"))
 					}
-					if err := s.Setup([]string{bucketTask}); err != nil {
+					// Schema initialization may create empty buckets; freeze that shape
+					// before comparing every stored Task/record/required value.
+					if err := s.Setup([]string{bucketTask, bucketTaskCompletion, bucketCompletionRequired}); err != nil {
 						t.Fatal(err)
 					}
 					var hits, done atomic.Int32
