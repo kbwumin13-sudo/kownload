@@ -355,6 +355,12 @@ func (f *Fetcher) waitContext(ctx context.Context, bound bool) error {
 							return err
 						}
 						if transfer.Removed {
+							// Progress events are keyed by hash, not by native handle.
+							// Ignore an older same-hash transfer's removal while the
+							// captured transfer remains the client's current one.
+							if client.FindTransfer(hash) == handle {
+								continue
+							}
 							return context.Canceled
 						}
 						// A late event for the same hash cannot finish another run.
