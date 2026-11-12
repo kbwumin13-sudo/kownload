@@ -2,6 +2,7 @@ const zhCN = {
   'zh_CN': {
     'label': '中文（简体）',
     'error': '错误',
+    'httpRecoveryCooldown': '任务仍在冷却期，当前不能重试；请稍后主动查询任务状态。',
     'tip': '提示',
     'confirm': '确认',
     'confirmDelete': '确定要删除吗？',

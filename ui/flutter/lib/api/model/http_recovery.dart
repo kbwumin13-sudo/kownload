@@ -109,7 +109,8 @@ class HttpRecovery {
           'explicit_retry_available',
           'not_error',
           'not_managed',
-          'recovery_held'
+          'recovery_held',
+          'cooldown'
         ].contains(json['reason'])) {
       throw const FormatException('invalid_recovery_view');
     }
@@ -136,6 +137,7 @@ class HttpRecovery {
         !_integer(json['generation']) ||
         !_integer(json['totalUsed']) ||
         !_integer(json['transportUsed']) ||
+        (json['reason'] == 'cooldown' && json['retryAllowed'] != false) ||
         (json['retryAllowed'] == true &&
             (json['status'] != 'error' ||
                 json['reason'] != 'explicit_retry_available'))) {

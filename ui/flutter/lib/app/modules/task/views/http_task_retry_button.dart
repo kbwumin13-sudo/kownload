@@ -1,6 +1,7 @@
 import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import '../../../../api/api.dart' as api;
 import '../../../../api/http_recovery_api.dart';
 import '../../../../api/model/http_recovery.dart';
@@ -157,7 +158,9 @@ class _HttpTaskRetryButtonState extends State<HttpTaskRetryButton> {
   void _message(HttpRecoveryReply reply) {
     final r = reply.recovery;
     final state = r?.receipt?.state;
-    if ((state == 'accepted' || state == 'replayed') &&
+    if (r?.management == 'managed' && r?.reason == 'cooldown') {
+      widget.notice('httpRecoveryCooldown'.tr);
+    } else if ((state == 'accepted' || state == 'replayed') &&
         _attempt?.acknowledged == true) {
       widget.notice('重试已受理；下载进度以任务状态为准。');
     } else if (state == 'stale') {

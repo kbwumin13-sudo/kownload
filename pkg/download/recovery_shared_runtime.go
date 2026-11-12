@@ -186,6 +186,18 @@ func (o *taskRecoveryOwner) observeSharedActionLocked(ctx context.Context, token
 	return actual, nil
 }
 
+// This callback is invoked after wave drain (or after Resolve returned and
+// released Task locks). It never runs on the synchronous HTTP Start stack.
+func (o *taskRecoveryOwner) prepareSharedAction(ctx context.Context, token transfer.RecoveryToken) error {
+	o.mu.Lock()
+	prepare := o.sharedCheckpoint
+	o.mu.Unlock()
+	if prepare == nil {
+		return transfer.ErrRecoveryHeld
+	}
+	return prepare(ctx, token)
+}
+
 // ReserveRecoveryAction is invoked by the independent HTTP coordinator, never
 // under a protocol/Task/main lock. This first producer supports deferral only;
 // refresh/provider/media remain unimplemented and fail closed here.
@@ -193,6 +205,9 @@ func (o *taskRecoveryOwner) ReserveRecoveryAction(ctx context.Context, token tra
 	members, err := recoveryMembers(input)
 	if err != nil || !hasRecoveryMember(members, work) || kind != transfer.RecoveryActionDeferral || until.IsZero() {
 		return nil, transfer.ErrRecoveryWork
+	}
+	if err := o.prepareSharedAction(ctx, token); err != nil {
+		return nil, err
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -254,6 +269,9 @@ func (o *taskRecoveryOwner) ExtendRecoveryDeferral(ctx context.Context, token tr
 	members, err := recoveryMembers(input)
 	if err != nil || !hasRecoveryMember(members, work) || actionID == 0 || until.IsZero() {
 		return time.Time{}, transfer.ErrRecoveryWork
+	}
+	if err := o.prepareSharedAction(ctx, token); err != nil {
+		return time.Time{}, err
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -619,6 +637,9 @@ func (d *Downloader) prepareSharedRecovery(ctx context.Context, task *Task, owne
 		return err
 	}
 	owner.mu.Lock()
+	owner.sharedCheckpoint = func(c context.Context, token transfer.RecoveryToken) error {
+		return d.prepareSharedActionCheckpoint(c, task, owner, token)
+	}
 	owner.sharedAdmission = func(c context.Context, seal *httpProtocol.RecoveryWaveSeal, id uint64) (map[string]*transfer.RecoveryPermit, error) {
 		return d.admitSharedRecoveryWave(c, identity.DatasetID, task, owner, seal, id)
 	}
@@ -627,6 +648,52 @@ func (d *Downloader) prepareSharedRecovery(ctx context.Context, task *Task, owne
 	task.Recovery = &TaskRecoveryRef{Version: record.Version}
 	task.dataLock.Unlock()
 	return nil
+}
+
+// Joining this Task guard drains both startup's post-Start Store and any
+// sampler that already captured progress: each keeps task.lock through its
+// synchronous save. Wave IO scopes are closed/idle before this call. Updating
+// the actual quiescent frontier leaves the still-running sampler no new bytes
+// to save after this guard is released. No run join/Sync or listener runs here.
+func (d *Downloader) prepareSharedActionCheckpoint(ctx context.Context, task *Task, owner *taskRecoveryOwner, token transfer.RecoveryToken) error {
+	if ctx == nil || ctx.Err() != nil {
+		return transfer.ErrRecoveryStale
+	}
+	d.operationMu.Lock()
+	defer d.operationMu.Unlock()
+	task.lock.Lock()
+	defer task.lock.Unlock()
+	persist := d.errorPersistenceLock(task)
+	persist.Lock()
+	defer persist.Unlock()
+	d.lock.Lock()
+	task.statusLock.Lock()
+	present := !d.closed.Load() && d.getTaskLocked(task.ID) == task
+	d.lock.Unlock()
+	defer task.statusLock.Unlock()
+	if !present || ctx.Err() != nil || task.runGeneration != token.Generation || task.getStatus() != base.DownloadStatusRunning || task.recoveryOwner.Load() != owner || task.fetcher == nil {
+		return transfer.ErrRecoveryStale
+	}
+	owner.mu.Lock()
+	err := owner.sharedCurrentLocked(ctx, token)
+	owner.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	current := task.fetcher.Progress().TotalDownloaded()
+	if current < 0 {
+		return transfer.ErrRecoveryHeld
+	}
+	task.dataLock.Lock()
+	if task.Progress == nil {
+		task.dataLock.Unlock()
+		return transfer.ErrRecoveryHeld
+	}
+	task.Progress.Downloaded = current
+	task.dataLock.Unlock()
+	// Existing Store path preserves Task/source/record/checkpoint together.
+	// Once it ACKs, all Core locks are released before the authoritative view.
+	return d.saveTask(task)
 }
 
 func (d *Downloader) taskSharedUntil(task *Task) (time.Time, error) {

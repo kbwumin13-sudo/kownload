@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GopeedLab/gopeed/internal/fetcher"
+	httpProtocol "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	httpModel "github.com/GopeedLab/gopeed/pkg/protocol/http"
@@ -343,19 +345,21 @@ func TestSharedRecoveryHTTPLong503UsesExistingQueue(t *testing.T) {
 // read views remain on the actual Bolt source captured by Core, not a fake DB.
 type sharedRuntimeAckGate struct {
 	AtomicStorage
-	armed   atomic.Bool
-	entered chan struct{}
-	release chan struct{}
-	unknown bool
+	armed      atomic.Bool
+	entered    chan struct{}
+	release    chan struct{}
+	unknown    bool
+	matchUntil string // optional: distinguish explicit Extend from an ordinary checkpoint save
 }
 type sharedRuntimeAckTx struct {
 	StorageTransaction
-	deferral *bool
+	deferral   *bool
+	matchUntil string
 }
 
 func (tx sharedRuntimeAckTx) Put(bucket, key string, value any) error {
 	if bucket == bucketTaskRecovery {
-		if r, ok := value.(*recoveryRecord); ok && r.Version == 4 && r.DeferralUsed == 1 && len(r.Actions) > 0 && r.Actions[len(r.Actions)-1].State == "charged" {
+		if r, ok := value.(*recoveryRecord); ok && r.Version == 4 && r.DeferralUsed == 1 && len(r.Actions) > 0 && r.Actions[len(r.Actions)-1].State == "charged" && (tx.matchUntil == "" || tx.matchUntil == r.NotBefore) {
 			*tx.deferral = true
 		}
 	}
@@ -363,7 +367,7 @@ func (tx sharedRuntimeAckTx) Put(bucket, key string, value any) error {
 }
 func (gate *sharedRuntimeAckGate) UpdateAtomic(fn func(StorageTransaction) error) error {
 	deferral := false
-	err := gate.AtomicStorage.UpdateAtomic(func(tx StorageTransaction) error { return fn(sharedRuntimeAckTx{tx, &deferral}) })
+	err := gate.AtomicStorage.UpdateAtomic(func(tx StorageTransaction) error { return fn(sharedRuntimeAckTx{tx, &deferral, gate.matchUntil}) })
 	if err == nil && deferral && gate.armed.CompareAndSwap(true, false) {
 		close(gate.entered)
 		<-gate.release
@@ -1149,7 +1153,11 @@ func TestSharedRecoveryHTTPExtendACKDomainChangeRevokesExistingRAM(t *testing.T)
 	if grant == nil {
 		t.Fatal("known real Reserve ACK did not produce its RAM candidate")
 	}
-	gate := &sharedRuntimeAckGate{entered: make(chan struct{}), release: make(chan struct{})}
+	until, err := time.Parse(time.RFC3339Nano, grant.Until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &sharedRuntimeAckGate{entered: make(chan struct{}), release: make(chan struct{}), matchUntil: until.Add(time.Second).UTC().Format(time.RFC3339Nano)}
 	gate.armed.Store(true)
 	owner.mu.Lock()
 	gate.AtomicStorage = owner.store
@@ -1159,10 +1167,6 @@ func TestSharedRecoveryHTTPExtendACKDomainChangeRevokesExistingRAM(t *testing.T)
 	var once sync.Once
 	releaseACK := func() { once.Do(func() { close(gate.release) }) }
 	defer releaseACK()
-	until, err := time.Parse(time.RFC3339Nano, grant.Until)
-	if err != nil {
-		t.Fatal(err)
-	}
 	type extensionResult struct {
 		until time.Time
 		err   error
@@ -1217,4 +1221,225 @@ func TestSharedRecoveryHTTPExtendACKDomainChangeRevokesExistingRAM(t *testing.T)
 		t.Fatalf("Extend changed debit or lost confirmed Until: %+v err=%v", record, err)
 	}
 	t.Logf("explicit Extend real ACK domain fence: charged=%d Until advanced RAM=0 extraRange=0", record.DeferralUsed)
+}
+
+type sharedCapturedStoreManager struct {
+	fetcher.FetcherManager
+	armed              atomic.Bool
+	sampler            bool
+	capturedDownloaded atomic.Int64
+	entered, release   chan struct{}
+}
+
+func (manager *sharedCapturedStoreManager) Store(f fetcher.Fetcher) (any, error) {
+	value, err := manager.FetcherManager.Store(f)
+	current := f.Progress().TotalDownloaded()
+	if err == nil && (!manager.sampler || current > 0) && manager.armed.CompareAndSwap(true, false) {
+		manager.capturedDownloaded.Store(current)
+		close(manager.entered)
+		<-manager.release
+	}
+	return value, err
+}
+
+// The manager delegates real HTTP Store, then holds the captured owned value
+// before original persistence. It never fakes Progress or skips the sampler.
+// No wait-for-Start fixture shortcut hides
+// the startup checkpoint/first 429 ordering.
+func TestSharedRecoveryHTTPCheckpointFrontierDrainsPendingStores(t *testing.T) {
+	for _, sampler := range []bool{false, true} {
+		t.Run(map[bool]string{false: "startup-store", true: "captured-sampler-store"}[sampler], func(t *testing.T) {
+			payload := bytes.Repeat([]byte("frontier"), 524288)
+			metadata, metadataRelease := make(chan struct{}), make(chan struct{})
+			failureReady, failureRelease, refused := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			prefixRelease := make(chan struct{})
+			var prefixOnce sync.Once
+			releasePrefix := func() { prefixOnce.Do(func() { close(prefixRelease) }) }
+			var metaOnce, failOnce sync.Once
+			releaseMeta := func() { metaOnce.Do(func() { close(metadataRelease) }) }
+			releaseFailure := func() { failOnce.Do(func() { close(failureRelease) }) }
+			var ranges, after atomic.Int32
+			var phase atomic.Bool
+			var earliest atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Accept-Ranges", "bytes")
+				if r.Header.Get("Range") == "" {
+					close(metadata)
+					select {
+					case <-metadataRelease:
+					case <-r.Context().Done():
+						return
+					}
+					w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+					w.WriteHeader(200)
+					w.(http.Flusher).Flush()
+					return
+				}
+				n := ranges.Add(1)
+				begin, end := 0, len(payload)-1
+				if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &begin, &end); err != nil || begin < 0 || end >= len(payload) || end < begin {
+					t.Error("bad frontier range")
+					w.WriteHeader(400)
+					return
+				}
+				if !phase.Load() && sampler && n == 1 {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, len(payload)))
+					w.Header().Set("Content-Length", fmt.Sprint(end-begin+1))
+					w.WriteHeader(206)
+					w.(http.Flusher).Flush()
+					select {
+					case <-prefixRelease:
+					case <-r.Context().Done():
+						return
+					}
+					_, _ = w.Write(payload[begin : begin+1024])
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+					return
+				}
+				if !phase.Load() {
+					close(failureReady)
+					select {
+					case <-failureRelease:
+					case <-r.Context().Done():
+						return
+					}
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(429)
+					w.(http.Flusher).Flush()
+					close(refused)
+					return
+				}
+				after.Add(1)
+				earliest.CompareAndSwap(0, time.Now().UnixNano())
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, len(payload)))
+				w.Header().Set("Content-Length", fmt.Sprint(end-begin+1))
+				w.WriteHeader(206)
+				_, _ = w.Write(payload[begin : end+1])
+			}))
+			defer server.Close()
+			dir := t.TempDir()
+			gate := &sharedCapturedStoreManager{FetcherManager: &httpProtocol.FetcherManager{}, entered: make(chan struct{}), release: make(chan struct{}), sampler: sampler}
+			gate.armed.Store(true)
+			store := NewBoltStorage(filepath.Join(dir, "db"))
+			if err := InitializeDatasetIdentity(store); err != nil {
+				t.Fatal(err)
+			}
+			d := NewDownloader(&DownloaderConfig{Storage: store, StorageDir: dir, FetchManagers: []fetcher.FetcherManager{gate}})
+			if err := d.Setup(); err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			defer releaseMeta()
+			defer releaseFailure()
+			defer releasePrefix()
+			started := make(chan string, 1)
+			d.Listener(func(e *Event) {
+				if e.Key == EventKeyStart {
+					select {
+					case started <- e.Task.ID:
+					default:
+					}
+				}
+			})
+			req := operationRequest(server.URL+"/frontier", dir)
+			req.OperationID = "shared-store-frontier"
+			connections := 1
+			if sampler {
+				connections = 2
+			}
+			req.Reqs[0].Opts.Extra = &httpModel.OptsExtra{Connections: connections}
+			created, err := d.CreateBatchOperation(context.Background(), req)
+			if err != nil || len(created.TaskIDs) != 1 {
+				t.Fatal(err)
+			}
+			id := created.TaskIDs[0]
+			select {
+			case <-metadata:
+			case <-time.After(5 * time.Second):
+				t.Fatal("real metadata gate missing")
+			}
+			owner := d.getTask(id).recoveryOwner.Load()
+			if owner == nil {
+				t.Fatal("real owner missing before Resolve headers")
+			}
+			var ackOnce sync.Once
+			releaseACK := func() { ackOnce.Do(func() { close(gate.release) }) }
+			defer releaseACK()
+			releaseMeta()
+			if sampler {
+				// Only this case withholds its real prefix until startup Store has
+				// completed, making the held capture belong to the actual sampler.
+				select {
+				case got := <-started:
+					if got != id {
+						t.Fatal("wrong Start")
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("sampler setup Start missing")
+				}
+				releasePrefix()
+			}
+			select {
+			case <-failureReady:
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual rate-limited worker missing")
+			}
+			select {
+			case <-gate.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual captured Store missing")
+			}
+			releaseFailure()
+			select {
+			case <-refused:
+			case <-time.After(2 * time.Second):
+				t.Fatal("source did not actually return429 while owned Store was pending")
+			}
+			// The real HTTP Store value is captured; its original caller retains
+			// Task.lock until the delegate returns and persistence ACKs.
+			// Give the independent coordinator a bounded observation interval.
+			time.Sleep(100 * time.Millisecond)
+			var pending recoveryRecord
+			var saved Task
+			var checkpoint json.RawMessage
+			present, err := d.storage.Get(bucketSave, id, &checkpoint)
+			if err != nil || present != sampler {
+				t.Fatalf("captured pending Store checkpoint presence=%v sampler=%v err=%v", present, sampler, err)
+			}
+			if ok, err := d.storage.Get(bucketTask, id, &saved); err != nil || !ok {
+				t.Fatal(err)
+			}
+			if sampler && gate.capturedDownloaded.Load() != 1024 {
+				t.Fatalf("sampler Store did not capture real prefix: %d", gate.capturedDownloaded.Load())
+			}
+			if ok, err := d.storage.Get(bucketTaskRecovery, id, &pending); err != nil || !ok || pending.DeferralUsed != 0 || pending.TotalUsed != 0 || after.Load() != 0 {
+				t.Fatalf("action passed pending captured Store: %+v err=%v", pending, err)
+			}
+			digest := ""
+			if present {
+				digest, err = checkpointDigest(checkpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			phase.Store(true)
+			releaseACK()
+			reserved := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.DeferralUsed == 1 })
+			until, err := time.Parse(time.RFC3339Nano, reserved.NotBefore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitStatus(t, d, id, base.DownloadStatusDone, 8*time.Second)
+			final := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.DeferralUsed == 1 && r.Actions[0].State == "finished" })
+			if final.TotalUsed != 1 || final.TransportUsed != 0 || final.Generation != pending.Generation || earliest.Load() < until.UnixNano() {
+				t.Fatalf("pending Store broke wave budget/Until: %+v", final)
+			}
+			body, err := os.ReadFile(d.GetTask(id).Meta.SingleFilepath())
+			if err != nil || !bytes.Equal(body, payload) {
+				t.Fatal("Store frontier final body", err)
+			}
+			t.Logf("actual captured Store sampler=%v capturedDownloaded=%d priorCURRENT=%s action1/sameG fullSHA=%x", sampler, gate.capturedDownloaded.Load(), digest, sha256.Sum256(body))
+		})
+	}
 }
