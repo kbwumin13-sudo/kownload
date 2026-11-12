@@ -69,4 +69,32 @@ func TestMediaPathFreezeExactSidecars(t *testing.T) {
 	if _, err = resolvedMediaLayout("owner", filepath.Join(t.TempDir(), "exact.mp4"), extra, info); err == nil {
 		t.Fatal("duplicate subtitle accepted")
 	}
+	// F may select another root, but Core must apply it first and preserve the
+	// metadata-resolved relative final set. No filesystem IO is issued here.
+	f.meta = &fetcher.FetcherMeta{Opts: &base.Options{Path: again.ParentRoot}}
+	oldRoot := again.ParentRoot
+	again.ParentRoot = filepath.Join(oldRoot, "rule-root")
+	execution, err := transfer.IssuePathFreezeExecution("owner", again, filepath.Join(again.ParentRoot, work), func() error { return nil }, func(int) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.BindPathFreezeExecution(execution); !errors.Is(err, transfer.ErrRecoveryHeld) || f.pathLayout.Layout.ParentRoot != oldRoot {
+		t.Fatal("binding changed root before Core applied F", err)
+	}
+	f.meta.Opts.Path = again.ParentRoot
+	if err = f.BindPathFreezeExecution(execution); err != nil {
+		t.Fatal("F root binding rejected", err)
+	}
+	bound, boundWork, err := f.MediaOutputLayout()
+	if err != nil || bound.ParentRoot != again.ParentRoot || boundWork != work || bound.Members[1] != again.Members[1] {
+		t.Fatal("F root binding changed relative layout", err)
+	}
+	again.Members[1].RelativePath = "other.en.srt"
+	changed, err := transfer.IssuePathFreezeExecution("owner", again, filepath.Join(again.ParentRoot, work), func() error { return nil }, func(int) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.BindPathFreezeExecution(changed); !errors.Is(err, transfer.ErrRecoveryHeld) || f.pathExecution != execution {
+		t.Fatal("root binding also rewrote final member", err)
+	}
 }
