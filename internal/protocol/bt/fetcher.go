@@ -83,6 +83,7 @@ type Fetcher struct {
 	seedMu          sync.Mutex   // guards data.SeedBytes and data.SeedTime, updated by doUpload
 	pathStorage     *pathStorage // opted in before any native acquisition
 	pathOwner       string
+	pathSelection   []int // effective frozen selection, independent of raw empty=all options
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -210,6 +211,24 @@ func (f *Fetcher) Start() (err error) {
 	}
 
 	files := f.torrent.Files()
+	if f.pathStorage != nil {
+		if len(f.pathSelection) == 0 {
+			return transfer.ErrLayoutStorageHeld
+		}
+		if len(f.data.Progress) != len(f.pathSelection) {
+			f.data.Progress = make(fetcher.Progress, len(f.pathSelection))
+		}
+		if len(f.pathSelection) == len(files) {
+			f.torrent.DownloadAll()
+		} else {
+			for _, index := range f.pathSelection {
+				files[index].Download()
+			}
+		}
+		f.torrent.AllowDataDownload()
+		go f.doUpload(false)
+		return nil
+	}
 	// If the user does not specify the file to download, all files will be downloaded by default
 	if f.data.Progress == nil {
 		if len(f.meta.Opts.SelectFiles) == 0 {
@@ -323,6 +342,9 @@ func (f *Fetcher) Stats() any {
 }
 
 func (f *Fetcher) Progress() fetcher.Progress {
+	if f.pathStorage != nil {
+		return f.pathProgress()
+	}
 	if !f.torrentReady.Load() {
 		return f.data.Progress
 	}
@@ -335,6 +357,9 @@ func (f *Fetcher) Progress() fetcher.Progress {
 }
 
 func (f *Fetcher) Wait() (err error) {
+	if f.pathStorage != nil {
+		return f.BindRunWait(context.Background())()
+	}
 	for {
 		select {
 		case <-f.torrentDropCtx.Done():
@@ -874,6 +899,10 @@ func (fm *FetcherManager) DefaultConfig() any {
 
 func (fm *FetcherManager) Store(f fetcher.Fetcher) (data any, err error) {
 	_f := f.(*Fetcher)
+	if _f.pathStorage != nil {
+		_f.opMu.Lock()
+		defer _f.opMu.Unlock()
+	}
 	// Persist a snapshot: doUpload keeps updating the seeding counters while
 	// the storage serializes.
 	_f.seedMu.Lock()

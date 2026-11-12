@@ -326,7 +326,9 @@ func (d *Downloader) Setup() error {
 					task.statusLock.Unlock()
 					task.lock.Unlock()
 					if e := requireTaskPathFreeze(task); e == nil {
-						_ = d.rebindPathUpload(task)
+						if e = d.rebindPathUpload(task); e == nil {
+							go d.watch(task)
+						}
 					}
 					continue
 				}
@@ -465,6 +467,11 @@ func (d *Downloader) cleanupNonExistingTasks() {
 			continue
 		}
 		if task.Meta == nil || task.Meta.Res == nil {
+			continue
+		}
+		// Frozen staged outputs have no final name until publication. Missing
+		// finals cannot justify deleting an unfinished durable Task at startup.
+		if task.PathFreeze != nil && task.getStatus() != base.DownloadStatusDone {
 			continue
 		}
 		// Media has no final file until muxing completes; its resumable fragments
@@ -931,6 +938,13 @@ func (d *Downloader) Patch(id string, req *base.Request, opts *base.Options) err
 		err := func() error {
 			task.dataLock.Lock()
 			defer task.dataLock.Unlock()
+			if task.PathFreeze != nil {
+				// R2 freezes the caller intent. Reject a changed patch before the
+				// protocol can mutate live headers or an already frozen target.
+				if req != nil && !pathReqEqual(req, task.Meta.Req) || opts != nil && mcpWriteHash(opts) != mcpWriteHash(task.Meta.Opts) {
+					return ErrPathFreezeHeld
+				}
+			}
 			if task.fetcher == nil {
 				if err := d.restoreFetcher(task); err != nil {
 					return err
@@ -1633,7 +1647,7 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	if d.closed.Load() || d.getTask(task.ID) != task {
 		return
 	}
-	bound := wait != nil && (task.Protocol == "http" || parentRecoveryProtocol(task.Protocol))
+	bound := wait != nil && (task.Protocol == "http" || parentRecoveryProtocol(task.Protocol) || task.PathFreeze != nil)
 	registrationGeneration := generation
 	if !bound {
 		registrationGeneration = 0
@@ -1727,6 +1741,13 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	}
 	coverageSeal := d.recordRunRecoveryCoverage(task, f, runLease)
 	if err != nil {
+		if task.PathFreeze != nil {
+			if joinErr := d.quiesceTaskPath(task); joinErr != nil {
+				err = errors.Join(err, joinErr)
+			} else {
+				_ = d.releasePathOutput(task)
+			}
+		}
 		d.doOnError(task, err, expected...)
 		if coverageSeal != nil && task.Completion == nil {
 			if owner := task.recoveryOwner.Load(); owner != nil {
@@ -2098,6 +2119,13 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 	if !handled {
 		return
 	}
+	if task.PathFreeze != nil {
+		if err := d.quiesceTaskPath(task); err != nil {
+			d.Logger.Warn().Err(err).Msgf("deferred output has not joined, task id: %s", task.ID)
+			return
+		}
+		_ = d.releasePathOutput(task)
+	}
 	// Delete may have removed the task after the check above; only a task
 	// still listed and still waiting is queued, so it cannot be revived.
 	d.lock.Lock()
@@ -2132,7 +2160,7 @@ func (d *Downloader) restoreTask(task *Task) error {
 			return err
 		}
 	}
-	if (task.Protocol != "http" && !parentRecoveryProtocol(task.Protocol)) || (task.getStatus() == base.DownloadStatusDone && task.Uploading) {
+	if task.PathFreeze == nil && ((task.Protocol != "http" && !parentRecoveryProtocol(task.Protocol)) || (task.getStatus() == base.DownloadStatusDone && task.Uploading)) {
 		go d.watch(task)
 	}
 	return nil
@@ -2613,13 +2641,13 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			task.recoveryInitialEligible.Store(false)
 		}
 		var boundWait func() error
-		if task.Protocol == "http" || recovery != nil && parentRecoveryProtocol(task.Protocol) {
+		if task.Protocol == "http" || recovery != nil && parentRecoveryProtocol(task.Protocol) || task.PathFreeze != nil {
 			if binder, ok := task.fetcher.(interface {
 				BindRunWait(context.Context) func() error
 			}); ok {
 				boundWait = binder.BindRunWait(runCtx)
 			}
-			if recovery != nil && boundWait == nil {
+			if (recovery != nil || task.PathFreeze != nil) && boundWait == nil {
 				return transfer.ErrRecoveryHeld
 			}
 		}
