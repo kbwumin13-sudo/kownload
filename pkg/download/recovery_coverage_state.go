@@ -31,13 +31,19 @@ type recoveryCoverageUpdate struct {
 // It never enrolls a legacy Task or attaches its decoded Task to the live map.
 func readRecoveryCoverage(reader datasetReader, id string) (*Task, recoveryRecord, error) {
 	task, record, err := readRecoveryCoverageParts(reader, id)
-	if err != nil || record.Version != 3 {
+	if err != nil || !hasRecoveryCoverage(record) {
 		if err == nil {
 			err = transfer.ErrRecoveryHeld
 		}
 		return nil, recoveryRecord{}, err
 	}
 	return task, record, nil
+}
+
+// The triplet must already be validated. A plain v4 declaration never supplies
+// an implicit empty baseline, even though the shared CAS reader accepts it.
+func hasRecoveryCoverage(record recoveryRecord) bool {
+	return (record.Version == 3 || record.Version == recoverySharedVersion) && record.Coverage != nil
 }
 
 func readRecoveryCoverageParts(reader datasetReader, id string) (*Task, recoveryRecord, error) {
@@ -63,13 +69,7 @@ func readRecoveryCoverageParts(reader datasetReader, id string) (*Task, recovery
 			return nil, recoveryRecord{}, transfer.ErrRecoveryHeld
 		}
 	}
-	if task.ID != id || task.Protocol != "http" || task.Meta == nil || task.Meta.Req == nil || task.Meta.Opts == nil ||
-		task.Recovery == nil || task.Recovery.Version != record.Version || required.Version != record.Version ||
-		required.Capability != recoveryCapability || !record.valid(id) {
-		return nil, recoveryRecord{}, transfer.ErrRecoveryHeld
-	}
-	hash, err := recoverySourceHash(task.Meta.Req, record.ExecutionDefaultsHash)
-	if err != nil || hash != record.SourceHash {
+	if task.ID != id || task.Meta == nil || task.Meta.Opts == nil || validateRecoveryTriplet(task, record, required) != nil {
 		return nil, recoveryRecord{}, transfer.ErrRecoveryHeld
 	}
 	return task, record, nil
@@ -157,25 +157,32 @@ func installRecoveryCoverage(store AtomicStorage, dataset string, expected recov
 		if err != nil {
 			return err
 		}
-		if record.Version != 1 || record.InitialAttempt.State != "issued" || record.Generation == 0 || task.Status == base.DownloadStatusDone {
+		legacy := record.Version == 1
+		plainShared := record.Version == recoverySharedVersion && record.Coverage == nil
+		if (!legacy && !plainShared) || record.InitialAttempt.State != "issued" || record.Generation == 0 || task.Status == base.DownloadStatusDone {
 			return transfer.ErrRecoveryHeld
 		}
 		empty, err := transfer.NewHTTPCoverageState(initial.IdentityHash, initial.Size)
 		if err != nil || !reflect.DeepEqual(empty, initial) {
 			return transfer.ErrRecoveryHeld
 		}
-		task.Recovery.Version = 3
-		record.Version, record.Coverage = 3, &initial
-		if !record.valid(task.ID) {
+		if legacy {
+			task.Recovery.Version, record.Version = 3, 3
+		}
+		record.Coverage = &initial
+		required, err := recoveryRequirementFor(record)
+		if err != nil || validateRecoveryTriplet(task, record, required) != nil {
 			return transfer.ErrRecoveryHeld
 		}
-		if err := tx.Put(bucketTask, task.ID, task); err != nil {
-			return err
+		if legacy {
+			if err := tx.Put(bucketTask, task.ID, task); err != nil {
+				return err
+			}
 		}
 		if err := tx.Put(bucketTaskRecovery, task.ID, &record); err != nil {
 			return err
 		}
-		if err := tx.Put(bucketRecoveryRequired, task.ID, &recoveryRequirement{Version: 3, Capability: recoveryCapability}); err != nil {
+		if err := tx.Put(bucketRecoveryRequired, task.ID, &required); err != nil {
 			return err
 		}
 		committed = record
@@ -187,7 +194,8 @@ func installRecoveryCoverage(store AtomicStorage, dataset string, expected recov
 	return committed, nil
 }
 
-// saveRecoveryCoverageCheckpoint handles ONLY existing v3. A successful bool is
+// saveRecoveryCoverageCheckpoint handles existing v3 or strict v4 coverage. The
+// version/ref/required capability and Until are preserved. A successful bool is
 // an earned-transaction ACK winner, not an IO permit. The runtime owner alone
 // can install a private one-shot settlementAuthorization after the same Fence.
 // Any error (including commit-with-lost-ACK) discards the closure's result.
@@ -210,7 +218,7 @@ func saveRecoveryCoverageCheckpoint(store AtomicStorage, dataset string, expecte
 		if err != nil {
 			return err
 		}
-		if record.Version != 3 || !recoveryCoverageSnapshotMatches(task, next.Snapshot) {
+		if !hasRecoveryCoverage(record) || !recoveryCoverageSnapshotMatches(task, next.Snapshot) {
 			return transfer.ErrRecoveryHeld
 		}
 		if err := guardCompletionSnapshot(tx, next.Snapshot); err != nil {
@@ -240,7 +248,8 @@ func saveRecoveryCoverageCheckpoint(store AtomicStorage, dataset string, expecte
 			earned = true
 		}
 		record.Coverage = &coverage
-		if !record.valid(task.ID) {
+		required, err := recoveryRequirementFor(record)
+		if err != nil || validateRecoveryTriplet(task, record, required) != nil {
 			return transfer.ErrRecoveryHeld
 		}
 		if err := tx.Put(bucketSave, task.ID, next.Checkpoint); err != nil {
