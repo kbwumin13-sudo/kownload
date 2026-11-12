@@ -24,6 +24,8 @@ type HTTPPathCreateRequest struct {
 	RequiredCapabilities []string                     `json:"requiredCapabilities"`
 	OperationID          string                       `json:"operationId"`
 	Request              *base.CreateTaskBatchItem    `json:"request"`
+	Reqs                 []*base.CreateTaskBatchItem  `json:"reqs,omitempty"`
+	BatchID              string                       `json:"batchId,omitempty"`
 	PathIntent           PathIntent                   `json:"pathIntent"`
 	Integrity            *VerifiedHTTPIntegrityIntent `json:"integrity,omitempty"`
 }
@@ -53,13 +55,16 @@ type PathOutputState struct {
 	Binding     *transfer.MCPOutputBinding `json:"binding"`
 }
 type TaskPathFreeze struct {
-	Version            int                  `json:"version"`
-	RequiredCapability string               `json:"requiredCapability"`
-	Phase              PathFreezePhase      `json:"phase"`
-	Decision           *pathpolicy.Decision `json:"decision"`
-	Layout             *pathpolicy.LayoutV1 `json:"layout"`
-	LayoutHash         string               `json:"layoutHash"`
-	Output             *PathOutputState     `json:"output"`
+	Version            int                    `json:"version"`
+	RequiredCapability string                 `json:"requiredCapability"`
+	Phase              PathFreezePhase        `json:"phase"`
+	Decision           *pathpolicy.Decision   `json:"decision"`
+	Layout             *pathpolicy.LayoutV1   `json:"layout"`
+	TreeLayoutHash     string                 `json:"treeLayoutHash"`
+	WorkDirectory      string                 `json:"workDirectory,omitempty"`
+	LayoutOutput       *PathLayoutOutputState `json:"layoutOutput,omitempty"`
+	LayoutHash         string                 `json:"layoutHash"`
+	Output             *PathOutputState       `json:"output"`
 }
 
 // The execution token is a CURRENT F-CAS coordinate, not permanent frozen
@@ -74,11 +79,12 @@ type PathFreezeExpected struct {
 	CheckpointHash        string
 }
 type PathFreezePrepared struct {
-	ResolvedMeta *fetcher.FetcherMeta
-	Decision     pathpolicy.Decision
-	Layout       pathpolicy.LayoutV1
-	LayoutHash   string
-	StagingName  string
+	ResolvedMeta  *fetcher.FetcherMeta
+	Decision      pathpolicy.Decision
+	Layout        pathpolicy.LayoutV1
+	LayoutHash    string
+	StagingName   string
+	WorkDirectory string
 }
 
 // HTTPPathCapability is produced by the active Core, never by preview alone.
@@ -101,4 +107,18 @@ type HTTPPathOperationResult struct {
 	Operation            BatchOperationResult `json:"operation"`
 	RequiredCapabilities []string             `json:"requiredCapabilities"`
 	CompletionViews      []TaskCompletionView `json:"completionViews,omitempty"`
+}
+
+// Per-file identities are evidence from the owned native layout adapter, not
+// an IO permission. Unopened final files must never be invented or adopted.
+type PathFileIdentity struct {
+	Index        int                             `json:"index"`
+	RelativePath string                          `json:"relativePath"`
+	Identity     transfer.CompletionFileIdentity `json:"identity"`
+}
+type PathLayoutOutputState struct {
+	Version               int                              `json:"version"`
+	DirectoryIdentity     transfer.CompletionFileIdentity  `json:"directoryIdentity"`
+	WorkDirectoryIdentity *transfer.CompletionFileIdentity `json:"workDirectoryIdentity"`
+	Files                 []PathFileIdentity               `json:"files"`
 }
