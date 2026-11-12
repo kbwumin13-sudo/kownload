@@ -24,6 +24,7 @@ JSON 解码成功、数据库格式没变、App 能启动，都不能证明旧�
 | bucket `task_recovery_v1`，record.version=1（本地候选已实现，未发布/安装） | S3 同候选，首能力仅 `http-transport-recovery/v1` 可冻结的 direct/manual/static/env 上下文 | 旧 core 不理解共享预算或 generation，不可据此执行/自动续跑 | 保存 episode/generation、sourceRevision/sourceHash、必需 executionDefaultsHash、initialAttempt、计数与有界 actions；缺坏默认摘要 held，不能补造 | 默认上下文合法变化只同 ledger CAS 提高 sourceRevision/generation，保 episode、issued 证据、余额/actions/notBefore；只读不 enroll、删除不重造 | 三方必须同事务；当前仅 transport action，总16且 transport6；refreshUsed/deferralUsed 仅0、notBefore 仅空值受支持，其他值拒绝而不清空 |
 | bucket `task_recovery_required_v1`，`{version:1, capability:http-transport-recovery/v1}`（本地候选已实现，未发布/安装） | S3 同候选 required 哨兵；即使旧 writer 丢 Task ref 仍由新端识别 | 旧 core/App39 忽略新 bucket，不能安全执行或自动续跑 | 新端见哨兵即要求完整受支持三方；哨兵缺失而 ref/ledger 存在同样拒绝 | 不因 ref 被旧 writer 丢失降级 legacy；不自动修复、重新 enroll 或重造已删 Task | 备份须保三方状态；配对快照回退不证明输出字节或自动续跑安全，不把旧 JSON 可读当执行兼容 |
 | 显式 error Retry 三方 v2 与 `lastExplicitRetry.version=1`（本地候选，未审查/合入/安装） | 本地 writer 在首次真正用户 Retry 同事务把 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个既有 version 一起1→2；bucket/cap名称不变，不增 Task 字段 | 39忽略新状态仍不安全；冻结26/cdd76b11 v1 reader真实打开v2 Bolt后，Setup无fetcher且显式Continue held；既有输出保留 | 新 reader 仅接受完整v1/noLast或完整v2/Last；混版、缺坏Last、未知版本 held零IO，GET不升版 | Last是历史回执，不是首IO许可；仅新action已确认fresh ACK给本进程一次retryAuthorization，unknown/replay/restart不恢复 | 配对快照及禁止裸活动库回退；只明确用户新episode重置本轮计数/actions，Continue/Pause/Resume从不暗reset，保持同TaskID/path/checkpoint/source/D/notBefore |
+| D4 净新覆盖三方 v3（planned，本地合同候选，未落库/未发布） | 原 Task.recovery、task_recovery_v1 ledger、task_recovery_required_v1 三个 version 同事务升3；原bucket/cap不变，ledger必需 coverage.version=1；不增Task字段/第二ledger/迁移 | normal40/41/42及冻结ceff reader不能执行v3；旧ceff真实Bolt重开/显式Continue拒3仍待15验证，不能把静态拒版写实测；39仍unsafe | 新reader仅接受完整v1无Last/Coverage、v2必Last无Coverage且Last.ToEpisode=current、v3必合法Coverage且Last可历史；混版/缺坏/未知held零IO | 首装只消费本进程普通新Task/本次new M已确认ACK、首byte前RAM一次资格；历史/unknown/replay/reload不补；checkpoint和完整record独立CAS，结算不直接授IO | 配对快照且禁止裸活动库回退；现slot482仅schema/版本测试，无writer/enroll；精确planned安装/结算/Retry约束见下节，normal42不含本候选 |
 | `Task.completion={version:1,completionId:string}`（S4本地候选已接线，待审/未安装） | 普通single directHTTP(S)/显式SHA256专用receiver；ID等原R冻结值及record.CompletionID，无checksum原流程不变 | 旧39/Core可能忽略ref，不安全执行 | 新端见ref/record/required任一即核三方；缺坏/未知或CID空/错配held，bucket key不能代替CID绑定；Resolve/Start/staging前须确认受理 | 显式/批量/自动Continue不能绕过；prepared不授执行，删除不重造 | 与以下两行同M事务；精确v1，不增v2/迁移；旧Core不能消费新guard，禁止裸活动库回退，配对快照不证明输出/续跑安全 |
 | `task_completion_v1`，record.version=1（S4本地候选已接线，待审/未安装） | 同TaskID，R冻结稳定completionId/typed integrity完整意图；Core/REST真实链已验，UI/App待成套验收 | 旧Core不理解校验/安全发布阶段 | prepared可空basename/size=-1/无anchor；首byte前完整name/root与真实inode保存ACK，join后才waiting_verify | 未C重开重hash；外来同hash不认领，未知阶段拒绝；不自动整理stage | phase仅prepared/waiting_verify/verifying/verified/published_pending_commit/committed；expected/actual与归属锚点不构成跨FS+DB原子保证 |
 | `task_completion_required_v1={version:1,capability:http-sha256-completion/v1}`（S4本地候选已接线，待审/未安装） | 同M三方required；同C原子done+record+required，fresh ACK后API线性化与一次私有成功许可 | 旧39/Core忽略bucket仍unsafe；不能靠文档声称已拒 | 三方缺失/混坏/未知版，旧writer丢ref也不得降legacy；真实IO需同run/Fence | unknown ACK只读原ID，不补许可；恢复C仅重建状态不补脚本/Webhook | 备份保三方及实际输出另核；受理与公开DTO见VERIFIED_HTTP_COMPLETION.md，正常build40/41未含 |
@@ -100,6 +101,55 @@ issued；持久Last不能恢复私有一次许可。扣费/新episode ACK未知�
 TestFrozenV1ReaderRejectsExplicitRetryV2已实际RUN/PASS，覆盖Setup无fetcher、显式Continue
 held与原输出保留。两次overlay未命中的no-tests不计证据。该拒执行证据不证明App39安全
 执行新状态；39仍unsafe，禁止裸活动库回退。
+
+### D4 净新覆盖三方 v3 planned 合同
+
+此处只登记15原合同§18.5及本地slot
+`4820268823a6f039a65c2f94e664f381e9f90036`，依赖纯值模块
+`ffbd8534aa1401391d0502b0f91bc12fcdb0cef8`。slot只定义Coverage与严格版本变体，
+没有writer/enroll/activation；本笔只有文档，不写数据库、不迁移、不进入normal40/41/42。
+冻结ceff旧reader真实打开v3 Bolt并显式Continue拒绝，仍待15另行实证。
+
+ledger新增唯一`coverage`对象，固定JSON字段为`version:1`、`identityHash`、`size`、
+`status:tracking|unprovable`、`durableRanges`、`settledRanges`、`checkpointHash`、
+`settlementSequence`；范围元素为半开区间`{begin,end}`。两组持久数组必须非nil，
+空值编码为`[]`，缺失/null不补空基线；未知版本、坏摘要/区间/状态按held处理。
+identity由实际完整HTTP最终URL（含query/escape）、strong ETag及已知正size绑定，
+不持久URL/ETag原文。Durable是安全Sync封存的当前覆盖C，Settled是历史已奖励基线B；
+Truncate只清当前C，不能清B或序号。1MiB阈值、小文件完整覆盖及正净新增仅产生数学候选，
+真实EOF/Complete、writer join、同fd Sync与资源连续性必须由15的seal另行证明。
+范围上限4096是证据边界，溢出/失证只停止自动结算，不截短实际正文或改变原WriteAt n/err。
+
+首装独立于read/save：只有本进程可证明普通新Task或本次new M成功ACK的私有RAM一次槽，
+才能在目标首byte（含prefetch向目标copy）之前、同生命周期Fence中Swap消费资格。
+Resolve沿已有首请求资格取实际身份；持久ungranted、旧op、历史任务、unknown M ACK、
+重载/replay均不能重建此槽；失败烧掉资格。无可信身份时保原v1/v2预算下载，不装空基线。
+install只接受完整v1三方、已确认issued的非零generation、无Last/Coverage，以及
+tracking/两组空非nil数组/seq0/空checkpointHash的精确initial；同事务核dataset、完整
+expected record/token、当前checkpoint存在性和digest，从CURRENT owned Task仅改ref版3，
+ledger改版3并存Coverage、required改版3，保原episode/issued/计数/余额/notBefore/source/D/
+Meta/S2/completion。它不新开episode、不授首请求许可；未知ACK先撤IO并同域核权威三方，
+已v3必须按v3守卫，不降级或补资格。
+
+save只处理完整已有v3，同一UpdateAtomic比较整个expected record（含source/D/Last/
+Coverage/seq/actions）与token，另核当前bucketSave的存在性/digest；不能拿旧
+Coverage.CheckpointHash替代最新普通Store checkpoint。输入为owned Task和合法非null
+checkpoint JSON，内部按原编码digest并重算完整Plan，不信caller净新增/阈值。
+snapshotOnly保持episode/generation/initial/计数/actions/B/seq/Last/notBefore；earned
+要求不同的新episode及重算正净新增Settlement，消费全部C、seq+1并清本轮计数/actions，
+generation不变、initial仍issued，保source/D/Last/notBefore/TaskID/path/checkpoint。
+仅事务ACK确认的earned fresh-winner可给15本进程一次settlementAuthorization；
+返回bool不是网络许可，unknown ACK/reconcile/reload/replay不补此RAM资格。
+S4 hash/publish/C仍同旧token，不在该期间旋转episode；IO/join/Sync不在DB或live锁内执行。
+
+严格reader仅接受：v1无Last/Coverage；v2必Last、无Coverage且ToEpisode等current；
+v3必合法Coverage且本代issued或clean-paused，Last可无或为合法历史（From!=To、
+SourceRevision不大于current，ToEpisode可不等当前episode）。显式Retry在原v3上保持3、
+B/两组Coverage/seq/notBefore，只有明确用户动作才按原合同开新episode，Continue不reset。
+历史action的accepted/replayed回执NewEpisode取Last.ToEpisode，外层state.Episode仍为
+实际current；不改历史Last、不因自动结算后的current补发许可。外部Recovery/Last wire
+仍version1，内部triplet v3不扩REST wire。旧版可读JSON不等于安全执行，配对回退及禁止
+裸活动库回灌约束不变；slot/纯模块测试不证明实际writer、旧reader或D4端到端已通过。
 
 ## 回退单位
 
