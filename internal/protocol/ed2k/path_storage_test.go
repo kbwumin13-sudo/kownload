@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/monkeyWie/goed2k"
@@ -102,13 +103,17 @@ func TestED2KPathResumeDoesNotEnterLegacyAutoLoad(t *testing.T) {
 		t.Fatal("delete lost held D6 resume")
 	}
 	before := string(fixture.raw)
-	if err := fm.ForgetPathFreeze("other-task", &base.Request{URL: testLink}); !errors.Is(err, transfer.ErrLayoutStorageHeld) {
+	f := &Fetcher{manager: fm, pathOwner: "task", meta: &fetcher.FetcherMeta{Req: &base.Request{URL: testLink}}}
+	if err := f.ForgetPathFreeze("other-task", &base.Request{URL: testLink}); !errors.Is(err, transfer.ErrLayoutStorageHeld) {
 		t.Fatal("forgot foreign owner")
+	}
+	if err := f.ForgetPathFreeze("task", &base.Request{URL: testLink, Labels: map[string]string{"changed": "request"}}); !errors.Is(err, transfer.ErrLayoutStorageHeld) {
+		t.Fatal("forgot changed request")
 	}
 	if string(fixture.raw) != before {
 		t.Fatal("rejected forget changed snapshot")
 	}
-	if err := fm.ForgetPathFreeze("task", &base.Request{URL: testLink}); err != nil {
+	if err := f.ForgetPathFreeze("task", &base.Request{URL: testLink}); err != nil {
 		t.Fatal(err)
 	}
 	saved = nativePathState{}

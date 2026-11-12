@@ -30,6 +30,42 @@ type nativePathTransfer struct {
 	Transfer goed2k.ClientTransferState `json:"transfer"`
 }
 
+// ForgetPathFreeze exposes post-delete cleanup through the task's Fetcher,
+// without leaking its private manager. The caller supplies the deleted Task's
+// exact current request; changing URL-equivalent labels/proxy/Extra is rejected
+// as well. Core calls only after known delete ACK and successful Quiesce.
+func (f *Fetcher) ForgetPathFreeze(ownerID string, req *base.Request) error {
+	f.pathMu.Lock()
+	if ownerID == "" || ownerID != f.pathOwner || req == nil || f.meta == nil || f.meta.Req == nil || f.manager == nil {
+		f.pathMu.Unlock()
+		return transfer.ErrLayoutStorageHeld
+	}
+	actual, err := json.Marshal(f.meta.Req)
+	expected, otherErr := json.Marshal(req)
+	if err != nil || otherErr != nil || string(actual) != string(expected) {
+		f.pathMu.Unlock()
+		return transfer.ErrLayoutStorageHeld
+	}
+	if f.pathHandler != nil {
+		select {
+		case <-f.pathHandler.done:
+			f.pathHandler.mu.Lock()
+			closeErr := f.pathHandler.closeErr
+			f.pathHandler.mu.Unlock()
+			if closeErr != nil {
+				f.pathMu.Unlock()
+				return closeErr
+			}
+		default:
+			f.pathMu.Unlock()
+			return transfer.ErrLayoutStorageHeld
+		}
+	}
+	manager := f.manager
+	f.pathMu.Unlock()
+	return manager.ForgetPathFreeze(ownerID, req)
+}
+
 // RegisterPathFreeze runs for EVERY restored/new D6 task before shared client
 // initialization. Hash ownership is explicit Task.ID authority, not inferred
 // from a filename or from a nonempty path. A conflicting legacy transfer is held.
