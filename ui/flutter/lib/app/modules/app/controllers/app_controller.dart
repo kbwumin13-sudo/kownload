@@ -21,6 +21,10 @@ import 'package:window_manager/window_manager.dart';
 
 import '../../../../api/api.dart';
 import '../../../../api/model/create_task.dart';
+import '../../../../api/model/create_task_batch.dart';
+import '../../../../api/model/http_path_create.dart';
+import '../../../../api/http_path_api.dart';
+import '../../../../api/task_batch_api.dart';
 import '../../../../api/model/downloader_config.dart';
 import '../../../../api/model/install_extension.dart';
 import '../../../../api/model/request.dart';
@@ -174,10 +178,33 @@ class AppController extends GetxController with WindowListener, TrayListener {
       }
     },
   );
-  Future<BrowserHandoffResult> prepareBrowserHandoff(CreateTask task) {
+  Future<BrowserHandoffResult> prepareBrowserHandoff(CreateTask task,
+      {HttpPathCreateRequest? pathCreate}) async {
     final id = task.browserOperationId, context = task.browserHandoff;
     if (id == null || context == null) throw StateError('交接上下文已失效，请检查原下载。');
-    return browserHandoff.prepareConfirmed(id, context, task);
+    if (pathCreate == null) {
+      return browserHandoff.prepareConfirmed(id, context, task);
+    }
+    if (pathCreate.variant != PathCreateVariant.http ||
+        !pathCreate.matchesBatch(CreateTaskBatch(reqs: [
+          CreateTaskBatchItem(req: task.req, opts: task.opts)
+        ]))) {
+      throw StateError('原下载与路径意图不一致，请保留原操作并查询。');
+    }
+    final snapshot = activeApiSnapshot;
+    if (snapshot == null || !snapshot.isCurrent) {
+      throw StateError('下载服务连接已变更，请查询原操作。');
+    }
+    final identity = await ScopedTaskBatchApi.readIdentity(snapshot);
+    final pathApi = HttpPathApi(
+        snapshot: snapshot, identity: identity, request: pathCreate);
+    if (!await pathApi.supported() || !snapshot.isCurrent) {
+      throw StateError('当前服务不支持此路径交接，请保留浏览器下载。');
+    }
+    return browserHandoff.prepareConfirmed(id, context, task,
+        pathCreate: pathCreate.toJson(id), datasetId: identity.datasetId,
+        pathRequest: (method, data) =>
+            browserHandoffRequest(method, data, snapshot: snapshot));
   }
 
   Future<BrowserHandoffResult> checkBrowserHandoff(task_model.Task task) async {
