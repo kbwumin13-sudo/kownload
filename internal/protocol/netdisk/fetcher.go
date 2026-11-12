@@ -509,13 +509,13 @@ func (f *Fetcher) Start() error {
 			}
 			break
 		}
-		if f.checkOperation(ctx, operation) != nil {
+		if f.checkRunResult(ctx, operation, err) != nil {
 			return
 		}
 		if err == nil {
 			err = f.verifyFile(e)
 		}
-		if f.checkOperation(ctx, operation) != nil {
+		if f.checkRunResult(ctx, operation, err) != nil {
 			return
 		}
 		if err == nil {
@@ -545,7 +545,7 @@ func (f *Fetcher) Start() error {
 		}
 		f.publishViewLocked()
 		f.mu.Unlock()
-		if f.checkOperation(ctx, operation) != nil {
+		if f.checkRunResult(ctx, operation, err) != nil {
 			return
 		}
 		select {

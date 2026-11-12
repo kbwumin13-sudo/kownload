@@ -35,6 +35,9 @@ type bridgeParentOwner struct {
 func (owner *bridgeParentOwner) CheckRecovery(token transfer.RecoveryToken) error {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
+	if owner.unknown && owner.commits > 0 {
+		return transfer.ErrRecoveryUnavailable
+	}
 	if token != owner.lease.Token {
 		return transfer.ErrRecoveryStale
 	}

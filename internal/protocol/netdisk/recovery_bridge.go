@@ -78,6 +78,28 @@ func (f *Fetcher) checkOperation(ctx context.Context, operation uint64) error {
 	return nil
 }
 
+// Losing IO authority because this operation exhausted its budget or received
+// an unknown ACK must still report that failure to the current Core waiter.
+// Success requires live authority; errors require only the same uncancelled
+// local operation/token. Neither result admits new IO.
+func (f *Fetcher) checkRunResult(ctx context.Context, operation uint64, resultErr error) error {
+	f.mu.Lock()
+	err := f.checkOperationLocked(ctx, operation)
+	if err == nil {
+		if lease := transfer.RecoveryLeaseFromContext(ctx); lease != nil {
+			current := f.recovery.Load()
+			if current == nil || current.Token != lease.Token {
+				err = transfer.ErrRecoveryStale
+			}
+		}
+	}
+	f.mu.Unlock()
+	if err == nil && resultErr == nil {
+		return f.checkOperation(ctx, operation)
+	}
+	return err
+}
+
 // Core supplies the only parent authority. Installing it performs no owner
 // callback or join while Core may hold a Task lock.
 func (f *Fetcher) SetRecoveryLease(lease *transfer.RecoveryLease) {
