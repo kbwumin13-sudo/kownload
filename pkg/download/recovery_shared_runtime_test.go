@@ -1276,6 +1276,7 @@ func TestSharedRecoveryHTTPCheckpointFrontierDrainsPendingStores(t *testing.T) {
 					return
 				}
 				n := ranges.Add(1)
+				t.Logf("frontier request=%d range=%q resumed=%v", n, r.Header.Get("Range"), phase.Load())
 				begin, end := 0, len(payload)-1
 				if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &begin, &end); err != nil || begin < 0 || end >= len(payload) || end < begin {
 					t.Error("bad frontier range")
@@ -1292,7 +1293,8 @@ func TestSharedRecoveryHTTPCheckpointFrontierDrainsPendingStores(t *testing.T) {
 					case <-r.Context().Done():
 						return
 					}
-					_, _ = w.Write(payload[begin : begin+1024])
+					sent, sendErr := w.Write(payload[begin : begin+1024])
+					t.Logf("frontier request=%d prefix sent=%d err=%v", n, sent, sendErr)
 					w.(http.Flusher).Flush()
 					<-r.Context().Done()
 					return
@@ -1315,7 +1317,8 @@ func TestSharedRecoveryHTTPCheckpointFrontierDrainsPendingStores(t *testing.T) {
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, len(payload)))
 				w.Header().Set("Content-Length", fmt.Sprint(end-begin+1))
 				w.WriteHeader(206)
-				_, _ = w.Write(payload[begin : end+1])
+				sent, sendErr := w.Write(payload[begin : end+1])
+				t.Logf("frontier request=%d sent=%d expected=%d err=%v", n, sent, end-begin+1, sendErr)
 			}))
 			defer server.Close()
 			dir := t.TempDir()
@@ -1354,6 +1357,15 @@ func TestSharedRecoveryHTTPCheckpointFrontierDrainsPendingStores(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := created.TaskIDs[0]
+			defer func() {
+				if t.Failed() {
+					if task := d.getTask(id); task != nil {
+						value, storeErr := new(httpProtocol.FetcherManager).Store(task.fetcher)
+						encoded, _ := json.Marshal(value)
+						t.Logf("frontier final HTTP checkpoint=%s err=%v", encoded, storeErr)
+					}
+				}
+			}()
 			select {
 			case <-metadata:
 			case <-time.After(5 * time.Second):
