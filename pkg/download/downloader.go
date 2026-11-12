@@ -2982,9 +2982,15 @@ func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) 
 	task.dataLock.RLock()
 	mcp := mcpTaskPresence(task)
 	task.dataLock.RUnlock()
+	operationLocked := false
 	if mcp || check != nil {
 		d.operationMu.Lock()
-		defer d.operationMu.Unlock()
+		operationLocked = true
+		defer func() {
+			if operationLocked {
+				d.operationMu.Unlock()
+			}
+		}()
 	}
 	// Deletion uses operationMu too. Check membership before statusLock:
 	// queued startup takes d.lock before that lock, never the reverse.
@@ -3021,6 +3027,12 @@ func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) 
 		task.timer.Pause()
 		return
 	})
+	// Membership and revocation are settled. Protocol join and event callbacks
+	// must not retain the operation lock used by checkpoint preparation.
+	if operationLocked {
+		d.operationMu.Unlock()
+		operationLocked = false
+	}
 	if err != nil {
 		d.Logger.Error().Stack().Err(err).Msgf("pause task failed, task id: %s", task.ID)
 		return

@@ -194,7 +194,7 @@ func TestMCPStalePauseCannotRevokeNewGUIRun(t *testing.T) {
 	// scheduler while MCP pause is checking its target. Pin the existing holder
 	// mutex only to stop the check under statusLock before notifyRunning takes
 	// d.lock; after release neither path may wait on the other's lock.
-	if err := d.Pause(&TaskFilter{IDs: []string{id}}); err != nil {
+	if err := d.doPause(live); err != nil {
 		t.Fatal(err)
 	}
 	live.statusLock.Lock()

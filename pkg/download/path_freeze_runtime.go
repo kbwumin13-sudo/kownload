@@ -184,7 +184,10 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		return err
 	}
 	prepared := make([]PathFreezePrepared, len(tasks))
-	reserved := d.frozenPathTargets(task.ID)
+	reserved, err := readFrozenPathTargets(d.storage, identity.DatasetID, task.ID)
+	if err != nil {
+		return err
+	}
 	for i, t := range tasks {
 		var meta *fetcher.FetcherMeta
 		if t == task {
@@ -277,26 +280,6 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		t.dataLock.Unlock()
 	}
 	return d.applyFrozenFetcherMeta(task)
-}
-
-// operationMu serializes F and deletion. Take only short data snapshots of
-// other tasks, never their lifecycle locks while holding this task's lock.
-func (d *Downloader) frozenPathTargets(except string) map[string]bool {
-	targets := make(map[string]bool)
-	for _, task := range d.taskList() {
-		if task.ID == except {
-			continue
-		}
-		task.dataLock.RLock()
-		state := task.PathFreeze
-		if state != nil && state.Phase == PathFreezeFrozen && state.Layout != nil {
-			for _, member := range state.Layout.Members {
-				targets[filepath.Join(state.Layout.ParentRoot, filepath.FromSlash(member.RelativePath))] = true
-			}
-		}
-		task.dataLock.RUnlock()
-	}
-	return targets
 }
 
 func availableFrozenPathName(root, name string, reserved map[string]bool) (string, error) {

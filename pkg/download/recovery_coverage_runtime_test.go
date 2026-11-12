@@ -699,8 +699,8 @@ func TestCoverageRuntimeCancelledFirstResolveNeverReinstalls(t *testing.T) {
 	}
 	waitStatus(t, d, id, base.DownloadStatusDone, 5*time.Second)
 	record := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Generation > 1 })
-	if record.Version != 1 || record.Coverage != nil || record.TotalUsed != 1 || owner.coverageInstallAuthorization.Load() != nil {
-		t.Fatal("cancel/resume recreated installation/free initial authority")
+	if record.Version != recoverySharedVersion || record.Coverage != nil || record.TotalUsed != 1 || owner.coverageInstallAuthorization.Load() != nil {
+		t.Fatalf("cancel/resume recreated installation/free initial authority: record=%+v install=%v", record, owner.coverageInstallAuthorization.Load() != nil)
 	}
 	sameContent(t, filepath.Join(dir, "cancelled.bin"), payload)
 }
