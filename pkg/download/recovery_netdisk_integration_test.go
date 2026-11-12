@@ -186,10 +186,16 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 		t.Fatalf("path changed before refresh: %q", beforeTask.Meta.SingleFilepath())
 	}
 	rawParent, _ := json.Marshal(beforeTask.Meta.Req)
-	freezeView := func(value *TaskPathFreeze) []byte {
-		raw, _ := json.Marshal(value)
+	freezeView := func(task *Task) []byte {
+		raw, _ := json.Marshal(task)
+		var taskFields map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &taskFields)
+		value := taskFields["pathFreeze"]
+		if len(value) == 0 || bytes.Equal(value, []byte("null")) {
+			return nil
+		}
 		var fields map[string]json.RawMessage
-		_ = json.Unmarshal(raw, &fields)
+		_ = json.Unmarshal(value, &fields)
 		stable := map[string]json.RawMessage{}
 		for _, key := range []string{"version", "requiredCapability", "decision", "layout", "layoutHash", "treeLayoutHash"} {
 			if value, exists := fields[key]; exists {
@@ -199,10 +205,7 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 		raw, _ = json.Marshal(stable)
 		return raw
 	}
-	var beforeFreeze json.RawMessage
-	if beforeTask.PathFreeze != nil {
-		beforeFreeze = freezeView(beforeTask.PathFreeze)
-	}
+	beforeFreeze := freezeView(beforeTask)
 	releaseRefresh()
 	waitStatus(t, d, id, base.DownloadStatusDone, 8*time.Second)
 	afterTask, after, err := d.sharedRecoveryExpected(identity.DatasetID, id)
@@ -225,8 +228,8 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 	if !bytes.Equal(rawParent, afterRaw) || afterTask.Meta.SingleFilepath() != wantedPath || apiCalls.Load() != 2 || provider.selected.Load() != 2 || refreshedRanges.Load() == 0 {
 		t.Fatalf("raw request, path or finite plan changed: API=%d newRanges=%d path=%q", apiCalls.Load(), refreshedRanges.Load(), afterTask.Meta.SingleFilepath())
 	}
-	if beforeTask.PathFreeze != nil {
-		afterFreeze := freezeView(afterTask.PathFreeze)
+	if beforeFreeze != nil {
+		afterFreeze := freezeView(afterTask)
 		if !bytes.Equal(beforeFreeze, afterFreeze) {
 			t.Fatal("frozen root/layout changed during source replacement")
 		}
@@ -251,7 +254,7 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 		Required         recoveryRequirement `json:"required"`
 		Before, After    recoveryRecord
 		ActualPathFreeze bool `json:"actualPathFreeze"`
-	}{os.Getenv("K17_NETDISK_SOURCE"), identity.DatasetID, id, filepath.Join(root, "db"), wantedPath, hex.EncodeToString(digest[:]), afterTask.Status, after.Record, after.Required, before.Record, after.Record, beforeTask.PathFreeze != nil}
+	}{os.Getenv("K17_NETDISK_SOURCE"), identity.DatasetID, id, filepath.Join(root, "db"), wantedPath, hex.EncodeToString(digest[:]), afterTask.Status, after.Record, after.Required, before.Record, after.Record, beforeFreeze != nil}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -259,5 +262,5 @@ func TestNetdiskActualCoreRefreshPreservesEpisodeAndBytes(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(root, "writer-manifest.json"), append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("actual closed netdisk writer: %s Task=%s E=%s transport=%d refresh=%d total=%d fullSHA=%s pathFreeze=%v", root, id, after.Record.Episode, after.Record.TransportUsed, after.Record.RefreshUsed, after.Record.TotalUsed, hex.EncodeToString(digest[:]), beforeTask.PathFreeze != nil)
+	t.Logf("actual closed netdisk writer: %s Task=%s E=%s transport=%d refresh=%d total=%d fullSHA=%s pathFreeze=%v", root, id, after.Record.Episode, after.Record.TransportUsed, after.Record.RefreshUsed, after.Record.TotalUsed, hex.EncodeToString(digest[:]), beforeFreeze != nil)
 }
