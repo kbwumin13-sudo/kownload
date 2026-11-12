@@ -1,6 +1,7 @@
 package model
 
 import (
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"io/fs"
 )
@@ -23,6 +24,10 @@ type StartConfig struct {
 	DownloadConfig    *base.DownloaderStoreConfig `json:"downloadConfig"`
 	// Launch-scoped; never merged into the persisted download configuration.
 	StartupTaskPolicy string `json:"startupTaskPolicy,omitempty"`
+	// Trusted launch input only. Neither HTTP configuration nor serialized
+	// Flutter/model input can install write authority or a network exception.
+	MCPWritePolicyFile string                  `json:"-"`
+	MCPWriteHTTPClient *transfer.MCPHTTPClient `json:"-"`
 
 	ProductionMode bool
 

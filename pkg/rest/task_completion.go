@@ -28,13 +28,19 @@ func registerTaskReadRoutes(router *mux.Router, core taskCompletionCore) {
 type taskCompletionReader struct{ core taskCompletionCore }
 
 type taskCompletionResponse struct {
-	task *download.Task
-	view *completionView
+	task    *download.Task
+	view    *completionView
+	effects *mcpTaskEffects
+}
+
+type mcpTaskEffects struct {
+	Version         int  `json:"version"`
+	AutoOpenAllowed bool `json:"autoOpenAllowed"`
 }
 
 func (response taskCompletionResponse) MarshalJSON() ([]byte, error) {
 	raw, err := json.Marshal(response.task)
-	if err != nil || response.view == nil {
+	if err != nil || response.view == nil && response.effects == nil {
 		return raw, err
 	}
 	// Task has its own MarshalJSON method. Keep its public fields and number
@@ -44,9 +50,17 @@ func (response taskCompletionResponse) MarshalJSON() ([]byte, error) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return nil, err
 	}
-	fields["completionView"], err = json.Marshal(response.view)
-	if err != nil {
-		return nil, err
+	if response.view != nil {
+		fields["completionView"], err = json.Marshal(response.view)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if response.effects != nil {
+		fields["mcpEffects"], err = json.Marshal(response.effects)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return json.Marshal(fields)
 }
@@ -73,6 +87,14 @@ func (reader taskCompletionReader) read(ids []string) (map[string]taskCompletion
 			return nil, &download.TaskCompletionStateError{Kind: download.TaskCompletionUnavailable}
 		}
 		response := taskCompletionResponse{task: snapshot.Task}
+		if snapshot.Task.MCPWrite != nil {
+			response.effects = &mcpTaskEffects{Version: 1}
+			if policy, ok := reader.core.(interface {
+				MCPTaskEffectAllowed(*download.Task, string) bool
+			}); ok {
+				response.effects.AutoOpenAllowed = policy.MCPTaskEffectAllowed(snapshot.Task, "auto_open")
+			}
+		}
 		if snapshot.CompletionView != nil {
 			view := adaptCompletionView(*snapshot.CompletionView)
 			view = publicCompletionView(view, identity.DatasetID, id)
