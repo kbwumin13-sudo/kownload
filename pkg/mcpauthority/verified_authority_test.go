@@ -64,13 +64,20 @@ func verifiedAuthorityFDs(t *testing.T, paths ...string) int {
 		}
 		identities[[2]uint64{uint64(s.Dev), s.Ino}] = true
 	}
-	entries, err := os.ReadDir("/dev/fd")
+	fdDir, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ReadDir may lstat entries with unknown d_type; fdescfs can list a
+	// descriptor that is already closed, making that lstat fail with EBADF.
+	// Only names are needed: Fstat below checks currently open descriptors.
+	names, readErr := fdDir.Readdirnames(-1)
+	if err := errors.Join(readErr, fdDir.Close()); err != nil {
+		t.Fatal(err)
+	}
 	count := 0
-	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil {
 			continue
 		}
@@ -80,6 +87,38 @@ func verifiedAuthorityFDs(t *testing.T, paths ...string) int {
 		}
 	}
 	return count
+}
+
+func TestVerifiedAuthorityFDAccounting(t *testing.T) {
+	_, a, _ := verifiedAuthorityFixture(t)
+	check := func(want int) {
+		t.Helper()
+		if got := verifiedAuthorityFDs(t, a); got != want {
+			t.Fatalf("root descriptors = %d, want %d", got, want)
+		}
+	}
+	check(0)
+	root, err := os.Open(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	check(1)
+	fd, err := unix.Dup(int(root.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup := os.NewFile(uintptr(fd), "fixture-root-dup")
+	defer dup.Close()
+	check(2)
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check(1)
+	if err := dup.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check(0)
 }
 
 func openVerifiedAuthority(t *testing.T, p *mcpwritepolicy.Policy) *mcpauthority.VerifiedAuthority {
