@@ -199,33 +199,64 @@ func TestCreateDirectTaskBatchWithOpt(t *testing.T) {
 
 func TestPauseAndContinueTask(t *testing.T) {
 	doTest(func() {
-		var wg sync.WaitGroup
-		wg.Add(1)
+		started := make(chan *download.Event, 2)
+		paused := make(chan *download.Event, 1)
+		finished := make(chan *download.Event, 1)
 		Downloader.Listener(func(event *download.Event) {
 			switch event.Key {
+			case download.EventKeyStart:
+				started <- event
+			case download.EventKeyPause:
+				paused <- event
 			case download.EventKeyFinally:
-				wg.Done()
+				finished <- event
 			}
 		})
 
 		taskId := httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", createReq)
+		waitFor := func(events <-chan *download.Event, key download.EventKey) *download.Event {
+			t.Helper()
+			select {
+			case event := <-events:
+				if event.Key != key || event.Task.ID != taskId || event.Err != nil {
+					t.Fatalf("unexpected lifecycle event: key=%s task=%s err=%v; want %s task=%s", event.Key, event.Task.ID, event.Err, key, taskId)
+				}
+				return event
+			case <-time.After(5 * time.Second):
+				t.Fatalf("missing %s for task %s: %s", key, taskId, test.ToJson(Downloader.GetTask(taskId)))
+				return nil
+			}
+		}
+		// Create publishes running before asynchronous enrollment/Resolve/Start.
+		// Exercise Pause only after this Task has actually started.
+		waitFor(started, download.EventKeyStart)
 		t1 := httpRequestCheckOk[*download.Task](http.MethodGet, "/api/v1/tasks/"+taskId, nil)
 		if t1.Status != base.DownloadStatusRunning {
 			t.Errorf("CreateTask() got = %v, want %v", t1.Status, base.DownloadStatusRunning)
 		}
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/"+taskId+"/pause", nil)
+		// The pause response publishes status first. Its event follows writer
+		// join and persistence, so elapsed time is not a completion signal.
+		waitFor(paused, download.EventKeyPause)
 		t2 := httpRequestCheckOk[*download.Task](http.MethodGet, "/api/v1/tasks/"+taskId, nil)
 		if t2.Status != base.DownloadStatusPause {
 			t.Errorf("PauseTask() got = %v, want %v", t2.Status, base.DownloadStatusPause)
 		}
-		time.Sleep(time.Millisecond * 100)
-		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/"+taskId+"/continue", nil)
+
+		code, result := httpRequest[any](http.MethodPut, "/api/v1/tasks/"+taskId+"/continue", nil)
+		if code != int(model.CodeOk) {
+			t.Fatalf("ContinueTask() response=%s task=%s", test.ToJson(result), test.ToJson(Downloader.GetTask(taskId)))
+		}
+		waitFor(started, download.EventKeyStart)
 		t3 := httpRequestCheckOk[*download.Task](http.MethodGet, "/api/v1/tasks/"+taskId, nil)
 		if t3.Status != base.DownloadStatusRunning {
 			t.Errorf("ContinueTask() got = %v, want %v", t3.Status, base.DownloadStatusRunning)
 		}
 
-		wg.Wait()
+		terminal := waitFor(finished, download.EventKeyFinally)
+		if terminal.Task.Status != base.DownloadStatusDone {
+			t.Fatalf("terminal task=%s", test.ToJson(terminal.Task))
+		}
 		want := test.FileMd5(test.BuildFile)
 		got := test.FileMd5(test.DownloadFile)
 		if !reflect.DeepEqual(got, want) {
