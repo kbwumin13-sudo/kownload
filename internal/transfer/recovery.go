@@ -37,6 +37,13 @@ type RecoveryLease struct {
 	Token      RecoveryToken
 	Round      uint64
 	Owner      RecoveryController
+	// ActionVersion is a Core-owned in-process execution marker, never a REST
+	// or persisted capability. Zero preserves legacy transport-only behavior.
+	ActionVersion int
+	// InitialMembers restricts a fresh deferral continuation's next run to its
+	// frozen workset. Nil means the normally funded bounded initial workset.
+	InitialMembers []string
+	Context        context.Context // immutable parent run context for shared wave coordination
 }
 
 func (l *RecoveryLease) Check() error {
@@ -45,6 +52,14 @@ func (l *RecoveryLease) Check() error {
 	}
 	if l.Owner == nil {
 		return ErrRecoveryUnavailable
+	}
+	if l.ActionVersion != 0 {
+		if l.ActionVersion != 4 {
+			return ErrRecoveryHeld
+		}
+		if _, ok := l.Owner.(RecoveryActionController); !ok {
+			return ErrRecoveryHeld
+		}
 	}
 	return l.Owner.CheckRecovery(l.Token)
 }

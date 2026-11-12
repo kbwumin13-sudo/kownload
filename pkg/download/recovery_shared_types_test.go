@@ -157,7 +157,7 @@ func TestSharedRecoveryV4TripletVariants(t *testing.T) {
 		})
 	}
 }
-func TestSharedRecoveryV4G0KeepsCurrentCheckpointAndRuntimeHeld(t *testing.T) {
+func TestSharedRecoveryV4G0ReadKeepsCurrentCheckpointWithoutPermission(t *testing.T) {
 	store := NewMemStorage()
 	defer store.Close()
 	task, owner := recoveryFixtureStore(t, store, t.TempDir())
@@ -202,8 +202,8 @@ func TestSharedRecoveryV4G0KeepsCurrentCheckpointAndRuntimeHeld(t *testing.T) {
 	if expected.Token.Generation != 0 || !expected.CheckpointPresent || expected.CheckpointHash == "" {
 		t.Fatal("lost G0/checkpoint coordinate")
 	}
-	// Handwritten declared rows test the deliberately UNACTIVATED runtime reader.
-	// Actual upgrade+known/no-RAM begin is an integration test for the later kernel.
+	// Handwritten rows cover only strict read semantics, never installation or IO.
+	// Actual G0 upgrade/begin with original/no RAM is tested through real new M.
 	if err = store.UpdateAtomic(func(tx StorageTransaction) error {
 		if e := tx.Put(bucketTask, task.ID, task); e != nil {
 			return e
@@ -215,8 +215,12 @@ func TestSharedRecoveryV4G0KeepsCurrentCheckpointAndRuntimeHeld(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = readRecovery(store, task.ID); !errors.Is(err, transfer.ErrRecoveryHeld) {
-		t.Fatal("unactivated runtime accepted v4", err)
+	priorActive, priorInitial, priorContinuation := owner.active.Load(), owner.sharedInitialEligible.Load(), owner.sharedContinuation.Load()
+	if owned, read, readErr := readRecovery(store, task.ID); readErr != nil || owned.Recovery == nil || owned.Recovery.Version != 4 || !reflect.DeepEqual(read, record) {
+		t.Fatal("strict v4 read lost legal G0", readErr)
+	}
+	if owner.active.Load() != priorActive || owner.sharedContinuation.Load() != priorContinuation || owner.sharedInitialEligible.Load() != priorInitial {
+		t.Fatal("reading a declaration changed existing process qualification")
 	}
 	after := readCheckpoint()
 	if !reflect.DeepEqual(before, after) {

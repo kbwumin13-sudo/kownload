@@ -211,6 +211,18 @@ func (f *Fetcher) deferIfCooling() bool {
 	if until.IsZero() || !f.shouldDefer(time.Until(until)) {
 		return false
 	}
+	if handled, err := f.sharedRateLimited(f.recoveryContext(f.boundRunContext()), "worker/0", until, 0); handled {
+		if err != nil {
+			if _, deferred := transfer.AsDeferred(err); !deferred {
+				f.policyFailure.CompareAndSwap(nil, &credentialFailure{err: err})
+				if f.cancel != nil {
+					f.cancel()
+				}
+			}
+			return true
+		}
+		return false
+	}
 	f.deferRun(&transfer.DeferredError{Until: until})
 	return true
 }

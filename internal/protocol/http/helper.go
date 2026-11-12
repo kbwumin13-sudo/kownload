@@ -239,6 +239,10 @@ func isRedirectExpiredError(err error) bool {
 // tryFallbackToOriginalURL attempts to make a request using the original URL
 // when the redirect URL has expired. Returns the response if successful.
 func (f *Fetcher) tryFallbackToOriginalURL(ctx context.Context, client *http.Client, rangeStart, rangeEnd int64) (*http.Response, error) {
+	if lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(ctx)); lease != nil && lease.ActionVersion == 4 {
+		return nil, transfer.ErrRecoveryWork
+	}
+
 	// A cached redirect does not authorize replaying a non-idempotent source
 	// request. Request metadata has no explicit replay proof.
 	if !originalRequestReplaySafe(f.meta.Req) {
@@ -310,6 +314,7 @@ func (f *Fetcher) buildClientWithTimeout(timeout time.Duration) *http.Client {
 			TLSHandshakeTimeout: timeout,
 		}
 	}
+	roundTripper = &recoveryGuardTransport{transport: roundTripper, fetcher: f}
 	roundTripper = &policyTransport{transport: roundTripper, policy: f.requestPolicy, responsePolicy: f.responsePolicy,
 		guard: outboundCredentialGuard(f.meta.Req.URL, f.targetCredentials, f.cookieJar)}
 

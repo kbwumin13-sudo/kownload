@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/netdisk/mailru"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 )
@@ -63,6 +64,10 @@ func (f *Fetcher) publicSourceSnapshot() *mailru.Source {
 // result. A refusal beyond that keeps its status, so that a run whose link
 // cannot be renewed still ends with status=403.
 func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) error {
+	if lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(ctx)); lease != nil && lease.ActionVersion == 4 {
+		return transfer.ErrRecoveryWork
+	}
+
 	f.publicMu.Lock()
 	defer f.publicMu.Unlock()
 	if ctx.Err() != nil {
@@ -95,7 +100,7 @@ func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) erro
 	f.publicRefreshedAt = time.Now()
 	client := f.buildClient()
 	if policy, ok := client.Transport.(*policyTransport); ok {
-		client.Transport = &recoveryGuardTransport{transport: policy.transport}
+		client.Transport = &recoveryGuardTransport{transport: policy.transport, fetcher: f}
 	}
 	client.Timeout = 25 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)

@@ -38,6 +38,13 @@ func (d *Downloader) checkTaskRecovery(task *Task) error {
 	if ref == nil || !supportedRecoveryVersion(ref.Version) {
 		return transfer.ErrRecoveryHeld
 	}
+	if ref.Version == recoverySharedVersion {
+		identity, e := d.DatasetIdentity()
+		if e != nil {
+			return e
+		}
+		return withDatasetReadView(d.storage, identity.DatasetID, func(reader datasetReader) error { _, _, _, e := readSharedRecovery(reader, task.ID); return e })
+	}
 	_, _, err = readRecovery(d.storage, task.ID)
 	return err
 }

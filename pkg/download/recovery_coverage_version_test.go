@@ -58,7 +58,7 @@ func TestRecoveryCoverageStrictVersionVariants(t *testing.T) {
 			v.SourceRevision = 2
 			r.LastExplicitRetry = &v
 		}, false},
-		{"unknown-version", 4, func(r *recoveryRecord) { r.Coverage = &coverage }, false},
+		{"unknown-version", 5, func(r *recoveryRecord) { r.Coverage = &coverage }, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

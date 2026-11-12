@@ -54,6 +54,7 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 			var once sync.Once
 			release := func() { once.Do(func() { close(gate) }) }
 			var requests atomic.Int32
+			var bodyWritten atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				w.Header().Set("ETag", `"new-m-identity"`)
@@ -62,7 +63,8 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 				w.(http.Flusher).Flush()
 				select {
 				case <-gate:
-					w.Write(payload)
+					n, _ := w.Write(payload)
+					bodyWritten.Add(int64(n))
 				case <-r.Context().Done():
 				}
 			}))
@@ -96,14 +98,27 @@ func TestCoverageRuntimeNewMInstallBeforeFirstTargetByte(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("Start not reached after install")
 			}
-			record := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Version == 3 })
+			record := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Version == recoverySharedVersion })
 			if record.Coverage == nil || len(record.Coverage.DurableRanges) != 0 || len(record.Coverage.SettledRanges) != 0 || record.Coverage.SettlementSequence != 0 {
 				t.Fatal("first baseline was not empty")
 			}
 			task := d.GetTask(id)
 			info, err := os.Stat(task.Meta.SingleFilepath())
-			if err != nil || info.Size() != 0 {
-				t.Fatal("target bytes preceded v3 ACK", err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Touch may preallocate the declared size before the asynchronous
+			// single-stream worker truncates it. Neither zero-filled allocation
+			// nor file length is evidence that response payload was written.
+			if info.Size() != 0 && info.Size() != int64(len(payload)) {
+				t.Fatalf("unexpected initial allocation size: %d", info.Size())
+			}
+			initial, err := os.ReadFile(task.Meta.SingleFilepath())
+			if err != nil || len(initial) > len(payload) || !bytes.Equal(initial, make([]byte, len(initial))) {
+				t.Fatal("target contains payload before body gate", err)
+			}
+			if bodyWritten.Load() != 0 || task.Progress == nil || task.Progress.Downloaded != 0 {
+				t.Fatal("source body/progress preceded body gate")
 			}
 			release()
 			waitStatus(t, d, id, base.DownloadStatusDone, 5*time.Second)
@@ -196,7 +211,7 @@ func TestCoverageRuntimeRepeatedPrefixCannotEarnTwice(t *testing.T) {
 				t.Fatal(err)
 			}
 			first := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool {
-				return r.Version == 3 && r.Coverage != nil && r.Coverage.SettlementSequence == 1
+				return r.Version == recoverySharedVersion && r.Coverage != nil && r.Coverage.SettlementSequence == 1
 			})
 			waitStatus(t, d, id, base.DownloadStatusError, 5*time.Second)
 			before := d.GetTask(id)
@@ -349,7 +364,7 @@ func (tx coverageRuntimeAckTx) Put(bucket, key string, value any) error {
 		if err = decodeStoredJSON(raw, &r); err != nil {
 			return err
 		}
-		if r.Version == 3 && r.Coverage != nil && ((tx.mode == "install" && r.Coverage.SettlementSequence == 0) || (tx.mode == "earned" && r.Coverage.SettlementSequence > 0)) {
+		if r.Version == recoverySharedVersion && r.Coverage != nil && ((tx.mode == "install" && r.Coverage.SettlementSequence == 0) || (tx.mode == "earned" && r.Coverage.SettlementSequence > 0)) {
 			*tx.matched = true
 		}
 	}
@@ -432,10 +447,10 @@ func TestCoverageRuntimeUnknownInstallACKNeverStartsTarget(t *testing.T) {
 			select {
 			case <-fault.committed:
 			case <-time.After(3 * time.Second):
-				t.Fatal("actual v3 transaction not committed")
+				t.Fatal("actual v4 transaction not committed")
 			}
 			var committed recoveryRecord
-			if ok, err := d.storage.Get(bucketTaskRecovery, id, &committed); err != nil || !ok || committed.Version != 3 {
+			if ok, err := d.storage.Get(bucketTaskRecovery, id, &committed); err != nil || !ok || committed.Version != recoverySharedVersion {
 				t.Fatal("fault is not after real commit", err)
 			}
 			if started.Load() != 0 {
@@ -453,13 +468,13 @@ func TestCoverageRuntimeUnknownInstallACKNeverStartsTarget(t *testing.T) {
 			if install != nil || settlement != nil || started.Load() != 0 || hits.Load() != 1 {
 				t.Fatal("unknown install ACK produced authority/IO")
 			}
-			final := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Version == 3 })
+			final := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Version == recoverySharedVersion })
 			if final.Coverage == nil || final.Coverage.SettlementSequence != 0 {
-				t.Fatal("unknown v3 downgraded")
+				t.Fatal("unknown v4 downgraded")
 			}
 			var stored Task
 			d.storage.Get(bucketTask, id, &stored)
-			if stored.Recovery == nil || stored.Recovery.Version != 3 || stored.Status != base.DownloadStatusError {
+			if stored.Recovery == nil || stored.Recovery.Version != recoverySharedVersion || stored.Status != base.DownloadStatusError {
 				t.Fatal("unknown install did not reconcile managed error")
 			}
 		})
@@ -564,7 +579,7 @@ func coverageRuntimeEarnedACK(t *testing.T, changeDataset bool) {
 	d = nil
 	d = operationDownloader(t, NewBoltStorage(filepath.Join(dir, "db")), dir)
 	reloaded := d.getTask(id)
-	if reloaded == nil || reloaded.Recovery == nil || reloaded.Recovery.Version != 3 {
+	if reloaded == nil || reloaded.Recovery == nil || reloaded.Recovery.Version != recoverySharedVersion {
 		t.Fatal("lost managed Task on real reopen")
 	}
 	if err = d.Continue(&TaskFilter{IDs: []string{id}}); err != nil {
@@ -611,7 +626,7 @@ func TestCoverageRuntimeWriteCompatibilityDatabase(t *testing.T) {
 	}
 	id := result.TaskIDs[0]
 	record := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool {
-		return r.Version == 3 && r.Coverage != nil && r.Coverage.SettlementSequence == 1
+		return r.Version == recoverySharedVersion && r.Coverage != nil && r.Coverage.SettlementSequence == 1
 	})
 	waitStatus(t, d, id, base.DownloadStatusError, 5*time.Second)
 	d.operationMu.Lock()

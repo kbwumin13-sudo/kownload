@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -72,7 +73,9 @@ type recoveryRecord struct {
 	Coverage              *transfer.HTTPCoverageState `json:"coverage,omitempty"`
 }
 
-func supportedRecoveryVersion(version int) bool { return version == 1 || version == 2 || version == 3 }
+func supportedRecoveryVersion(version int) bool {
+	return version == 1 || version == 2 || version == 3 || version == recoverySharedVersion
+}
 
 // The projection is shared with HTTP's capture/send checks. Pure owner tests
 // use a synthetic direct/empty-UA context; Core always supplies a captured D.
@@ -91,6 +94,10 @@ func recoverySourceHash(req *base.Request, defaults ...string) (string, error) {
 }
 func validRecoveryHash(hash string) bool { return transfer.ValidExecutionHash(hash) }
 func (r *recoveryRecord) valid(id string) bool {
+	if r.Version == recoverySharedVersion {
+		return r.validShared(id)
+	}
+
 	if !supportedRecoveryVersion(r.Version) || r.TaskID != id || r.NotBefore != "" || r.Episode == "" || r.SourceRevision == 0 || !validRecoveryHash(r.SourceHash) || !validRecoveryHash(r.ExecutionDefaultsHash) || r.TotalUsed < 0 || r.TotalUsed > recoveryMaxTotal || r.TransportUsed < 0 || r.TransportUsed > recoveryMaxTransport || r.RefreshUsed != 0 || r.DeferralUsed != 0 || len(r.Actions) > recoveryMaxTotal {
 		return false
 	}
@@ -193,6 +200,7 @@ func hasRecoveryMember(m []string, w string) bool {
 type taskRecoveryOwner struct {
 	mu                              sync.Mutex
 	store                           AtomicStorage
+	ownedStore                      Storage // immutable same-domain read source; write decorators do not replace snapshot capability
 	taskID                          string
 	record                          recoveryRecord
 	active                          atomic.Bool
@@ -206,6 +214,12 @@ type taskRecoveryOwner struct {
 	coverageInstallAuthorization    atomic.Pointer[transfer.RecoveryToken]
 	coverageSettlementAuthorization atomic.Pointer[coverageSettlementAuthorization]
 	coverageObservationHeld         atomic.Bool
+	sharedDataset                   string // mu; immutable dataset binding after inactive preparation
+	sharedInitialEligible           atomic.Bool
+	sharedContinuation              atomic.Pointer[sharedRecoveryContinuation]
+	sharedActionPermit              *transfer.RecoveryActionPermit // mu; one waiting transition per confirmed debit
+	sharedInitialMembers            []string                       // mu; frozen continuation workset, not durable authority
+	sharedAdmission                 sharedWaveAdmission            // mu; bound once to the owning Core lifecycle
 }
 
 type recoveryReader interface {
@@ -228,7 +242,10 @@ func readRecovery(tx recoveryReader, id string) (Task, recoveryRecord, error) {
 	if e != nil {
 		return task, record, transfer.ErrRecoveryUnavailable
 	}
-	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || task.Protocol != "http" || task.Recovery == nil || !supportedRecoveryVersion(task.Recovery.Version) || task.Recovery.Version != record.Version || required.Version != record.Version || required.Capability != recoveryCapability || !record.valid(id) {
+	if !t || !r || !q || task.Meta == nil || task.Meta.Req == nil || task.Protocol != "http" || task.Recovery == nil || !supportedRecoveryVersion(task.Recovery.Version) || task.Recovery.Version != record.Version || required.Version != record.Version || !record.valid(id) {
+		return task, record, transfer.ErrRecoveryHeld
+	}
+	if validateRecoveryTriplet(&task, record, required) != nil {
 		return task, record, transfer.ErrRecoveryHeld
 	}
 	hash, e := recoverySourceHash(task.Meta.Req, record.ExecutionDefaultsHash)
@@ -307,12 +324,15 @@ func newTaskRecoveryOwner(store AtomicStorage, task *Task, defaults ...string) (
 	if e != nil {
 		return nil, recoveryStorageError(e)
 	}
-	owner := &taskRecoveryOwner{store: store, taskID: task.ID, record: record, permits: map[uint64]map[string]*transfer.RecoveryPermit{}}
+	owner := &taskRecoveryOwner{store: store, ownedStore: store, taskID: task.ID, record: record, permits: map[uint64]map[string]*transfer.RecoveryPermit{}}
 	owner.coverageNewEnrollment.Store(freshEnrollment)
+	owner.sharedInitialEligible.Store(freshEnrollment)
 	return owner, nil
 }
 func (o *taskRecoveryOwner) invalidate() {
 	o.active.Store(false)
+	o.sharedInitialEligible.Store(false)
+	o.sharedContinuation.Store(nil)
 	o.retryAuthorization.Store(nil)
 	o.coverageNewEnrollment.Store(false)
 	o.coverageInstallAuthorization.Store(nil)
@@ -344,6 +364,9 @@ func (o *taskRecoveryOwner) CheckRecovery(token transfer.RecoveryToken) error {
 	if !o.active.Load() || token != o.token || (o.runContext != nil && o.runContext.Err() != nil) || (o.closed != nil && o.closed.Load()) {
 		return transfer.ErrRecoveryStale
 	}
+	if o.record.Version == recoverySharedVersion && !o.verificationOnly {
+		return checkSharedRecoveryUntil(o.record, time.Now())
+	}
 	return nil
 }
 func appendRecoveryAction(r *recoveryRecord, generation uint64, members []string) error {
@@ -356,8 +379,16 @@ func appendRecoveryAction(r *recoveryRecord, generation uint64, members []string
 	r.Actions = append(r.Actions, recoveryAction{ID: r.NextAction, Kind: "transport", Generation: generation, SourceRevision: r.SourceRevision, Members: members, Finished: []string{}, State: "charged"})
 	return nil
 }
-func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string) (*transfer.RecoveryLease, error) {
+func (o *taskRecoveryOwner) begin(generation uint64, cleanCheckpoint string, contexts ...context.Context) (*transfer.RecoveryLease, error) {
 	o.mu.Lock()
+	if o.record.Version == recoverySharedVersion {
+		o.mu.Unlock()
+		if len(contexts) != 1 || contexts[0] == nil {
+			return nil, transfer.ErrRecoveryHeld
+		}
+		return o.beginShared(contexts[0], generation, cleanCheckpoint)
+	}
+	o.sharedInitialEligible.Store(false)
 	defer o.mu.Unlock()
 	o.active.Store(false)
 	o.runContext = nil
@@ -448,6 +479,10 @@ func recoveryStorageError(err error) error {
 // the original record for later query/restart; even a visible charged action
 // stays consumed and this generation remains invalidated.
 func (o *taskRecoveryOwner) observeUnknownWrite(causes ...error) {
+	o.sharedInitialEligible.Store(false)
+	o.sharedContinuation.Store(nil)
+	o.sharedActionPermit = nil
+
 	o.coverageNewEnrollment.Store(false)
 	o.coverageInstallAuthorization.Store(nil)
 	o.coverageSettlementAuthorization.Store(nil)
@@ -496,8 +531,25 @@ func (o *taskRecoveryOwner) RetryRecovery(ctx context.Context, token transfer.Re
 	if seen != o.record.NextAction {
 		return nil, transfer.ErrRecoveryWork
 	}
+	var sharedExpected recoverySharedExpected
+	dataset := o.sharedDataset
+	if o.record.Version == recoverySharedVersion {
+		if err := checkSharedRecoveryUntil(o.record, time.Now()); err != nil {
+			return nil, err
+		}
+		_, captured, captureErr := captureSharedRecoveryExpected(o.sharedReadStore(), dataset, o.taskID)
+		if captureErr != nil {
+			return nil, captureErr
+		}
+		sharedExpected = captured
+	}
 	var committed recoveryRecord
 	err = o.store.UpdateAtomic(func(tx StorageTransaction) error {
+		if sharedExpected.Record.Version == recoverySharedVersion {
+			if _, _, _, err := sharedRecoveryCAS(tx, dataset, sharedExpected); err != nil {
+				return err
+			}
+		}
 		task, r, e := readRecovery(tx, o.taskID)
 		if e != nil {
 			return e
@@ -526,6 +578,11 @@ func (o *taskRecoveryOwner) RetryRecovery(ctx context.Context, token transfer.Re
 		return nil, transfer.ErrRecoveryStale
 	}
 	lease := &transfer.RecoveryLease{Token: token, Round: committed.NextAction, Owner: o, SourceHash: committed.SourceHash}
+	if committed.Version == recoverySharedVersion {
+		lease.ActionVersion = recoverySharedVersion
+		lease.Context = o.runContext
+	}
+
 	permits := map[string]*transfer.RecoveryPermit{}
 	for _, w := range members {
 		permits[w] = transfer.IssueRecoveryPermit(lease, committed.NextAction, w)
@@ -542,8 +599,22 @@ func (o *taskRecoveryOwner) FinishRecovery(ctx context.Context, token transfer.R
 	if !o.active.Load() || token != o.token || (o.runContext != nil && o.runContext.Err() != nil) || (o.closed != nil && o.closed.Load()) {
 		return transfer.ErrRecoveryStale
 	}
+	var sharedExpected recoverySharedExpected
+	dataset := o.sharedDataset
+	if o.record.Version == recoverySharedVersion {
+		_, captured, captureErr := captureSharedRecoveryExpected(o.sharedReadStore(), dataset, o.taskID)
+		if captureErr != nil {
+			return captureErr
+		}
+		sharedExpected = captured
+	}
 	var committed recoveryRecord
 	err := o.store.UpdateAtomic(func(tx StorageTransaction) error {
+		if sharedExpected.Record.Version == recoverySharedVersion {
+			if _, _, _, err := sharedRecoveryCAS(tx, dataset, sharedExpected); err != nil {
+				return err
+			}
+		}
 		_, r, e := readRecovery(tx, o.taskID)
 		if e != nil {
 			return e
@@ -552,6 +623,10 @@ func (o *taskRecoveryOwner) FinishRecovery(ctx context.Context, token transfer.R
 			return transfer.ErrRecoveryStale
 		}
 		action := &r.Actions[round-1]
+		if r.Version == recoverySharedVersion && action.Kind == string(recoveryDeferralAction) && action.State == "charged" {
+			return transfer.ErrRecoveryWork
+		}
+
 		if action.Generation != token.Generation || !hasRecoveryMember(action.Members, work) {
 			return transfer.ErrRecoveryWork
 		}
