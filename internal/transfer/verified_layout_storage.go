@@ -178,7 +178,25 @@ func (s *VerifiedLayoutStorage) Ready() error {
 	if s.closed || !s.active {
 		return ErrLayoutStorageHeld
 	}
+	if err := s.layoutLeaseAlive(); err != nil {
+		return err
+	}
 	return s.guard()
+}
+
+// This checks only the lease's in-memory lifecycle. Namespace/ACL verification
+// stays at the controlled anchored open; it must not run in torrent callbacks.
+func (s *VerifiedLayoutStorage) layoutLeaseAlive() error {
+	l := s.lease
+	if l == nil || l.root == nil {
+		return ErrVerifiedRootClosed
+	}
+	l.root.mu.Lock()
+	defer l.root.mu.Unlock()
+	if l.closed || l.root.closed {
+		return ErrVerifiedRootClosed
+	}
+	return nil
 }
 
 // Activate accepts only the exact owned identity value that Core has just
@@ -190,6 +208,9 @@ func (s *VerifiedLayoutStorage) Activate(ack VerifiedLayoutBinding) error {
 	if s.closed || !reflect.DeepEqual(s.binding, ack) {
 		return ErrLayoutStorageHeld
 	}
+	if err := s.layoutLeaseAlive(); err != nil {
+		return err
+	}
 	if err := s.guard(); err != nil {
 		return err
 	}
@@ -200,6 +221,9 @@ func (s *VerifiedLayoutStorage) Activate(ack VerifiedLayoutBinding) error {
 func (s *VerifiedLayoutStorage) check(index int) error {
 	if s.closed || !s.active || index < 0 || index >= len(s.files) {
 		return ErrLayoutStorageHeld
+	}
+	if err := s.layoutLeaseAlive(); err != nil {
+		return err
 	}
 	if err := s.guard(); err != nil {
 		return err
