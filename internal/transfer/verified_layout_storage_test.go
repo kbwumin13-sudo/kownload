@@ -141,4 +141,19 @@ func TestVerifiedLayoutStorageRejectsUnsafeTargets(t *testing.T) {
 	if string(data) != "old" {
 		t.Fatal("foreign contents changed")
 	}
+	layout, _ = pathpolicy.BuildLayoutV1(root, []pathpolicy.Member{{Index: 0, RelativePath: "lease-file"}})
+	s, binding, err = CreateVerifiedLayoutStorage(lease, layout, []int64{1}, guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.Activate(binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.WriteAt(0, []byte("x"), 0); n != 0 || !errors.Is(err, ErrVerifiedRootClosed) {
+		t.Fatal("closed lease still writes through retained fd")
+	}
 }
