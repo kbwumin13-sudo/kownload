@@ -43,7 +43,8 @@ type RecoveryLease struct {
 	// InitialMembers restricts a fresh deferral continuation's next run to its
 	// frozen workset. Nil means the normally funded bounded initial workset.
 	InitialMembers []string
-	Context        context.Context // immutable parent run context for shared wave coordination
+	Context        context.Context           // immutable parent run context for shared wave coordination
+	ParentContext  *ProtocolExecutionContext // actual frozen wrapper defaults; nil for direct HTTP
 }
 
 func (l *RecoveryLease) Check() error {
