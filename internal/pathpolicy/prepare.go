@@ -26,7 +26,13 @@ func PrepareSingleFile(in Input, cfg Config) (Preparation, error) {
 	if err != nil {
 		return Preparation{}, err
 	}
-	name := util.SafeFilename(norm.NFC.String(in.Name))
+	name := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune("/\\<>:\"|?*", r) {
+			return '_'
+		}
+		return r
+	}, norm.NFC.String(in.Name))
+	name = util.SafeFilename(name)
 	return prepareName(decision, name)
 }
 
