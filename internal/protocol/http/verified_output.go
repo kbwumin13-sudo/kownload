@@ -92,3 +92,26 @@ func (f *Fetcher) ReleaseVerifiedOutput() {
 		f.verifiedOutput = nil
 	}
 }
+
+// A complete restored checkpoint has no download loop to consume or Sync the
+// newly bound descriptor. Confirm that exact handle before signaling Done;
+// a previous run's Sync cannot cover this binding.
+func (f *Fetcher) syncCompletedLocalMCPOutput() error {
+	if !f.mcpOutputRequired.Load() {
+		return nil
+	}
+	f.fileMu.Lock()
+	if f.file != nil || f.verifiedOutput == nil {
+		f.fileMu.Unlock()
+		return ErrMCPOutputSync
+	}
+	file := f.verifiedOutput
+	f.file, f.verifiedOutput = file, nil
+	f.fileMu.Unlock()
+	err := f.syncMCPOutputBeforeClose()
+	f.fileMu.Lock()
+	_ = file.Close()
+	f.file = nil
+	f.fileMu.Unlock()
+	return err
+}

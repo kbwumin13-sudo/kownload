@@ -1021,6 +1021,10 @@ func (f *Fetcher) doStart() error {
 	verifyOverlap := false
 	if f.restored || f.linkPatched || state == statePaused || state == stateError {
 		if f.completedLocalCheckpoint() {
+			if err := f.syncCompletedLocalMCPOutput(); err != nil {
+				f.setState(stateError)
+				return err
+			}
 			f.setState(stateDone)
 			select {
 			case f.doneCh <- nil:
