@@ -1203,7 +1203,9 @@ func (d *Downloader) Delete(filter *TaskFilter, force bool) (err error) {
 		selected = d.getTasksByFilter(filter)
 	}
 	if force {
-		if err := d.checkPathForceDelete(selected); err != nil { return err }
+		if err := d.checkPathForceDelete(selected); err != nil {
+			return err
+		}
 		if err := d.checkCompletionForceDelete(selected); err != nil {
 			return err
 		}
@@ -1765,15 +1767,15 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 	if !committed {
 		return
 	}
-    if task.PathFreeze != nil && runLease != nil && runLease.Check() == nil && !d.closed.Load() {
-        if success,ok := f.(interface{PathFreezeSucceeded(context.Context) error});ok {
-            // Only this run's known published+Done winner reaches this hook.
-            // Query/reopen/unknown ACK cannot reconstruct it.
-            if e := success.PathFreezeSucceeded(runLease.Context);e!=nil {
-                d.Logger.Warn().Err(e).Msgf("post-completion cleanup failed, task id: %s",task.ID)
-            }
-        }
-    }
+	if task.PathFreeze != nil && runLease != nil && runLease.Check() == nil && !d.closed.Load() {
+		if success, ok := f.(interface{ PathFreezeSucceeded(context.Context) error }); ok {
+			// Only this run's known published+Done winner reaches this hook.
+			// Query/reopen/unknown ACK cannot reconstruct it.
+			if e := success.PathFreezeSucceeded(runLease.Context); e != nil {
+				d.Logger.Warn().Err(e).Msgf("post-completion cleanup failed, task id: %s", task.ID)
+			}
+		}
+	}
 	if task.PathFreeze != nil {
 		if task.Protocol == "bt" && task.Uploading {
 			_ = d.rebindPathUpload(task)
