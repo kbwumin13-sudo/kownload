@@ -373,6 +373,9 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		}
 	}
 	res := child.Meta().Res
+	if e.Provider != "baidu" && res.Hash == "" {
+		res.Hash = e.File.Hash
+	}
 	if e.File.Size > 0 && res.Size > 0 && e.File.Size != res.Size {
 		_ = child.Close()
 		return ctx, errors.New("下载响应与网盘文件大小不符")
@@ -408,7 +411,11 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		return ctx, err
 	}
 	f.child = child
-	f.meta.Req.Extra = e
+	if transfer.RecoveryLeaseFromContext(ctx) == nil {
+		// Interactive resolution may enrich its public file selection. A
+		// managed parent keeps the exact raw request frozen by Core.
+		f.meta.Req.Extra = e
+	}
 	f.meta.Res = clone(res)
 	f.resume = nil
 	f.refresh = false
@@ -610,6 +617,9 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 		return errors.New("下载文件不完整，临时网盘副本已保留")
 	}
 	digest := e.File.Hash
+	if digest == "" {
+		digest = f.meta.Res.Hash
+	}
 	if e.Provider == "baidu" {
 		if responseDigest, ok := storedResponseMD5(f.meta.Res.Hash); ok {
 			digest = "md5:" + responseDigest
@@ -623,10 +633,10 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 	parts := strings.SplitN(digest, ":", 2)
 	if len(parts) != 2 {
 		algorithm := ""
-		if (e.Provider == "baidu" || e.Provider == "quark" || e.Provider == "uc" || e.Provider == "tcloud") && len(e.File.Hash) == 32 {
+		if (e.Provider == "baidu" || e.Provider == "quark" || e.Provider == "uc" || e.Provider == "tcloud") && len(digest) == 32 {
 			algorithm = "md5"
 		}
-		if e.Provider == "aliyun" && len(e.File.Hash) == 40 {
+		if e.Provider == "aliyun" && len(digest) == 40 {
 			algorithm = "sha1"
 		}
 		if algorithm == "" {
