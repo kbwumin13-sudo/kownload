@@ -128,43 +128,20 @@ func (f *Fetcher) Start() error {
 	if err != nil {
 		return err
 	}
-	if f.manager.managedPathHash(link.Hash) {
-		return transfer.ErrLayoutStorageHeld
-	}
-
 	targetPath := f.meta.SingleFilepath()
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return err
-	}
-
-	handle := client.FindTransfer(link.Hash)
-	if handle.IsValid() {
-		f.handle = handle
-		if handle.IsPaused() {
-			if err := client.ResumeTransfer(handle.GetHash()); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	atp := goed2k.AddTransferParams{
 		Hash:       link.Hash,
 		CreateTime: time.Now().UnixMilli(),
 		Size:       link.NumberValue,
 		FilePath:   targetPath,
 	}
-	handle, err = client.AddTransfer(atp)
-	if err != nil {
-		return err
+	handle, err := f.manager.startLegacyTransfer(client, atp, func() error {
+		return os.MkdirAll(filepath.Dir(targetPath), 0o755)
+	})
+	if handle.IsValid() {
+		f.handle = handle
 	}
-	f.handle = handle
-	if handle.IsValid() && handle.IsPaused() {
-		if err := client.ResumeTransfer(handle.GetHash()); err != nil {
-			return err
-		}
-	}
-	return nil
+	return err
 }
 
 func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {

@@ -293,6 +293,43 @@ func (h *pathFileHandler) Close() error {
 }
 func (h *pathFileHandler) DeleteFile() error { return transfer.ErrLayoutStorageHeld }
 
+// startLegacyTransfer holds the same ownership barrier as RegisterPathFreeze
+// through native insertion. prepare is the legacy directory preparation step;
+// it must not reenter the manager. Native Save callbacks use only state-store
+// locks, so Add/Resume cannot call back into this barrier.
+func (fm *FetcherManager) startLegacyTransfer(client *goed2k.Client, atp goed2k.AddTransferParams, prepare func() error) (goed2k.TransferHandle, error) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if client == nil || fm.client != client {
+		return goed2k.TransferHandle{}, transfer.ErrLayoutStorageHeld
+	}
+	store := fm.getStateStoreLocked()
+	store.pathMu.Lock()
+	_, known := store.pathRecords[atp.Hash]
+	managed := known || store.pathOwners[atp.Hash] != ""
+	store.pathMu.Unlock()
+	if managed {
+		return goed2k.TransferHandle{}, transfer.ErrLayoutStorageHeld
+	}
+	if err := prepare(); err != nil {
+		return goed2k.TransferHandle{}, err
+	}
+	handle := client.FindTransfer(atp.Hash)
+	if !handle.IsValid() {
+		var err error
+		handle, err = client.AddTransfer(atp)
+		if err != nil {
+			return goed2k.TransferHandle{}, err
+		}
+	}
+	if handle.IsValid() && handle.IsPaused() {
+		if err := client.ResumeTransfer(atp.Hash); err != nil {
+			return handle, err
+		}
+	}
+	return handle, nil
+}
+
 func (f *Fetcher) startPathTransfer() error {
 	f.pathMu.Lock()
 	handler, owner := f.pathHandler, f.pathOwner
@@ -320,11 +357,26 @@ func (f *Fetcher) startPathTransfer() error {
 	if err != nil {
 		return err
 	}
+	// Serialize submission with this handler's Quiesce and with every legacy
+	// check/add and D6 registration on the shared native client.
+	f.pathMu.Lock()
+	defer f.pathMu.Unlock()
+	handler.mu.Lock()
+	held := handler != f.pathHandler || handler.closed || handler.stopping || handler.submitted
+	handler.mu.Unlock()
+	if held {
+		return transfer.ErrLayoutStorageHeld
+	}
+	f.manager.mu.Lock()
+	defer f.manager.mu.Unlock()
+	if f.manager.client != client {
+		return transfer.ErrLayoutStorageHeld
+	}
 	if client.FindTransfer(link.Hash).IsValid() {
 		return transfer.ErrLayoutStorageHeld
 	}
 	atp := goed2k.AddTransferParams{Hash: link.Hash, CreateTime: time.Now().UnixMilli(), Size: link.NumberValue, FilePath: handler.path, Handler: handler, Paused: true}
-	store := f.manager.pathStateStore()
+	store := f.manager.getStateStoreLocked()
 	if record, ok, err := store.pathResume(owner, link.Hash); err != nil {
 		return err
 	} else if ok {
@@ -350,14 +402,21 @@ func (f *Fetcher) startPathTransfer() error {
 // and must never be interpreted as permission to release the lease/new writer.
 func (f *Fetcher) QuiescePathFreeze(ctx context.Context) error {
 	f.pathMu.Lock()
-	handler, owner := f.pathHandler, f.pathOwner
-	f.pathMu.Unlock()
+	handler, owner, submittedHandle := f.pathHandler, f.pathOwner, f.handle
 	if handler == nil {
+		f.pathMu.Unlock()
 		return nil
 	}
 	handler.mu.Lock()
 	handler.stopping = true
+	submitted := handler.submitted
 	handler.mu.Unlock()
+	f.pathMu.Unlock()
+	// A rejected/unsubmitted handler never owns a native hash. In particular,
+	// do not pause/remove a legacy winner or wait for its unrelated Close.
+	if !submitted {
+		return handler.Close()
+	}
 	if f.manager == nil {
 		return transfer.ErrLayoutStorageHeld
 	}
@@ -368,6 +427,9 @@ func (f *Fetcher) QuiescePathFreeze(ctx context.Context) error {
 			return err
 		}
 		handle := client.FindTransfer(hash)
+		if handle.IsValid() && handle != submittedHandle {
+			return transfer.ErrLayoutStorageHeld
+		}
 		if handle.IsValid() {
 			if err = client.PauseTransfer(hash); err != nil {
 				return err
@@ -377,25 +439,6 @@ func (f *Fetcher) QuiescePathFreeze(ctx context.Context) error {
 				return err
 			}
 			if err = client.RemoveTransfer(hash, false); err != nil {
-				return err
-			}
-		} else {
-			// No transfer was submitted, hence no native async writer exists.
-			handler.mu.Lock()
-			submitted := handler.submitted
-			handler.mu.Unlock()
-			if !submitted {
-				if err = handler.Close(); err != nil {
-					return err
-				}
-			}
-		}
-	} else {
-		handler.mu.Lock()
-		submitted := handler.submitted
-		handler.mu.Unlock()
-		if !submitted {
-			if err := handler.Close(); err != nil {
 				return err
 			}
 		}
