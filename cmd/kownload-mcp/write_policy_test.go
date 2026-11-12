@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GopeedLab/gopeed/pkg/mcpauthority/policyfile"
 	"github.com/GopeedLab/gopeed/pkg/mcpwritepolicy"
 	"golang.org/x/sys/unix"
 )
@@ -172,5 +173,37 @@ func TestWritePolicyCompatibility(t *testing.T) {
 	}
 	if p, err := parseWritePolicy([]byte(`{"version":1,"version":1}`)); p != nil || err != errWritePolicy {
 		t.Fatal("wrapper changed invalid input")
+	}
+}
+
+func TestWritePolicyFileSharedLoader(t *testing.T) {
+	if errWritePolicy != policyfile.ErrInvalidPolicyFile {
+		t.Fatal("loader error identity changed")
+	}
+	path := filepath.Join(privateTokenDir(t), "policy.json")
+	if err := os.WriteFile(path, policyBytes(t, policyFixture()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := policyfile.LoadPolicyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := readWritePolicyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := shared.SnapshotV1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := wrapped.value.SnapshotV1()
+	if err != nil || !bytes.Equal(policyBytes(t, a), policyBytes(t, b)) {
+		t.Fatal("wrapper changes shared policy")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := readWritePolicyFile(path); value != nil || err != policyfile.ErrInvalidPolicyFile {
+		t.Fatal("wrapper changed refusal")
 	}
 }
