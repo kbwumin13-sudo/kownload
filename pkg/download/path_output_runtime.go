@@ -45,6 +45,9 @@ func (r *pathOutputRuntime) close() error {
 	return err
 }
 func (d *Downloader) releasePathOutput(task *Task) error {
+	if f, ok := task.fetcher.(*httpProtocol.Fetcher); ok {
+		f.ReleaseVerifiedOutput()
+	}
 	value, ok := d.pathOutputs.LoadAndDelete(task.ID)
 	if !ok {
 		return nil
