@@ -36,6 +36,7 @@ class MediaPathSubmission {
     final body = _json(response.data);
     if (response.statusCode != 200 ||
         body is! Map ||
+        body['code'] is! int ||
         body['code'] != 0 ||
         body['data'] is! Map) throw StateError('submission_unknown');
     return body['data'] as Map;
@@ -73,7 +74,7 @@ class MediaPathSubmission {
   Future<TaskBatchReceipt> _query(
       api.ActiveApiSnapshot snapshot, String dataset, String id) async {
     final response = await api.scopedTaskBatchRequest(snapshot, 'GET',
-        '/api/v1/datasets/$dataset/media-path/v1/operations/$id');
+        '/api/v1/datasets/$dataset/media-path/v1/operations/${Uri.encodeComponent(id)}');
     if (!snapshot.isCurrent) throw StateError('submission_unknown');
     return _receipt(_data(response), dataset, id);
   }
