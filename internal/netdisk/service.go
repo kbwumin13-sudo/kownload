@@ -915,14 +915,18 @@ func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *
 	var taskSession string
 	var taskProvider, taskAccount string
 	if transfer.RecoveryLeaseFromContext(ctx) != nil {
-		if err := checkRecoveryContext(ctx); err != nil { return err }
-		if req == nil { return Fail("login_required", "请重新同步原网盘账号") }
-		raw,err := json.Marshal(req.Extra)
-		var extra model.ReqExtra
-		if err != nil || json.Unmarshal(raw,&extra) != nil || extra.SessionID == "" {
+		if err := checkRecoveryContext(ctx); err != nil {
+			return err
+		}
+		if req == nil {
 			return Fail("login_required", "请重新同步原网盘账号")
 		}
-		taskSession,taskProvider,taskAccount = extra.SessionID,extra.Provider,extra.AccountID
+		raw, err := json.Marshal(req.Extra)
+		var extra model.ReqExtra
+		if err != nil || json.Unmarshal(raw, &extra) != nil || extra.SessionID == "" {
+			return Fail("login_required", "请重新同步原网盘账号")
+		}
+		taskSession, taskProvider, taskAccount = extra.SessionID, extra.Provider, extra.AccountID
 	}
 	s.mu.Lock()
 	r := clone(s.transfers[batch])

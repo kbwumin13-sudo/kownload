@@ -290,10 +290,10 @@ func snapshotChild(child *httpfetch.Fetcher) (*saved, error) {
 }
 
 type netdiskRefreshPlan struct {
-	lease *transfer.RecoveryLease
-	owner transfer.RecoveryParentController
-	action uint64
-	seal *netdiskSourceSeal
+	lease      *transfer.RecoveryLease
+	owner      transfer.RecoveryParentController
+	action     uint64
+	seal       *netdiskSourceSeal
 	checkpoint *saved
 }
 
@@ -301,9 +301,9 @@ type netdiskRefreshPlan struct {
 // It carries no account digest: the current provider contract cannot prove a
 // stable UID/object/validator chain, so identity remains unprovable.
 type netdiskSourceSeal struct {
-	f *Fetcher
+	f         *Fetcher
 	operation uint64
-	lease *transfer.RecoveryLease
+	lease     *transfer.RecoveryLease
 }
 
 func (seal *netdiskSourceSeal) Check(ctx context.Context) error {

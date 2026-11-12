@@ -75,7 +75,7 @@ func (transport recoveryAPITransport) RoundTrip(request *http.Request) (*http.Re
 
 type recoveryAPIBody struct {
 	io.ReadCloser
-	ctx context.Context
+	ctx   context.Context
 	scope *transfer.RecoveryWorkScope
 }
 

@@ -110,28 +110,28 @@ type fetcherView struct {
 }
 
 type Fetcher struct {
-	recovery atomic.Pointer[transfer.RecoveryLease]
+	recovery      atomic.Pointer[transfer.RecoveryLease]
 	runController atomic.Pointer[controller.Controller]
-	viewMu     sync.RWMutex
-	view       fetcherView
-	mu         sync.Mutex
-	cancelMu   sync.Mutex
-	service    *cloud.Service
-	ctl        *controller.Controller
-	meta       *fetcher.FetcherMeta
-	child      *httpfetch.Fetcher
-	resume     *saved
-	downloaded int64
-	refresh    bool
-	operation  uint64 // mu; rejects results from a cancelled/replaced operation
-	resolving  bool
-	resolveDone chan struct{}
-	running    bool
-	closed     bool
-	cancel     context.CancelFunc
-	done       chan error
-	runDone    chan struct{}
-	phase      string
+	viewMu        sync.RWMutex
+	view          fetcherView
+	mu            sync.Mutex
+	cancelMu      sync.Mutex
+	service       *cloud.Service
+	ctl           *controller.Controller
+	meta          *fetcher.FetcherMeta
+	child         *httpfetch.Fetcher
+	resume        *saved
+	downloaded    int64
+	refresh       bool
+	operation     uint64 // mu; rejects results from a cancelled/replaced operation
+	resolving     bool
+	resolveDone   chan struct{}
+	running       bool
+	closed        bool
+	cancel        context.CancelFunc
+	done          chan error
+	runDone       chan struct{}
+	phase         string
 	// Time the latest link resolution took (取链), for Stats.
 	linkTime time.Duration
 }
