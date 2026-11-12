@@ -77,6 +77,18 @@ func (s *TaskPathFreeze) UnmarshalJSON(raw []byte) error {
 	return mcpWriteDecode(raw, (*value)(s))
 }
 
+func pathRequestHash(r HTTPPathCreateRequest) string {
+	variant, ok := pathVariantForCaps(r.RequiredCapabilities)
+	if !ok {
+		return ""
+	}
+	return mcpWriteHash(struct {
+		Version   int                   `json:"version"`
+		Namespace string                `json:"namespace"`
+		Kind      string                `json:"kind"`
+		Request   HTTPPathCreateRequest `json:"request"`
+	}{2, batchOperationNamespace, variant.Kind, r})
+}
 func pathItems(r HTTPPathCreateRequest) []*base.CreateTaskBatchItem {
 	if r.Request != nil {
 		return []*base.CreateTaskBatchItem{r.Request}
@@ -146,6 +158,9 @@ func pathFrozenValid(s TaskPathFreeze) bool {
 		if err != nil || hash != s.LayoutHash || !validRecoveryHash(s.TreeLayoutHash) {
 			return false
 		}
+		if s.RequiredCapability == "media-path-freeze/v1" && s.WorkDirectory == "" {
+			return false
+		}
 		if s.WorkDirectory != "" && (s.RequiredCapability != "media-path-freeze/v1" || !mcpWriteName(s.WorkDirectory)) {
 			return false
 		}
@@ -189,7 +204,7 @@ func pathDecisionMatches(s TaskPathFreeze, p pathOperationState) bool {
 	return d.Origin == p.Request.PathIntent.Origin && d.Root == p.Snapshot.InputRoot && d.RuleID == "" && d.RuleVersion == nil
 }
 func pathRecordValid(r *batchOperationRecord) bool {
-	if r == nil || r.Version != 2 || r.Namespace != batchOperationNamespace || r.Path == nil || r.Path.Version != 1 || !datasetIDPattern.MatchString(r.Path.DatasetID) || !pathRequestValid(r.Path.Request) || !pathSnapshotValid(r.Path.Snapshot) || r.Path.PolicyHash != mcpWriteHash(r.Path.Snapshot) || r.RequestHash != mcpWriteHash(r.Path.Request) || r.OperationID != r.Path.Request.OperationID || !reflect.DeepEqual(r.RequiredCapabilities, r.Path.Request.RequiredCapabilities) || !reflect.DeepEqual(r.Integrity, r.Path.Request.Integrity) || len(r.Members) != len(pathItems(r.Path.Request)) {
+	if r == nil || r.Version != 2 || r.Namespace != batchOperationNamespace || r.Path == nil || r.Path.Version != 1 || !datasetIDPattern.MatchString(r.Path.DatasetID) || !pathRequestValid(r.Path.Request) || !pathSnapshotValid(r.Path.Snapshot) || r.Path.PolicyHash != mcpWriteHash(r.Path.Snapshot) || r.RequestHash != pathRequestHash(r.Path.Request) || r.OperationID != r.Path.Request.OperationID || !reflect.DeepEqual(r.RequiredCapabilities, r.Path.Request.RequiredCapabilities) || !reflect.DeepEqual(r.Integrity, r.Path.Request.Integrity) || len(r.Members) != len(pathItems(r.Path.Request)) {
 		return false
 	}
 	v, ok := pathVariantForCaps(r.RequiredCapabilities)
@@ -270,6 +285,41 @@ func pathReqEqual(a, b *base.Request) bool {
 	}
 	return reflect.DeepEqual(x, y)
 }
+func pathResolvedLayout(protocol string, meta *fetcher.FetcherMeta, full pathpolicy.LayoutV1, work string) (pathpolicy.LayoutV1, error) {
+	main, err := pathResourceLayout(meta)
+	if err != nil {
+		return pathpolicy.LayoutV1{}, err
+	}
+	if protocol != "media" {
+		return main, nil
+	}
+	if len(main.Members) != 1 || !mcpWriteName(work) || full.ParentRoot != main.ParentRoot || len(full.Members) == 0 {
+		return pathpolicy.LayoutV1{}, ErrPathFreezeInvalid
+	}
+	canonical, err := pathpolicy.BuildLayoutV1(full.ParentRoot, full.Members)
+	if err != nil || !reflect.DeepEqual(canonical, full) || full.Members[0].RelativePath != main.Members[0].RelativePath || !full.Members[0].Selected {
+		return pathpolicy.LayoutV1{}, ErrPathFreezeInvalid
+	}
+	directory := path.Dir(main.Members[0].RelativePath)
+	for i, file := range full.Members {
+		base := path.Base(file.RelativePath)
+		if !mcpWriteName(base) || strings.ContainsAny(base, "<>:\"|?*\r\n") || path.Dir(file.RelativePath) != directory || file.RelativePath == work || strings.HasPrefix(file.RelativePath, work+"/") {
+			return pathpolicy.LayoutV1{}, ErrPathFreezeInvalid
+		}
+		if i > 0 {
+			if !file.Selected {
+				return pathpolicy.LayoutV1{}, ErrPathFreezeInvalid
+			}
+			switch strings.ToLower(path.Ext(base)) {
+			case ".srt", ".vtt", ".ass", ".ssa":
+			default:
+				return pathpolicy.LayoutV1{}, ErrPathFreezeInvalid
+			}
+		}
+	}
+	return full, nil
+}
+
 func pathResourceLayout(meta *fetcher.FetcherMeta) (pathpolicy.LayoutV1, error) {
 	if meta == nil || meta.Res == nil || meta.Opts == nil || len(meta.Res.Files) == 0 {
 		return pathpolicy.LayoutV1{}, ErrPathFreezeHeld
@@ -360,7 +410,7 @@ func pathTaskFromRecord(reader datasetReader, task *Task, r *batchOperationRecor
 		return empty, ErrPathFreezeHeld
 	}
 	if state.Phase == PathFreezeFrozen {
-		layout, err := pathResourceLayout(task.Meta)
+		layout, err := pathResolvedLayout(task.Protocol, task.Meta, *state.Layout, state.WorkDirectory)
 		if err != nil {
 			return empty, err
 		}
@@ -439,7 +489,7 @@ func reservePathTreeOperation(store AtomicStorage, dataset string, request HTTPP
 			members[i].CompletionID = NewTask().ID
 		}
 	}
-	candidate := batchOperationRecord{Version: 2, Namespace: batchOperationNamespace, Kind: v.Kind, RequiredCapabilities: request.RequiredCapabilities, OperationID: request.OperationID, RequestHash: mcpWriteHash(request), CreatedAt: now, UpdatedAt: now, Integrity: request.Integrity, Path: &pathOperationState{Version: 1, DatasetID: dataset, Request: request, Snapshot: snapshot, PolicyHash: mcpWriteHash(snapshot)}, Members: members}
+	candidate := batchOperationRecord{Version: 2, Namespace: batchOperationNamespace, Kind: v.Kind, RequiredCapabilities: request.RequiredCapabilities, OperationID: request.OperationID, RequestHash: pathRequestHash(request), CreatedAt: now, UpdatedAt: now, Integrity: request.Integrity, Path: &pathOperationState{Version: 1, DatasetID: dataset, Request: request, Snapshot: snapshot, PolicyHash: mcpWriteHash(snapshot)}, Members: members}
 	if !candidate.valid() {
 		return batchOperationRecord{}, false, ErrPathFreezeInvalid
 	}
@@ -751,7 +801,7 @@ func ConfirmPathFreezeTree(store AtomicStorage, dataset string, expected []PathF
 			if p.ResolvedMeta == nil || !pathReqEqual(p.ResolvedMeta.Req, task.Meta.Req) || p.ResolvedMeta.Opts == nil || !reflect.DeepEqual(p.ResolvedMeta.Opts.Extra, task.Meta.Opts.Extra) || !reflect.DeepEqual(p.ResolvedMeta.Opts.SelectFiles, task.Meta.Opts.SelectFiles) {
 				return ErrPathFreezeInvalid
 			}
-			layout, err := pathResourceLayout(p.ResolvedMeta)
+			layout, err := pathResolvedLayout(task.Protocol, p.ResolvedMeta, p.Layout, p.WorkDirectory)
 			if err != nil {
 				return err
 			}
@@ -922,6 +972,15 @@ func pathLayoutOutputValid(s TaskPathFreeze, out PathLayoutOutputState) bool {
 	if out.Version != 1 || out.DirectoryIdentity.Inode == 0 || out.Files == nil || s.Layout == nil {
 		return false
 	}
+	switch out.Phase {
+	case MCPWriteOutputStaging, MCPWriteOutputPublishing, MCPWriteOutputPublished, MCPWriteOutputUncertain:
+	default:
+		return false
+	}
+	if out.Phase != MCPWriteOutputStaging && len(out.Files) != len(s.Layout.Members) {
+		return false
+	}
+
 	if out.WorkDirectoryIdentity != nil && (s.WorkDirectory == "" || out.WorkDirectoryIdentity.Inode == 0 || out.WorkDirectoryIdentity.Device != out.DirectoryIdentity.Device) {
 		return false
 	}
@@ -1004,12 +1063,17 @@ func SavePathLayoutOutput(store AtomicStorage, dataset string, expected PathFree
 		if !reflect.DeepEqual(task.Meta, expected.Meta) {
 			return ErrPathFreezeConflict
 		}
+		if s.LayoutOutput == nil && next.Phase != MCPWriteOutputStaging {
+			return ErrPathFreezeInvalid
+		}
 		if s.LayoutOutput != nil {
+			before := s.LayoutOutput.Phase
+			transition := (before == MCPWriteOutputStaging && (next.Phase == MCPWriteOutputStaging || next.Phase == MCPWriteOutputPublishing)) || (before == MCPWriteOutputPublishing && (next.Phase == MCPWriteOutputPublished || next.Phase == MCPWriteOutputUncertain))
 			if reflect.DeepEqual(*s.LayoutOutput, next) {
 				result = task
 				return nil
 			}
-			if !pathLayoutOutputExtends(*s.LayoutOutput, next) {
+			if !transition || !pathLayoutOutputExtends(*s.LayoutOutput, next) || (before == MCPWriteOutputPublishing && !reflect.DeepEqual(s.LayoutOutput.Files, next.Files)) {
 				return ErrPathFreezeConflict
 			}
 		}
@@ -1035,4 +1099,44 @@ func SavePathLayoutOutput(store AtomicStorage, dataset string, expected PathFree
 		return nil, false, pathStoreError(err)
 	}
 	return result, fresh, nil
+}
+
+// cancelPathOperation cancels pending members only, matching D3 semantics.
+// It is a dedicated known-variant writer; legacy cancel never mutates R2.
+func cancelPathOperation(store AtomicStorage, dataset, id, kind string) error {
+	if store == nil {
+		return ErrPathFreezeUnavailable
+	}
+	if !operationIDPattern.MatchString(id) {
+		return ErrPathFreezeInvalid
+	}
+	err := store.UpdateAtomic(func(tx StorageTransaction) error {
+		if err := requireDataset(tx, dataset); err != nil {
+			return err
+		}
+		record, err := loadOperationFrom(tx, id)
+		if err != nil {
+			return ErrPathFreezeHeld
+		}
+		if record == nil {
+			return nil
+		}
+		if record.Version != 2 || record.Path == nil || record.Path.DatasetID != dataset || record.Kind != kind {
+			return ErrPathFreezeHeld
+		}
+		changed := false
+		for i := range record.Members {
+			if record.Members[i].State == "pending" {
+				record.Members[i].State = "failed"
+				record.Members[i].Error = "cancelled"
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		record.UpdatedAt = time.Now()
+		return tx.Put(bucketTaskOperations, operationKey(id), record)
+	})
+	return pathStoreError(err)
 }
