@@ -217,23 +217,24 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) (result error) 
 		close(done)
 		f.mu.Unlock()
 	}()
-	return f.resolveForRun(ctx, operation)
+	_, err = f.resolveForRun(ctx, operation, nil)
+	return err
 }
 
 // resolveForRun owns its request and candidate child. Network IO, owner calls
 // and child joins must never happen while holding the published-view mutex.
-func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
+func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *netdiskRefreshPlan) (context.Context, error) {
 	f.mu.Lock()
 	if err := f.checkOperationLocked(ctx, operation); err != nil {
 		f.mu.Unlock()
-		return err
+		return ctx, err
 	}
 	req, opts := clone(f.meta.Req), f.meta.Opts.Clone()
 	old, resume := f.child, clone(f.resume)
 	f.mu.Unlock()
 	e, err := parseExtra(req)
 	if err != nil {
-		return err
+		return ctx, err
 	}
 	started := time.Now()
 	providerCtx, providerCancel := context.WithTimeout(f.deferrable(ctx), resolveBudget(e))
@@ -241,22 +242,22 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	providerCancel()
 	linkTime := time.Since(started)
 	if err != nil {
-		return err
+		return ctx, err
 	}
 	if err := f.checkOperation(ctx, operation); err != nil {
-		return err
+		return ctx, err
 	}
 	if d == nil || d.URL == "" {
-		return errors.New("网盘没有返回下载地址")
+		return ctx, errors.New("网盘没有返回下载地址")
 	}
 	if d.File.ID != "" && d.File.ID != e.File.ID {
-		return errors.New("网盘返回的文件身份不匹配")
+		return ctx, errors.New("网盘返回的文件身份不匹配")
 	}
 	if e.File.Size > 0 && d.File.Size > 0 && e.File.Size != d.File.Size {
-		return errors.New("网盘文件大小已经变化，请重新创建下载")
+		return ctx, errors.New("网盘文件大小已经变化，请重新创建下载")
 	}
 	if e.File.Hash != "" && d.File.Hash != "" && !strings.EqualFold(e.File.Hash, d.File.Hash) {
-		return errors.New("网盘文件内容已经变化，请重新创建下载")
+		return ctx, errors.New("网盘文件内容已经变化，请重新创建下载")
 	}
 	if e.File.Size == 0 && d.File.Size > 0 {
 		e.File.Size = d.File.Size
@@ -266,16 +267,16 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	}
 	u, err := url.Parse(d.URL)
 	if err != nil || u.User != nil || u.Scheme != "http" && u.Scheme != "https" {
-		return errors.New("网盘下载地址无效")
+		return ctx, errors.New("网盘下载地址无效")
 	}
 	if old != nil {
 		if err = old.Pause(); err != nil {
-			return err
+			return ctx, err
 		}
 		if resume == nil {
 			data, e := (&httpfetch.FetcherManager{}).Store(old)
 			if e != nil {
-				return e
+				return ctx, e
 			}
 			b, _ := json.Marshal(data)
 			var clean map[string]json.RawMessage
@@ -288,11 +289,18 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	if resume != nil && resume.Downloaded == 0 {
 		resume = nil
 	}
+	if plan != nil {
+		var commitErr error
+		ctx, commitErr = f.commitRefresh(ctx, operation, plan)
+		if commitErr != nil {
+			return ctx, commitErr
+		}
+	}
 	jar, _ := cookiejar.New(nil)
 	cloud.SeedCookies(jar, d.Cookies, []string{u.Hostname()})
 	credentials, err := transfer.NewTargetCredentials(d.URL, d.Header, jar)
 	if err != nil {
-		return errors.New("网盘下载认证上下文无效")
+		return ctx, errors.New("网盘下载认证上下文无效")
 	}
 
 	hreq := &base.Request{URL: d.URL, Extra: &httpmodel.ReqExtra{}, Proxy: req.Proxy, SkipVerifyCert: req.SkipVerifyCert}
@@ -327,20 +335,20 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 		probeCtx, bindErr := f.bindHTTPChild(ctx, probe, hreq)
 		if bindErr != nil {
 			_ = probe.Close()
-			return bindErr
+			return ctx, bindErr
 		}
 		if err = probe.ResolveContext(probeCtx, hreq, opts.Clone()); err != nil {
 			_ = probe.Close()
-			return err
+			return ctx, err
 		}
 		newRes := clone(probe.Meta().Res)
 		_ = probe.Close()
 		if newRes.Size != resume.Resource.Size || !newRes.Range {
-			return errors.New("文件长度或断点下载能力已经变化，请重新创建下载")
+			return ctx, errors.New("文件长度或断点下载能力已经变化，请重新创建下载")
 		}
 		template, restore := hm.Restore()
 		if err = json.Unmarshal(resume.Child, template); err != nil {
-			return err
+			return ctx, err
 		}
 		meta := &fetcher.FetcherMeta{Req: hreq, Res: clone(resume.Resource), Opts: opts.Clone()}
 		child = restore(meta, template).(*httpfetch.Fetcher)
@@ -348,7 +356,7 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
 		if _, err = f.bindHTTPChild(ctx, child, hreq); err != nil {
-			return err
+			return ctx, err
 		}
 	} else {
 		child = hm.Build().(*httpfetch.Fetcher)
@@ -357,24 +365,24 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 		child.Setup(&httpCtl)
 		childCtx, bindErr := f.bindHTTPChild(ctx, child, hreq)
 		if bindErr != nil {
-			return bindErr
+			return ctx, bindErr
 		}
 		if err = child.ResolveContext(childCtx, hreq, opts.Clone()); err != nil {
 			_ = child.Close()
-			return err
+			return ctx, err
 		}
 	}
 	res := child.Meta().Res
 	if e.File.Size > 0 && res.Size > 0 && e.File.Size != res.Size {
 		_ = child.Close()
-		return errors.New("下载响应与网盘文件大小不符")
+		return ctx, errors.New("下载响应与网盘文件大小不符")
 	}
 	if e.Provider == "baidu" {
 		digest := integrity.value()
 		if resume != nil && resume.Resource != nil && digest != "" {
 			if previous, ok := storedResponseMD5(resume.Resource.Hash); ok && previous != digest {
 				_ = child.Close()
-				return errors.New("网盘文件内容已经变化，已保留现有文件，请重新下载")
+				return ctx, errors.New("网盘文件内容已经变化，已保留现有文件，请重新下载")
 			}
 		}
 		// A restored resource must not retain a digest from an earlier response.
@@ -385,11 +393,11 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	}
 	if err := child.SetResourceKey(e.Provider + "|" + e.Source.URL + "|" + e.File.ID); err != nil {
 		_ = child.Close()
-		return err
+		return ctx, err
 	}
 	if err := child.SetResumeHash(resumeDigest(e, res)); err != nil {
 		_ = child.Close()
-		return err
+		return ctx, err
 	}
 	res.Name = ""
 	res.Files[0].Name = e.File.Name
@@ -397,7 +405,7 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	f.mu.Lock()
 	if err := f.checkOperationLocked(ctx, operation); err != nil {
 		f.mu.Unlock()
-		return err
+		return ctx, err
 	}
 	f.child = child
 	f.meta.Req.Extra = e
@@ -412,7 +420,7 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64) error {
 	if old != nil {
 		_ = old.Close()
 	}
-	return nil
+	return ctx, nil
 }
 func (f *Fetcher) Start() error {
 	f.mu.Lock()
@@ -455,30 +463,34 @@ func (f *Fetcher) Start() error {
 	f.mu.Unlock()
 	go func() {
 		defer close(runDone)
-		child, err := f.startChild(ctx, operation, e)
-		if err == nil {
-			for attempt := 0; attempt < 2; attempt++ {
+		child, ctx, err := f.startChild(ctx, operation, e, nil)
+		for attempt := 0; attempt < 2; attempt++ {
+			if err == nil {
 				err = child.WaitContext(ctx)
 				if err == nil && e.File.Size > 0 && child.Progress().TotalDownloaded() < e.File.Size {
 					err = errors.New("网盘下载尚未完整，链接可能已过期")
 				}
-				if ctx.Err() != nil {
-					return
-				}
-				if attempt == 0 && refreshable(err) {
-					f.mu.Lock()
-					if f.checkOperationLocked(ctx, operation) == nil {
-						f.phase, f.refresh = "刷新网盘下载地址", true
-						f.publishViewLocked()
-					}
-					f.mu.Unlock()
-					child, err = f.startChild(ctx, operation, e)
-					if err == nil {
-						continue
-					}
-				}
-				break
 			}
+			if ctx.Err() != nil {
+				return
+			}
+			if attempt == 0 && refreshable(err) {
+				f.mu.Lock()
+				if f.checkOperationLocked(ctx, operation) == nil {
+					f.phase, f.refresh = "刷新网盘下载地址", true
+					f.publishViewLocked()
+				}
+				f.mu.Unlock()
+				var plan *netdiskRefreshPlan
+				plan, err = f.prepareRefresh(ctx, operation)
+				if err == nil {
+					child, ctx, err = f.startChild(ctx, operation, e, plan)
+				}
+				if err == nil {
+					continue
+				}
+			}
+			break
 		}
 		if f.checkOperation(ctx, operation) != nil {
 			return
@@ -525,30 +537,31 @@ func (f *Fetcher) Start() error {
 	return nil
 }
 
-func (f *Fetcher) startChild(ctx context.Context, operation uint64, e *model.ReqExtra) (*httpfetch.Fetcher, error) {
+func (f *Fetcher) startChild(ctx context.Context, operation uint64, e *model.ReqExtra, plan *netdiskRefreshPlan) (*httpfetch.Fetcher, context.Context, error) {
 	f.mu.Lock()
 	if err := f.checkOperationLocked(ctx, operation); err != nil {
 		f.mu.Unlock()
-		return nil, err
+		return nil, ctx, err
 	}
 	resolve := f.child == nil || f.refresh
 	f.mu.Unlock()
 	if resolve {
-		err := f.resolveForRun(ctx, operation)
+		var err error
+		ctx, err = f.resolveForRun(ctx, operation, plan)
 		if err != nil {
-			return nil, err
+			return nil, ctx, err
 		}
 	}
 	f.mu.Lock()
 	if err := f.checkOperationLocked(ctx, operation); err != nil {
 		f.mu.Unlock()
-		return nil, err
+		return nil, ctx, err
 	}
 	child := f.child
 	current, err := parseExtra(f.meta.Req)
 	if err != nil {
 		f.mu.Unlock()
-		return nil, err
+		return nil, ctx, err
 	}
 	*e = *clone(current)
 	err = f.syncOptions(child)
@@ -557,7 +570,7 @@ func (f *Fetcher) startChild(ctx context.Context, operation uint64, e *model.Req
 	}
 	f.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, ctx, err
 	}
 	// Bind cancellation before Start so a late start cannot acquire a new
 	// background lifetime after Pause has cancelled this parent run.
@@ -565,9 +578,9 @@ func (f *Fetcher) startChild(ctx context.Context, operation uint64, e *model.Req
 		child.BindRunWait(ctx)
 	}
 	if err := f.checkOperation(ctx, operation); err != nil {
-		return nil, err
+		return nil, ctx, err
 	}
-	return child, child.Start()
+	return child, ctx, child.Start()
 }
 
 func refreshable(err error) bool {

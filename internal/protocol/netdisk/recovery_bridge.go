@@ -3,6 +3,7 @@ package netdisk
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	httpfetch "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/internal/transfer"
@@ -168,6 +169,9 @@ func (f *Fetcher) bindHTTPChild(ctx context.Context, child *httpfetch.Fetcher, r
 	if err != nil {
 		return nil, err
 	}
+	if bound == nil || bound.Token != lease.Token || bound.SourceHash != snapshot.SourceHash() || bound.Context == nil {
+		return nil, transfer.ErrRecoveryStale
+	}
 	if err = f.checkOperationContext(ctx); err != nil {
 		return nil, err
 	}
@@ -211,4 +215,130 @@ func snapshotChild(child *httpfetch.Fetcher) (*saved, error) {
 		return nil, err
 	}
 	return &saved{Child: raw, Resource: clone(child.Meta().Res), Downloaded: child.Progress().TotalDownloaded()}, nil
+}
+
+type netdiskRefreshPlan struct {
+	lease *transfer.RecoveryLease
+	owner transfer.RecoveryParentController
+	action uint64
+	seal *netdiskSourceSeal
+	checkpoint *saved
+}
+
+// This seal exists only after the real old child and its writers have joined.
+// It carries no account digest: the current provider contract cannot prove a
+// stable UID/object/validator chain, so identity remains unprovable.
+type netdiskSourceSeal struct {
+	f *Fetcher
+	operation uint64
+	lease *transfer.RecoveryLease
+}
+
+func (seal *netdiskSourceSeal) Check(ctx context.Context) error {
+	seal.f.mu.Lock()
+	err := seal.f.checkOperationLocked(ctx, seal.operation)
+	seal.f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	lease := seal.f.recovery.Load()
+	if lease == nil || lease.Token != seal.lease.Token {
+		return transfer.ErrRecoveryStale
+	}
+	return nil
+}
+
+func (seal *netdiskSourceSeal) Snapshot(ctx context.Context) (transfer.RecoverySourceSnapshot, error) {
+	if err := seal.Check(ctx); err != nil {
+		return transfer.RecoverySourceSnapshot{}, err
+	}
+	return transfer.RecoverySourceSnapshot{Token: seal.lease.Token, SourceHash: seal.lease.SourceHash,
+		Epoch: seal.operation, Members: []string{"netdisk/api", "netdisk/http"}}, nil
+}
+
+func (f *Fetcher) prepareRefresh(ctx context.Context, operation uint64) (*netdiskRefreshPlan, error) {
+	lease := transfer.RecoveryLeaseFromContext(ctx)
+	if lease == nil {
+		return nil, nil // Interactive/legacy behavior has no managed ledger.
+	}
+	owner, ok := lease.Owner.(transfer.RecoveryParentController)
+	if !ok {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	// Read only the trusted same-run RAM cursor. A durable query, an old lease
+	// Round or a locally incremented number cannot reconstruct authorization.
+	cursor, ok := lease.Owner.(interface {
+		CurrentRecoveryRound(context.Context, transfer.RecoveryToken) (uint64, error)
+	})
+	if !ok {
+		return nil, transfer.ErrRecoveryHeld
+	}
+	f.mu.Lock()
+	child := f.child
+	f.mu.Unlock()
+	checkpoint := &saved{}
+	if child != nil {
+		if err := child.Pause(); err != nil {
+			return nil, err
+		}
+		if err := child.CaptureRunQuiescence()(ctx); err != nil {
+			return nil, err
+		}
+		var err error
+		checkpoint, err = snapshotChild(child)
+		if err != nil {
+			return nil, err
+		}
+	}
+	f.mu.Lock()
+	checkpoint.Resource = clone(f.meta.Res)
+	f.mu.Unlock()
+	if err := f.checkOperation(ctx, operation); err != nil {
+		return nil, err
+	}
+	seen, err := cursor.CurrentRecoveryRound(ctx, lease.Token)
+	if err != nil {
+		return nil, err
+	}
+	permit, err := owner.ReserveRecoveryAction(ctx, lease.Token, seen, transfer.RecoveryActionRefresh,
+		"netdisk/api", []string{"netdisk/api", "netdisk/http"}, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	if permit == nil || permit.Token != lease.Token || permit.Kind != transfer.RecoveryActionRefresh {
+		return nil, transfer.ErrRecoveryWork
+	}
+	if err = permit.Consume(ctx); err != nil {
+		return nil, err
+	}
+	if err = f.checkOperation(ctx, operation); err != nil {
+		return nil, err
+	}
+	return &netdiskRefreshPlan{lease: lease, owner: owner, action: permit.ActionID, checkpoint: checkpoint,
+		seal: &netdiskSourceSeal{f: f, operation: operation, lease: lease}}, nil
+}
+
+func (f *Fetcher) commitRefresh(ctx context.Context, operation uint64, plan *netdiskRefreshPlan) (context.Context, error) {
+	checkpoint, err := json.Marshal(plan.checkpoint)
+	if err != nil {
+		return ctx, err
+	}
+	lease, err := plan.owner.CommitRecoverySource(ctx, plan.lease.Token, plan.action, plan.seal, checkpoint)
+	if err != nil {
+		return ctx, err
+	}
+	if lease == nil || lease.Context == nil || lease.Token.TaskID != plan.lease.Token.TaskID ||
+		lease.Token.Episode != plan.lease.Token.Episode || lease.Token.Generation != plan.lease.Token.Generation {
+		return ctx, transfer.ErrRecoveryStale
+	}
+	f.mu.Lock()
+	if err = f.checkOperationLocked(ctx, operation); err == nil {
+		f.SetRecoveryLease(lease)
+	}
+	f.mu.Unlock()
+	if err != nil {
+		return ctx, err
+	}
+	ctx = transfer.WithRecoveryLease(ctx, f.recovery.Load())
+	return ctx, lease.Check()
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/transfer"
@@ -197,6 +198,12 @@ func (c *APIClient) Do(ctx context.Context, method, raw string, body []byte, hea
 		return nil, currentErr
 	}
 	if err != nil {
+		if transfer.RecoveryLeaseFromContext(ctx) != nil &&
+			(errors.Is(err, transfer.ErrRecoveryUnavailable) || errors.Is(err, transfer.ErrRecoveryHeld) ||
+				errors.Is(err, transfer.ErrRecoveryStale) || errors.Is(err, transfer.ErrRecoveryExhausted) ||
+				errors.Is(err, transfer.ErrRecoveryWork) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return nil, err
+		}
 		return nil, Fail("network_error", "网盘接口请求失败，请检查网络或代理")
 	}
 	if c.budget != nil {
