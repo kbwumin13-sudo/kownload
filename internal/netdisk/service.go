@@ -883,19 +883,27 @@ func (s *Service) Transfers() []*model.TransferReceipt {
 	}
 	return v
 }
-func (s *Service) Complete(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) {
+func (s *Service) Complete(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) error {
+	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+		if _, err := s.recoverySession(ctx, e.Provider, e.SessionID, e.AccountID); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	deferred := e.Deferred || s.batches[e.BatchID] != nil
 	s.mu.Unlock()
 	if deferred {
-		s.completeDeferred(ctx, ctl, req, e)
-		return
+		return s.completeDeferred(ctx, ctl, req, e)
 	}
 	s.mu.Lock()
 	r := s.transfers[e.BatchID]
 	if r == nil {
 		s.mu.Unlock()
-		return
+		return nil
+	}
+	if transfer.RecoveryLeaseFromContext(ctx) != nil && (r.Provider != e.Provider || r.AccountID != e.AccountID) {
+		s.mu.Unlock()
+		return LoginRequired(e.Provider)
 	}
 	left := []string{}
 	for _, id := range r.Remaining {
@@ -904,12 +912,16 @@ func (s *Service) Complete(ctx context.Context, ctl *controller.Controller, req 
 		}
 	}
 	r.Remaining = left
-	_ = s.persistLocked()
-	ready := len(left) == 0
+	err := s.persistLocked()
+	ready := err == nil && len(left) == 0
 	s.mu.Unlock()
-	if ready {
-		_ = s.Cleanup(ctx, ctl, req, e.BatchID)
+	if err != nil {
+		return err
 	}
+	if ready {
+		return s.Cleanup(ctx, ctl, req, e.BatchID)
+	}
+	return nil
 }
 func (s *Service) Cleanup(ctx context.Context, ctl *controller.Controller, req *base.Request, batch string) error {
 	var taskSession string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/GopeedLab/gopeed/internal/pathpolicy"
 	httpfetch "github.com/GopeedLab/gopeed/internal/protocol/http"
@@ -175,4 +176,44 @@ func (f *Fetcher) integrityFile() (*os.File, error) {
 		return transfer.DuplicateVerifiedLayoutWriter(binding.storage, 0)
 	}
 	return os.Open(f.meta.SingleFilepath())
+}
+
+// Core invokes this only for its fresh published+Done ACK, before invalidating
+// the same parent run. It never runs for a query, unknown ACK or failed run.
+func (f *Fetcher) PathFreezeSucceeded(ctx context.Context) error {
+	if ctx == nil || ctx.Err() != nil {
+		return transfer.ErrRecoveryStale
+	}
+	binding, lease := f.pathFreeze.Load(), f.recovery.Load()
+	if binding == nil || lease == nil || lease.Context == nil || binding.owner != lease.Token.TaskID || ctx.Done() == nil || ctx.Done() != lease.Context.Done() {
+		return transfer.ErrRecoveryStale
+	}
+	if supplied := transfer.RecoveryLeaseFromContext(ctx); supplied != nil && supplied.Token != lease.Token {
+		return transfer.ErrRecoveryStale
+	}
+	if err := lease.Check(); err != nil {
+		return err
+	}
+	ctx = transfer.WithRecoveryLease(ctx, lease)
+	f.mu.Lock()
+	if f.closed || f.running || f.resolving || f.completedOperation == 0 || f.completedOperation != f.operation || f.recovery.Load() != lease {
+		f.mu.Unlock()
+		return transfer.ErrRecoveryStale
+	}
+	req := clone(f.meta.Req)
+	// Consume the one local success callback even when cleanup reports failure.
+	// The durable receipt remains the existing service's retry surface.
+	f.completedOperation = 0
+	f.mu.Unlock()
+	extra, err := parseExtra(req)
+	if err != nil {
+		return err
+	}
+	ctl, err := f.controllerForContext(ctx)
+	if err != nil {
+		return err
+	}
+	cleanctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	defer cancel()
+	return f.service.Complete(cleanctx, ctl, req, extra)
 }

@@ -268,12 +268,12 @@ func resolveDeferredCopy(ctx context.Context, client *APIClient, ss *Session, p 
 	return d, nil
 }
 
-func (s *Service) completeDeferred(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) {
+func (s *Service) completeDeferred(ctx context.Context, ctl *controller.Controller, req *base.Request, e *model.ReqExtra) error {
 	s.mu.Lock()
 	b, _, err := s.deferredMember(e)
 	if err != nil {
 		s.mu.Unlock()
-		return
+		return err
 	}
 	left := []string{}
 	for _, id := range b.Remaining {
@@ -289,7 +289,11 @@ func (s *Service) completeDeferred(ctx context.Context, ctl *controller.Controll
 	err = s.persistLocked()
 	ready := err == nil && len(left) == 0 && b.State == "downloading" && r != nil && r.State == "downloading"
 	s.mu.Unlock()
-	if ready {
-		_ = s.Cleanup(ctx, ctl, req, e.BatchID)
+	if err != nil {
+		return err
 	}
+	if ready {
+		return s.Cleanup(ctx, ctl, req, e.BatchID)
+	}
+	return nil
 }
