@@ -94,7 +94,9 @@ func (d *Downloader) submitMCPTaskAction(ctx context.Context, holder *mcpWriteHo
 	}
 	// Stop and join the old writer before changing its binding. This revokes
 	// the old run; it never grants IO if the receipt's ACK is later unknown.
-	if err := d.doPause(live); err != nil {
+	if err := d.doPauseChecked(live, func() error {
+		return d.revokeMCPActionTarget(ctx, holder, live, command.Action.Expected)
+	}); err != nil {
 		return rejectMCPWrite(store, holder.dataset, record, mcpWriteRuntimeError(err))
 	}
 	live.statusLock.Lock()
@@ -140,4 +142,48 @@ func (d *Downloader) submitMCPTaskAction(ctx context.Context, holder *mcpWriteHo
 		}
 	}
 	return d.QueryMCPWrite(ctx, MCPWriteQuery{1, command.DatasetID, command.PolicyID, command.OperationID})
+}
+
+// Called under Task.statusLock, which also serializes new-run generation
+// admission. The authoritative read precedes the owner lock; its callback
+// never takes live locks. Revoke under owner.mu so a source commit cannot
+// advance S between the final target check and withdrawing IO qualification.
+func (d *Downloader) revokeMCPActionTarget(ctx context.Context, holder *mcpWriteHolder, task *Task, expected MCPWriteTarget) error {
+	if ctx.Err() != nil || d.mcpWriteHolder() != holder {
+		return mcpWriteErr(MCPWriteCancelled)
+	}
+	if d.getTask(task.ID) != task || task.getStatus() == base.DownloadStatusDone {
+		return mcpWriteErr(MCPWriteTaskUnavailable)
+	}
+	err := withDatasetReadView(d.storage, holder.dataset, func(reader datasetReader) error {
+		_, record, _, err := readSharedRecovery(reader, task.ID)
+		if err != nil {
+			return err
+		}
+		if mcpTarget(record) != expected {
+			return mcpWriteErr(MCPWriteStaleTarget)
+		}
+		return nil
+	})
+	if err != nil {
+		return mcpWriteStoreError(err)
+	}
+	// A new run can be admitted before its asynchronous begin is persisted.
+	if task.getStatus() == base.DownloadStatusRunning && task.runGeneration != expected.Generation {
+		return mcpWriteErr(MCPWriteStaleTarget)
+	}
+	owner := task.recoveryOwner.Load()
+	if owner == nil {
+		if task.getStatus() == base.DownloadStatusRunning {
+			return mcpWriteErr(MCPWriteStaleTarget)
+		}
+		return nil
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if mcpTarget(owner.record) != expected {
+		return mcpWriteErr(MCPWriteStaleTarget)
+	}
+	owner.invalidate()
+	return nil
 }

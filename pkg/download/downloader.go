@@ -2973,6 +2973,12 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 }
 
 func (d *Downloader) doPause(task *Task) (err error) {
+	return d.doPauseChecked(task, nil)
+}
+
+// check runs under the same status barrier as startTask's generation change,
+// before this pause revokes any run or publishes Pause.
+func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) {
 	task.dataLock.RLock()
 	mcp := mcpTaskPresence(task)
 	task.dataLock.RUnlock()
@@ -2983,6 +2989,11 @@ func (d *Downloader) doPause(task *Task) (err error) {
 	var pauseDone chan struct{}
 	var previousPauseDone chan struct{}
 	isReturn, err := d.statusMut(task, func() (isReturn bool, err error) {
+		if check != nil {
+			if err := check(); err != nil {
+				return true, err
+			}
+		}
 		if task.getStatus() == base.DownloadStatusPause || task.getStatus() == base.DownloadStatusDone ||
 			(task.getStatus() == base.DownloadStatusError && d.closed.Load()) {
 			pauseDone = task.pauseDone

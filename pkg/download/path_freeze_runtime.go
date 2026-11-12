@@ -3,7 +3,10 @@ package download
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -12,7 +15,6 @@ import (
 	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	nd "github.com/GopeedLab/gopeed/pkg/protocol/netdisk"
-	"github.com/GopeedLab/gopeed/pkg/util"
 )
 
 // pathExpected captures a CURRENT, same-view value. Native coordinates do not
@@ -169,6 +171,9 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		input.Domain = u.Hostname()
 	}
 	if len(tasks) == 1 && resolved != nil && resolved.Res != nil {
+		if hints, ok := task.fetcher.(interface{ PathFreezeMIME() string }); ok {
+			input.MIME = hints.PathFreezeMIME()
+		}
 		input.Name = resolved.Opts.Name
 		if input.Name == "" && len(resolved.Res.Files) == 1 {
 			input.Name = resolved.Res.Files[0].Name
@@ -179,6 +184,7 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		return err
 	}
 	prepared := make([]PathFreezePrepared, len(tasks))
+	reserved := d.frozenPathTargets(task.ID)
 	for i, t := range tasks {
 		var meta *fetcher.FetcherMeta
 		if t == task {
@@ -223,7 +229,7 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 			}
 			name = preparation.Name
 			if t.fetcherManager.AutoRename() {
-				name, e = util.CheckDuplicateAndRename(strings.TrimRight(decision.Root, "/") + "/" + name)
+				name, e = availableFrozenPathName(decision.Root, name, reserved)
 				if e != nil {
 					return e
 				}
@@ -271,6 +277,49 @@ func (d *Downloader) confirmTaskPath(ctx context.Context, task *Task, resolved *
 		t.dataLock.Unlock()
 	}
 	return d.applyFrozenFetcherMeta(task)
+}
+
+// operationMu serializes F and deletion. Take only short data snapshots of
+// other tasks, never their lifecycle locks while holding this task's lock.
+func (d *Downloader) frozenPathTargets(except string) map[string]bool {
+	targets := make(map[string]bool)
+	for _, task := range d.taskList() {
+		if task.ID == except {
+			continue
+		}
+		task.dataLock.RLock()
+		state := task.PathFreeze
+		if state != nil && state.Phase == PathFreezeFrozen && state.Layout != nil {
+			for _, member := range state.Layout.Members {
+				targets[filepath.Join(state.Layout.ParentRoot, filepath.FromSlash(member.RelativePath))] = true
+			}
+		}
+		task.dataLock.RUnlock()
+	}
+	return targets
+}
+
+func availableFrozenPathName(root, name string, reserved map[string]bool) (string, error) {
+	ext := filepath.Ext(name)
+	if ext == name || strings.LastIndex(name, ".") == 0 {
+		ext = ""
+	}
+	stem := strings.TrimSuffix(name, ext)
+	for n := 0; ; n++ {
+		candidate := name
+		if n > 0 {
+			candidate = fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		}
+		path := filepath.Join(root, candidate)
+		if reserved[path] {
+			continue
+		}
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
 }
 
 // Fetcher-specific Extra remains its parsed runtime value; the persisted Req
