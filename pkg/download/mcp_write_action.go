@@ -144,6 +144,7 @@ func (d *Downloader) submitMCPTaskAction(ctx context.Context, holder *mcpWriteHo
 	return d.QueryMCPWrite(ctx, MCPWriteQuery{1, command.DatasetID, command.PolicyID, command.OperationID})
 }
 
+// Membership is pinned by operationMu before entering Task.statusLock.
 // Called under Task.statusLock, which also serializes new-run generation
 // admission. The authoritative read precedes the owner lock; its callback
 // never takes live locks. Revoke under owner.mu so a source commit cannot
@@ -152,7 +153,7 @@ func (d *Downloader) revokeMCPActionTarget(ctx context.Context, holder *mcpWrite
 	if ctx.Err() != nil || d.mcpWriteHolder() != holder {
 		return mcpWriteErr(MCPWriteCancelled)
 	}
-	if d.getTask(task.ID) != task || task.getStatus() == base.DownloadStatusDone {
+	if task.getStatus() == base.DownloadStatusDone {
 		return mcpWriteErr(MCPWriteTaskUnavailable)
 	}
 	err := withDatasetReadView(d.storage, holder.dataset, func(reader datasetReader) error {

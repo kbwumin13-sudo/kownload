@@ -2982,9 +2982,14 @@ func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) 
 	task.dataLock.RLock()
 	mcp := mcpTaskPresence(task)
 	task.dataLock.RUnlock()
-	if mcp {
+	if mcp || check != nil {
 		d.operationMu.Lock()
 		defer d.operationMu.Unlock()
+	}
+	// Deletion uses operationMu too. Check membership before statusLock:
+	// queued startup takes d.lock before that lock, never the reverse.
+	if check != nil && d.getTask(task.ID) != task {
+		return mcpWriteErr(MCPWriteTaskUnavailable)
 	}
 	var pauseDone chan struct{}
 	var previousPauseDone chan struct{}

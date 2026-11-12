@@ -189,7 +189,91 @@ func TestMCPStalePauseCannotRevokeNewGUIRun(t *testing.T) {
 	if after.Episode != current.Episode || after.SourceRevision != current.SourceRevision || after.TotalUsed != current.TotalUsed {
 		t.Fatal("stale pause mutated the current recovery account")
 	}
+
+	// A persisted-generation task in Wait can be selected by the real queue
+	// scheduler while MCP pause is checking its target. Pin the existing holder
+	// mutex only to stop the check under statusLock before notifyRunning takes
+	// d.lock; after release neither path may wait on the other's lock.
+	if err := d.Pause(&TaskFilter{IDs: []string{id}}); err != nil {
+		t.Fatal(err)
+	}
+	live.statusLock.Lock()
+	paused = live.pauseDone
+	live.statusLock.Unlock()
+	if paused != nil {
+		select {
+		case <-paused:
+		case <-ctx.Done():
+			t.Fatal("queue fixture pause did not join")
+		}
+	}
+	d.lock.Lock()
+	live.updateStatus(base.DownloadStatusWait)
+	d.enqueueLocked(live)
+	d.lock.Unlock()
+	queued := coverageRuntimeRecord(t, d, id, func(r recoveryRecord) bool { return r.Generation == current.Generation })
+	queueCommand := command
+	queueCommand.OperationID = "pause-racing-queue"
+	queueCommand.Action = &MCPWriteActionRequest{TaskID: id, Expected: mcpTarget(queued)}
+	queueGate := &mcpActionReserveGate{AtomicStorage: store, committed: make(chan struct{}), release: make(chan struct{}), ctx: ctx}
+	go func() {
+		receipt, err := d.submitMCPTaskAction(ctx, holder, queueGate, queueCommand)
+		result <- actionResult{receipt, err}
+	}()
+	select {
+	case <-queueGate.committed:
+	case <-ctx.Done():
+		t.Fatal("queued reserve did not reach gate")
+	}
+	d.mcpConfigMu.Lock()
+	var unlockOnce sync.Once
+	unlockConfig := func() { unlockOnce.Do(d.mcpConfigMu.Unlock) }
+	defer unlockConfig()
+	close(queueGate.release)
+	for {
+		if !live.statusLock.TryLock() {
+			break
+		}
+		live.statusLock.Unlock()
+		if ctx.Err() != nil {
+			t.Fatal("pause check did not take status barrier")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	d.notifyRunning()
+	for {
+		if !d.lock.TryLock() {
+			break
+		}
+		d.lock.Unlock()
+		if ctx.Err() != nil {
+			t.Fatal("queue scheduler did not enter main lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	unlockConfig()
+	select {
+	case got := <-result:
+		if got.err != nil || got.receipt.Result == nil || got.receipt.Result.Outcome != MCPWriteApplied {
+			t.Fatalf("queued pause blocked or failed: %+v %v", got.receipt, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("queue and MCP pause deadlocked")
+	}
+	queried := make(chan struct{})
+	go func() { _ = d.GetTasks(); close(queried) }()
+	select {
+	case <-queried:
+	case <-ctx.Done():
+		t.Fatal("main task queries remained blocked")
+	}
+	if live.getStatus() != base.DownloadStatusPause {
+		t.Fatal("queue restarted the paused task")
+	}
 	blocked.Store(false)
+	if err := d.Continue(&TaskFilter{IDs: []string{id}}); err != nil {
+		t.Fatal(err)
+	}
 	waitStatus(t, d, id, base.DownloadStatusDone, 8*time.Second)
 	body, err := os.ReadFile(filepath.Join(dir, "gui.bin"))
 	if err != nil || !bytes.Equal(body, payload) {
