@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"os"
 	"path"
 	"reflect"
 	"regexp"
@@ -110,6 +109,7 @@ type fetcherView struct {
 }
 
 type Fetcher struct {
+	pathFreeze    atomic.Pointer[frozenPath]
 	recovery      atomic.Pointer[transfer.RecoveryLease]
 	runController atomic.Pointer[controller.Controller]
 	viewMu        sync.RWMutex
@@ -225,6 +225,9 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) (result error) 
 // resolveForRun owns its request and candidate child. Network IO, owner calls
 // and child joins must never happen while holding the published-view mutex.
 func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *netdiskRefreshPlan) (context.Context, error) {
+	if err := f.checkPathFreeze(); err != nil {
+		return ctx, err
+	}
 	f.mu.Lock()
 	if err := f.checkOperationLocked(ctx, operation); err != nil {
 		f.mu.Unlock()
@@ -364,6 +367,9 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		child.SetTargetCredentials(credentials)
 		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
+		if err = f.bindChildPathFreeze(child); err != nil {
+			return ctx, err
+		}
 		if _, err = f.bindHTTPChild(ctx, child, hreq); err != nil {
 			return ctx, err
 		}
@@ -372,6 +378,9 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 		child.SetTargetCredentials(credentials)
 		child.SetResponsePolicy(integrity.policy)
 		child.Setup(&httpCtl)
+		if err = f.bindChildPathFreeze(child); err != nil {
+			return ctx, err
+		}
 		childCtx, bindErr := f.bindHTTPChild(ctx, child, hreq)
 		if bindErr != nil {
 			return ctx, bindErr
@@ -439,6 +448,9 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 	return ctx, nil
 }
 func (f *Fetcher) Start() error {
+	if err := f.checkPathFreeze(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	if f.closed || f.resolving {
 		f.mu.Unlock()
@@ -621,7 +633,12 @@ func (f *Fetcher) syncOptions(child *httpfetch.Fetcher) error {
 	return nil
 }
 func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
-	info, err := os.Stat(f.meta.SingleFilepath())
+	file, err := f.integrityFile()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return err
 	}
@@ -667,12 +684,7 @@ func (f *Fetcher) verifyFile(e *model.ReqExtra) error {
 	default:
 		return nil
 	}
-	file, err := os.Open(f.meta.SingleFilepath())
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if _, err = io.Copy(h, file); err != nil {
+	if _, err = io.Copy(h, io.NewSectionReader(file, 0, info.Size())); err != nil {
 		return err
 	}
 	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), parts[1]) {
@@ -798,6 +810,9 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 	defer f.mu.Unlock()
 	if f.running {
 		return errors.New("请先暂停任务再同步登录")
+	}
+	if opts != nil && f.pathFreeze.Load() != nil && (opts.Path != f.meta.Opts.Path || opts.Name != f.meta.Opts.Name || !reflect.DeepEqual(opts.SelectFiles, f.meta.Opts.SelectFiles)) {
+		return transfer.ErrRecoveryHeld
 	}
 	if req != nil {
 		e, err := parseExtra(req)
