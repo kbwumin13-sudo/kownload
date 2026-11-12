@@ -43,9 +43,14 @@ func TestVerifiedHTTPRealCoreMatchAndMismatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer release()
-			var successes atomic.Int32
+			var successes, starts atomic.Int32
+			var completionBeforeStart atomic.Bool
 			d.Listener(func(e *Event) {
+				if e.Key == EventKeyStart {
+					starts.Add(1)
+				}
 				if e.Key == EventKeyDone {
+					completionBeforeStart.Store(starts.Load() != 1)
 					successes.Add(1)
 				}
 			})
@@ -96,8 +101,8 @@ func TestVerifiedHTTPRealCoreMatchAndMismatch(t *testing.T) {
 				for successes.Load() != 1 && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
-				if successes.Load() != 1 {
-					t.Fatal("success exits", successes.Load())
+				if successes.Load() != 1 || starts.Load() != 1 || completionBeforeStart.Load() {
+					t.Fatal("Start must precede the single success exit", starts.Load(), successes.Load(), completionBeforeStart.Load())
 				}
 			} else {
 				if record.Phase == transfer.CompletionCommitted || record.ActualSHA256 != "" || owned.Status == base.DownloadStatusDone || successes.Load() != 0 {

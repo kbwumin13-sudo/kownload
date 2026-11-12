@@ -296,6 +296,7 @@ func (d *Downloader) Setup() error {
 		for !d.closed.Load() {
 			if tasks := d.taskList(); len(tasks) > 0 {
 				for _, task := range tasks {
+					notifyProgress := false
 					func() {
 						if d.getTask(task.ID) == nil || !task.lock.TryLock() {
 							return
@@ -368,7 +369,7 @@ func (d *Downloader) Setup() error {
 							task.Progress.Uploaded = currentUploaded
 						}
 						task.dataLock.Unlock()
-						d.emit(EventKeyProgress, task)
+						notifyProgress = true
 
 						// store fetcher progress when download/upload data changed
 						if !downloadDataChanged && !uploadDataChanged {
@@ -380,6 +381,12 @@ func (d *Downloader) Setup() error {
 							d.saveTask(task)
 						}
 					}()
+					// A listener may synchronously Delete while a completion Fence
+					// holds operationMu and waits for this Task. Release both Task
+					// locks (and finish persistence) before calling external code.
+					if notifyProgress {
+						d.emit(EventKeyProgress, task)
+					}
 				}
 			}
 			time.Sleep(time.Millisecond * time.Duration(d.cfg.RefreshInterval))
@@ -2131,6 +2138,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		return
 	}
 
+	var startWatch func()
 	handler := func() error {
 		task.statusLock.Lock()
 		previousPause := task.pauseDone
@@ -2421,16 +2429,24 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 			return nil
 		}
 		f := task.fetcher
-		go func() {
-			defer runCancel()
-			d.watchRun(task, f, generation, boundWait, transfer.RecoveryLeaseFromContext(runCtx))
-		}()
-		d.emit(EventKeyStart, task)
+		startWatch = func() {
+			go func() {
+				defer runCancel()
+				d.watchRun(task, f, generation, boundWait, transfer.RecoveryLeaseFromContext(runCtx))
+			}()
+		}
 		return nil
 	}
 	go func() {
 		if err := handler(); err != nil {
 			d.failTaskPreparation(task, generation, runCancel, err)
+			return
+		}
+		if startWatch != nil {
+			// Preserve Start-before-Done while keeping reentrant listeners out
+			// of Task/duplicate-reservation locks needed by lifecycle APIs.
+			d.emit(EventKeyStart, task)
+			startWatch()
 		}
 	}()
 
