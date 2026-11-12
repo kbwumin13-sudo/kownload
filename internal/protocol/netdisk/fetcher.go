@@ -346,7 +346,7 @@ func (f *Fetcher) resolveForRun(ctx context.Context, operation uint64, plan *net
 			_ = probe.Close()
 			return ctx, bindErr
 		}
-		if err = probe.ResolveContext(probeCtx, hreq, opts.Clone()); err != nil {
+		if err = probe.ResolveMetadataOnly(probeCtx, hreq, opts.Clone()); err != nil {
 			_ = probe.Close()
 			return ctx, err
 		}
