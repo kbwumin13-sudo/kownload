@@ -157,3 +157,75 @@ func TestVerifiedLayoutStorageRejectsUnsafeTargets(t *testing.T) {
 		t.Fatal("closed lease still writes through retained fd")
 	}
 }
+
+func TestVerifiedLayoutReaderKeepsSeedingReadOnly(t *testing.T) {
+	root := verifiedRootFixture(t)
+	_, lease := verifiedRootOpenFixture(t, root)
+	layout, err := pathpolicy.BuildLayoutV1(root, []pathpolicy.Member{{Index: 0, RelativePath: "seed.bin", Selected: true}, {Index: 1, RelativePath: "boundary.bin", Selected: false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCtx, stopWriter := context.WithCancel(context.Background())
+	defer stopWriter()
+	writer, binding, err := CreateVerifiedLayoutStorage(lease, layout, []int64{4, 8}, writeCtx.Err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if err := writer.Activate(binding); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := writer.WriteAt(0, []byte("seed"), 0); n != 4 || err != nil {
+		t.Fatalf("write %d/%v", n, err)
+	}
+	if err := writer.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopWriter()
+	readCtx, stopSeeding := context.WithCancel(context.Background())
+	defer stopSeeding()
+	reader, readBinding, err := OpenVerifiedLayoutReader(lease, layout, []int64{4, 8}, binding, readCtx.Err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data := make([]byte, 4)
+	if n, err := reader.ReadAt(0, data, 0); n != 0 || !errors.Is(err, ErrLayoutStorageHeld) {
+		t.Fatal("reader bypassed identity ACK")
+	}
+	if err := reader.Activate(readBinding); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := reader.ReadAt(0, data, 0); n != 4 || err != nil || string(data) != "seed" {
+		t.Fatalf("seeding read %q %d/%v", data, n, err)
+	}
+	if n, err := reader.WriteAt(0, []byte("evil"), 0); n != 0 || !errors.Is(err, ErrLayoutStorageHeld) {
+		t.Fatal("published reader became writer")
+	}
+	file, err := reader.NativeFile(0)
+	if err != nil || completionReadOnly(file) != nil {
+		t.Fatal("escaped fd is not OS readonly")
+	}
+	if n, err := file.WriteAt([]byte("evil"), 0); n != 0 || err == nil {
+		t.Fatal("native readonly fd accepted write")
+	}
+	stopSeeding()
+	if n, err := reader.ReadAt(0, data, 0); n != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled seeding still reads")
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "seed.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if r, _, err := OpenVerifiedLayoutReader(lease, layout, []int64{4, 8}, binding, func() error { return nil }); r != nil || err == nil {
+		t.Fatal("reader created missing file")
+	}
+	if _, err := os.Stat(filepath.Join(root, "seed.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("reader changed namespace")
+	}
+}

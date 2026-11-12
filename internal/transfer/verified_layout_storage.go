@@ -33,15 +33,16 @@ type VerifiedLayoutFileIdentity struct {
 // guard must be a nonblocking, in-memory current-run/F-ACK check, never DB/Core
 // locks, network or a callback which reenters this storage.
 type VerifiedLayoutStorage struct {
-	mu      sync.RWMutex
-	lease   *VerifiedRootLease
-	layout  pathpolicy.LayoutV1
-	sizes   []int64
-	files   []*os.File
-	binding VerifiedLayoutBinding
-	guard   func() error
-	active  bool
-	closed  bool
+	mu       sync.RWMutex
+	lease    *VerifiedRootLease
+	layout   pathpolicy.LayoutV1
+	sizes    []int64
+	files    []*os.File
+	binding  VerifiedLayoutBinding
+	guard    func() error
+	readOnly bool
+	active   bool
+	closed   bool
 }
 
 // CreateVerifiedLayoutStorage is called only after the complete F is durably
@@ -49,16 +50,26 @@ type VerifiedLayoutStorage struct {
 // A failed/unknown subsequent identity Save must Close without Activate. Failure
 // preserves files: a retry cannot adopt an unrecorded same-name entry.
 func CreateVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.LayoutV1, sizes []int64, guard func() error) (*VerifiedLayoutStorage, VerifiedLayoutBinding, error) {
-	return openVerifiedLayoutStorage(lease, layout, sizes, nil, guard)
+	return openVerifiedLayoutStorage(lease, layout, sizes, nil, guard, false)
 }
 
 // OpenVerifiedLayoutStorage resumes only the original recorded identities. It
 // never creates a missing directory/file, truncates or claims another inode.
 func OpenVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.LayoutV1, sizes []int64, binding VerifiedLayoutBinding, guard func() error) (*VerifiedLayoutStorage, VerifiedLayoutBinding, error) {
-	return openVerifiedLayoutStorage(lease, layout, sizes, &binding, guard)
+	return openVerifiedLayoutStorage(lease, layout, sizes, &binding, guard, false)
 }
 
-func openVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.LayoutV1, sizes []int64, previous *VerifiedLayoutBinding, guard func() error) (*VerifiedLayoutStorage, VerifiedLayoutBinding, error) {
+// OpenVerifiedLayoutReader reopens the same recorded files O_RDONLY, without
+// creating or truncating anything. Core supplies its independent, already
+// authorized native seeding lifecycle; a completed download's cancelled writer
+// context is not a read permission. Published state never reopens an RW handle.
+// Activate still requires the exact acknowledged identity binding. Selected
+// files must be complete-sized; unselected boundary files may remain partial.
+func OpenVerifiedLayoutReader(lease *VerifiedRootLease, layout pathpolicy.LayoutV1, sizes []int64, binding VerifiedLayoutBinding, guard func() error) (*VerifiedLayoutStorage, VerifiedLayoutBinding, error) {
+	return openVerifiedLayoutStorage(lease, layout, sizes, &binding, guard, true)
+}
+
+func openVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.LayoutV1, sizes []int64, previous *VerifiedLayoutBinding, guard func() error, readOnly bool) (*VerifiedLayoutStorage, VerifiedLayoutBinding, error) {
 	if layout.Version != pathpolicy.LayoutVersion || guard == nil || lease == nil {
 		return nil, VerifiedLayoutBinding{}, ErrLayoutStorageHeld
 	}
@@ -95,7 +106,7 @@ func openVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.Layou
 	if err = guard(); err != nil {
 		return nil, VerifiedLayoutBinding{}, err
 	}
-	s := &VerifiedLayoutStorage{lease: lease, layout: owned, sizes: append([]int64(nil), sizes...), guard: guard,
+	s := &VerifiedLayoutStorage{lease: lease, layout: owned, sizes: append([]int64(nil), sizes...), guard: guard, readOnly: readOnly,
 		binding: VerifiedLayoutBinding{Version: 1, Files: make([]VerifiedLayoutFileIdentity, 0, len(owned.Members))}}
 	err = lease.WithDirectory(func(root *CompletionDirectory) error {
 		if lease.root.binding.Path != owned.ParentRoot {
@@ -117,6 +128,8 @@ func openVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.Layou
 			var file *os.File
 			if previous == nil {
 				file, err = directory.CreateStaging(parts[len(parts)-1])
+			} else if readOnly {
+				file, err = directory.openFile(parts[len(parts)-1])
 			} else {
 				file, err = directory.openStagingWriter(parts[len(parts)-1])
 			}
@@ -130,9 +143,15 @@ func openVerifiedLayoutStorage(lease *VerifiedRootLease, layout pathpolicy.Layou
 			}
 			identity, err := CompletionIdentityOf(file)
 			info, statErr := file.Stat()
-			if err != nil || statErr != nil || info.Size() > sizes[i] || previous != nil && identity != previous.Files[i].Identity {
+			if err != nil || statErr != nil || info.Size() > sizes[i] || previous != nil && identity != previous.Files[i].Identity || readOnly && member.Selected && info.Size() != sizes[i] {
 				_ = file.Close()
 				return completionError(CompletionIdentity, errors.Join(err, statErr))
+			}
+			if readOnly {
+				if err := errors.Join(checkLayoutFile(file, identity), completionReadOnly(file)); err != nil {
+					_ = file.Close()
+					return err
+				}
 			}
 			s.files = append(s.files, file)
 			s.binding.Files = append(s.binding.Files, VerifiedLayoutFileIdentity{Index: i, RelativePath: member.RelativePath, Identity: identity})
@@ -256,6 +275,9 @@ func (s *VerifiedLayoutStorage) ReadAt(index int, data []byte, offset int64) (in
 func (s *VerifiedLayoutStorage) WriteAt(index int, data []byte, offset int64) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.readOnly {
+		return 0, ErrLayoutStorageHeld
+	}
 	if err := s.check(index); err != nil {
 		return 0, err
 	}
@@ -267,7 +289,8 @@ func (s *VerifiedLayoutStorage) WriteAt(index int, data []byte, offset int64) (i
 
 // NativeFile is only for libraries whose FileHandler requires *os.File. The
 // file is borrowed, never reopened; caller must stop/join those native users
-// before Close/Sync or releasing its root lease. BT uses ReadAt/WriteAt instead.
+// before Close/Sync or releasing its root lease. A reader returns only the same
+// OS-readonly fd, never a writer. BT uses ReadAt/WriteAt instead.
 func (s *VerifiedLayoutStorage) NativeFile(index int) (*os.File, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -283,6 +306,9 @@ func (s *VerifiedLayoutStorage) Sync() error {
 	defer s.mu.RUnlock()
 	if s.closed {
 		return ErrLayoutStorageHeld
+	}
+	if s.readOnly {
+		return nil
 	}
 	for _, file := range s.files {
 		if err := file.Sync(); err != nil {
