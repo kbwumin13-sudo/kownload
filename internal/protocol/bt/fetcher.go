@@ -17,6 +17,7 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/bt"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -56,8 +57,9 @@ func (e *metadataResolveError) Error() string {
 func (e *metadataResolveError) Unwrap() error { return e.cause }
 
 type torrentRef struct {
-	count int
-	owned bool
+	count       int
+	owned       bool
+	pathStorage *pathStorage
 }
 
 type Fetcher struct {
@@ -78,7 +80,9 @@ type Fetcher struct {
 	heldTorrent     *torrent.Torrent // protected by opMu; references use the global lock
 	resolveMu       sync.Mutex
 	resolveCancel   context.CancelFunc
-	seedMu          sync.Mutex // guards data.SeedBytes and data.SeedTime, updated by doUpload
+	seedMu          sync.Mutex   // guards data.SeedBytes and data.SeedTime, updated by doUpload
+	pathStorage     *pathStorage // opted in before any native acquisition
+	pathOwner       string
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -198,6 +202,11 @@ func (f *Fetcher) Start() (err error) {
 	// runs under those locks, so it must never wait for peers.
 	if !f.torrentReady.Load() {
 		return errMetadataNotReady
+	}
+	if f.pathStorage != nil {
+		if err := f.pathStorage.ready(); err != nil {
+			return err
+		}
 	}
 
 	files := f.torrent.Files()
@@ -333,6 +342,17 @@ func (f *Fetcher) Wait() (err error) {
 		case <-time.After(time.Second):
 			if f.torrentReady.Load() && len(f.meta.Opts.SelectFiles) > 0 {
 				if f.isDone() {
+					if f.pathStorage != nil {
+						// D6 files remain identity-bound, including boundary bytes in
+						// unselected members; never pathname-delete frozen entries.
+						f.pathStorage.mu.RLock()
+						output := f.pathStorage.output
+						f.pathStorage.mu.RUnlock()
+						if output == nil {
+							return transfer.ErrLayoutStorageHeld
+						}
+						return output.Sync()
+					}
 					// remove unselected files
 					for i, file := range f.torrent.Files() {
 						selected := false
@@ -371,6 +391,9 @@ func (f *Fetcher) isDone() bool {
 func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 	if opts == nil {
 		return nil
+	}
+	if f.pathStorage != nil && f.meta.Res != nil && opts.SelectFiles != nil && !sameFrozenSelection(f.meta.Opts.SelectFiles, opts.SelectFiles, len(f.meta.Res.Files)) {
+		return transfer.ErrLayoutStorageHeld
 	}
 
 	if opts.SelectFiles != nil {
@@ -426,7 +449,7 @@ func (f *Fetcher) updateRes() {
 		Hash:  f.torrent.InfoHash().String(),
 	}
 	// Directory torrent
-	if f.torrent.Info().Length == 0 {
+	if f.pathStorage != nil && f.torrent.Info().IsDir() || f.pathStorage == nil && f.torrent.Info().Length == 0 {
 		res.Name = f.torrent.Name()
 	}
 	for i, file := range f.torrent.Files() {
@@ -625,12 +648,16 @@ func (f *Fetcher) acquireLocked(ctx context.Context, req *base.Request) (t *torr
 		return
 	}
 	downloadPath := f.meta.Opts.Path
-	spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
-		ClientBaseDir: cfg.DataDir,
-		TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
-			return downloadPath
-		},
-	})
+	if f.pathStorage != nil {
+		spec.Storage = f.pathStorage
+	} else {
+		spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
+			ClientBaseDir: cfg.DataDir,
+			TorrentDirMaker: func(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
+				return downloadPath
+			},
+		})
+	}
 	var added bool
 	t, added, err = client.AddTorrentSpec(spec)
 	if err != nil {
@@ -641,8 +668,14 @@ func (f *Fetcher) acquireLocked(ctx context.Context, req *base.Request) (t *torr
 		return nil, err
 	}
 	ref := torrentRefs[t]
+	// A shared torrent owns one storage object. Never adopt a legacy/different
+	// task's file client (or let legacy creation adopt a D6 writer) by infohash.
+	if !added && (ref == nil && f.pathStorage != nil || ref != nil && ref.pathStorage != f.pathStorage) {
+		lock.Unlock()
+		return nil, transfer.ErrLayoutStorageHeld
+	}
 	if ref == nil {
-		ref = &torrentRef{owned: added}
+		ref = &torrentRef{owned: added, pathStorage: f.pathStorage}
 		torrentRefs[t] = ref
 	}
 	ref.count++
