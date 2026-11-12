@@ -43,7 +43,10 @@ func (f *Fetcher) configurePublicSource(ctx context.Context) error {
 		return nil
 	}
 	f.publicSource.Store(&source)
-	if !mailru.Direct(f.meta.Req.URL) {
+	f.redirectLock.Lock()
+	resolved := f.redirectURL != ""
+	f.redirectLock.Unlock()
+	if !mailru.Direct(f.meta.Req.URL) && !resolved {
 		return f.refreshPublicLink(ctx, "")
 	}
 	return nil
@@ -65,7 +68,7 @@ func (f *Fetcher) publicSourceSnapshot() *mailru.Source {
 // cannot be renewed still ends with status=403.
 func (f *Fetcher) refreshPublicLink(ctx context.Context, refusedURL string) error {
 	if lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(ctx)); lease != nil && lease.ActionVersion == 4 {
-		return transfer.ErrRecoveryWork
+		return f.capturePublicRefresh(ctx, refusedURL)
 	}
 
 	f.publicMu.Lock()

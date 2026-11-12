@@ -611,9 +611,9 @@ func (d *Downloader) attachOperationSnapshotLocked(task *Task, createdNow bool) 
 		d.tasks = append(d.tasks, task)
 		return nil
 	}
-	// Only this process's successful M authorizes the first unresolved HTTP
+	// Only this process's successful M authorizes the first unresolved managed
 	// request. Q readback/replay and startup do not recover that authority.
-	task.initialHTTPExecution.Store(createdNow && task.Protocol == "http" && task.Meta.Res == nil)
+	task.initialHTTPExecution.Store(createdNow && (task.Protocol == "http" || task.Protocol == "netdisk" || task.Protocol == "media") && task.Meta.Res == nil)
 	task.updateStatus(base.DownloadStatusWait)
 	d.tasks = append(d.tasks, task)
 	d.enqueueLocked(task)
@@ -726,7 +726,7 @@ func (d *Downloader) cancelBatchOperationInDataset(id, dataset string, requireIn
 		if !exists {
 			return nil
 		}
-		if !r.valid() || r.OperationID != id {
+		if !r.valid() || r.Version != 1 || r.OperationID != id {
 			return ErrOperationConflict
 		}
 		if len(requireIntegrity) > 0 && requireIntegrity[0] && (r.Integrity == nil || !r.Integrity.valid()) {

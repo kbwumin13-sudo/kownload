@@ -191,7 +191,16 @@ func (f *Fetcher) recoveryContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+	if previous := transfer.RecoveryLeaseFromContext(ctx); previous != nil {
+		// Only future scopes on this still-live run may inherit a confirmed
+		// source handoff. An old request/body scope is never relabeled.
+		if ctx.Err() == nil && ctx.Value(sharedIOContextKey{}) == nil {
+			if run := f.recovery.Load(); run != nil && previous.Owner == run.lease.Owner &&
+				previous.Token.TaskID == run.lease.Token.TaskID && previous.Token.Episode == run.lease.Token.Episode &&
+				previous.Token.Generation == run.lease.Token.Generation && previous.Token.SourceRevision < run.lease.Token.SourceRevision {
+				return transfer.WithRecoveryLease(ctx,run.lease)
+			}
+		}
 		return ctx
 	}
 	if run := f.recovery.Load(); run != nil {
@@ -223,10 +232,18 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	if limit < 1 || limit > 1024 {
 		return transfer.ErrRecoveryWork
 	}
+	childFunded := true
+	if owner,ok := run.lease.Owner.(transfer.RecoveryChildWaveController);ok {
+		var err error
+		// No HTTP/connection/barrier lock spans a parent owner callback.
+		childFunded,err = owner.BeginRecoveryChildWave(f.recoveryContext(f.boundRunContext()),run.lease.Token,limit)
+		if err != nil { return err }
+	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	run.initialLimit = limit
 	run.initialClaims = make(map[int]bool)
+	if !childFunded { for id:=0;id<limit;id++ { run.initialClaims[id] = true } }
 	if run.lease.ActionVersion == 4 && len(run.lease.InitialMembers) > 0 {
 		start := len(run.lease.InitialMembers) == 1 && run.lease.InitialMembers[0] == "start"
 		if !start {
@@ -245,7 +262,7 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	return nil
 }
 func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
-	lease := transfer.RecoveryLeaseFromContext(conn.ctx)
+	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(conn.ctx))
 	if lease == nil {
 		return nil
 	}
@@ -286,13 +303,20 @@ func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
 }
 
 func (f *Fetcher) retryManagedConnection(conn *connection, cause error) bool {
-	lease := transfer.RecoveryLeaseFromContext(conn.ctx)
+	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(conn.ctx))
 	if lease == nil {
 		return false
 	}
 	run := f.recovery.Load()
 	if run == nil || run.lease.Token != lease.Token {
 		f.stopForCredentialFailure(conn, transfer.ErrRecoveryStale)
+		return true
+	}
+	// The parent provider owns signed-link refresh. Preserve only this typed
+	// expiry cause when returning its child result; HTTP still performs no
+	// authentication replay and direct HTTP retains its original classifier.
+	if lease.ParentContext != nil && lease.ParentContext.Protocol() == "netdisk" && IsExpiredLinkError(cause) {
+		f.stopForCredentialFailure(conn, cause)
 		return true
 	}
 	classification := ClassifyRecoveryError(cause)
@@ -387,7 +411,14 @@ func (f *Fetcher) finishManagedConnection(conn *connection) error {
 	}
 	permit := conn.recoveryPermit
 	conn.recoveryPermit = nil
-	return permit.Finish(conn.ctx)
+	err := permit.Finish(conn.ctx)
+	if errors.Is(err,transfer.ErrRecoveryStale) {
+		old := transfer.RecoveryLeaseFromContext(conn.ctx)
+		if run := f.recovery.Load(); old != nil && run != nil && old.Token.TaskID == run.lease.Token.TaskID && old.Token.Episode == run.lease.Token.Episode && old.Token.Generation == run.lease.Token.Generation && old.Token.SourceRevision < run.lease.Token.SourceRevision {
+			return nil // Late old-source bookkeeping must not cancel the new source.
+		}
+	}
+	return err
 }
 
 func (f *Fetcher) CaptureRecoveryContext(req *base.Request) (*transfer.HTTPExecutionContext, bool, error) {

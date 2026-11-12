@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/controller"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	model "github.com/GopeedLab/gopeed/pkg/protocol/media"
 )
@@ -203,6 +204,14 @@ func inspectInfo(ctx context.Context, req *base.Request, ctl *controller.Control
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	if transfer.RecoveryLeaseFromContext(ctx) != nil {
+		// A funded Task never joins another Task's background extraction.
+		frozenCtl, frozenCfg, err := mediaExecutionContext(ctx, ctl, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return extractInfo(mediaWorkContext(ctx, "media/inspect"), &requestCopy, extra, frozenCtl, frozenCfg)
 	}
 	baseKey := baseInspectionKey(&requestCopy, extra, cfg)
 	if extra.Format != "" {
@@ -437,7 +446,12 @@ func extractInfo(ctx context.Context, req *base.Request, extra *model.ReqExtra, 
 		return nil, nil, err
 	}
 	defer commandCleanup()
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	out, err := cmd.Output()
+	if checkErr := mediaRecoveryCheck(ctx); checkErr != nil {
+		return nil, nil, checkErr
+	}
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -490,7 +504,7 @@ func Inspect(ctx context.Context, req *base.Request, ctl *controller.Controller)
 	}
 	_, result, err := inspectInfo(ctx, snapshot, ctl, configFor(ctl))
 	if err == nil && result.Supported && snapshot.Extra.(*model.ReqExtra).CollectContext {
-		result.ContextURLs = discoverContext(ctx, snapshot, ctl, result)
+		result.ContextURLs, err = discoverContextChecked(ctx, snapshot, ctl, result)
 	}
 	return result, err
 }

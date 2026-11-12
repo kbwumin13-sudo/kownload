@@ -151,11 +151,11 @@ func recoveryRequirementFor(record recoveryRecord) (recoveryRequirement, error) 
 // This declaration validator performs no reads, enrollment, migration or grants.
 func validateRecoveryTriplet(task *Task, record recoveryRecord, required recoveryRequirement) error {
 	expected, err := recoveryRequirementFor(record)
-	if err != nil || task == nil || task.ID != record.TaskID || task.Protocol != "http" || task.Meta == nil || task.Meta.Req == nil ||
+	if err != nil || task == nil || task.ID != record.TaskID || !recoveryProtocolCompatible(task.Protocol, record.Version) || task.Meta == nil || task.Meta.Req == nil ||
 		task.Recovery == nil || task.Recovery.Version != record.Version || required != expected {
 		return transfer.ErrRecoveryHeld
 	}
-	hash, err := recoverySourceHash(task.Meta.Req, record.ExecutionDefaultsHash)
+	hash, err := recoveryTaskSourceHash(task, record.ExecutionDefaultsHash)
 	if err != nil || hash != record.SourceHash {
 		return transfer.ErrRecoveryHeld
 	}

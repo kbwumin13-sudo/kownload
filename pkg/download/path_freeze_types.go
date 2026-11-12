@@ -117,6 +117,7 @@ type PathFileIdentity struct {
 	Identity     transfer.CompletionFileIdentity `json:"identity"`
 }
 type PathLayoutOutputState struct {
+	Phase                 MCPWriteOutputPhase              `json:"phase"`
 	Version               int                              `json:"version"`
 	DirectoryIdentity     transfer.CompletionFileIdentity  `json:"directoryIdentity"`
 	WorkDirectoryIdentity *transfer.CompletionFileIdentity `json:"workDirectoryIdentity"`

@@ -93,6 +93,14 @@ func readOperationSnapshotFrom(reader datasetReader, id string) (scopedOperation
 	if err != nil {
 		return snapshot, err
 	}
+	if record != nil && record.Version == 2 {
+		if record.Path == nil {
+			return snapshot, ErrOperationConflict
+		}
+		if err := requireDataset(reader, record.Path.DatasetID); err != nil {
+			return snapshot, err
+		}
+	}
 	snapshot.record = record
 	snapshot.tasks = make(map[string]*Task)
 	snapshot.result, err = operationResultFrom(reader, id, record, snapshot.tasks)

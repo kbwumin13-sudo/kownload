@@ -11,6 +11,7 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/transfer"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	ped2k "github.com/GopeedLab/gopeed/pkg/protocol/ed2k"
 	"github.com/monkeyWie/goed2k"
@@ -18,14 +19,20 @@ import (
 )
 
 type clientStateStore struct {
-	store fetcher.ProtocolStateStore
+	store       fetcher.ProtocolStateStore
+	stateMu     sync.Mutex // serializes native snapshots and explicit post-delete forget
+	pathMu      sync.Mutex
+	pathOwners  map[gprotocol.Hash]string
+	pathRecords map[gprotocol.Hash]nativePathTransfer
 }
 
 func (s *clientStateStore) Load() (*goed2k.ClientState, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	var state goed2k.ClientState
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	var state nativePathState
 	exist, err := s.store.Load(&state)
 	if err != nil {
 		return nil, err
@@ -33,17 +40,33 @@ func (s *clientStateStore) Load() (*goed2k.ClientState, error) {
 	if !exist {
 		return nil, nil
 	}
-	return &state, nil
+	return s.loadNativePath(&state)
 }
 
 func (s *clientStateStore) Save(state *goed2k.ClientState) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
-	if state == nil {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.pathMu.Lock()
+	noPathRecords := len(s.pathRecords) == 0
+	noPathOwners := len(s.pathOwners) == 0
+	s.pathMu.Unlock()
+	if noPathRecords && noPathOwners {
+		if state == nil {
+			return s.store.Delete()
+		}
+		return s.store.Save(state)
+	}
+	if state == nil && noPathRecords {
 		return s.store.Delete()
 	}
-	return s.store.Save(state)
+	owned, err := s.saveNativePath(state)
+	if err != nil {
+		return err
+	}
+	return s.store.Save(owned)
 }
 
 type Fetcher struct {
@@ -54,8 +77,12 @@ type Fetcher struct {
 	meta    *fetcher.FetcherMeta
 	handle  goed2k.TransferHandle
 
-	waitCtx    context.Context
-	waitCancel context.CancelFunc
+	waitCtx     context.Context
+	waitCancel  context.CancelFunc
+	pathMu      sync.Mutex
+	pathOwner   string
+	pathOutput  *transfer.VerifiedLayoutStorage
+	pathHandler *pathFileHandler
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -83,6 +110,12 @@ func (f *Fetcher) Resolve(req *base.Request, opts *base.Options) error {
 }
 
 func (f *Fetcher) Start() error {
+	f.pathMu.Lock()
+	pathManaged := f.pathOwner != ""
+	f.pathMu.Unlock()
+	if pathManaged {
+		return f.startPathTransfer()
+	}
 	link, err := parseLink(f.meta.Req.URL)
 	if err != nil {
 		return err
@@ -94,6 +127,9 @@ func (f *Fetcher) Start() error {
 	client, err := f.getClient()
 	if err != nil {
 		return err
+	}
+	if f.manager.managedPathHash(link.Hash) {
+		return transfer.ErrLayoutStorageHeld
 	}
 
 	targetPath := f.meta.SingleFilepath()
@@ -132,6 +168,9 @@ func (f *Fetcher) Start() error {
 }
 
 func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
+	if f.pathOwner != "" && (req != nil && req.URL != "" && req.URL != f.meta.Req.URL || opts != nil && (opts.Path != "" && opts.Path != f.meta.Opts.Path || opts.Name != "" && opts.Name != f.meta.Opts.Name)) {
+		return transfer.ErrLayoutStorageHeld
+	}
 	handle := f.currentHandle()
 
 	if opts != nil && (opts.Name != "" || opts.Path != "") && handle.IsValid() {
@@ -175,6 +214,14 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 }
 
 func (f *Fetcher) Pause() error {
+	f.pathMu.Lock()
+	handler := f.pathHandler
+	f.pathMu.Unlock()
+	if handler != nil {
+		handler.mu.Lock()
+		handler.stopping = true
+		handler.mu.Unlock()
+	}
 	handle := f.currentHandle()
 	if !handle.IsValid() {
 		return nil
@@ -289,6 +336,12 @@ func (f *Fetcher) currentHandle() goed2k.TransferHandle {
 	if f.handle.IsValid() {
 		return f.handle
 	}
+	f.pathMu.Lock()
+	managed := f.pathOwner != ""
+	f.pathMu.Unlock()
+	if managed {
+		return f.handle
+	}
 	if f.manager == nil {
 		return f.handle
 	}
@@ -298,6 +351,9 @@ func (f *Fetcher) currentHandle() goed2k.TransferHandle {
 	}
 	hash, err := f.hash()
 	if err != nil {
+		return f.handle
+	}
+	if f.manager.managedPathHash(hash) {
 		return f.handle
 	}
 	handle := client.FindTransfer(hash)

@@ -85,8 +85,11 @@ func (s *Service) resolveDeferred(ctx context.Context, ctl *controller.Controlle
 	}
 	// Shared originals can be reauthorized, but this batch can create or read
 	// copies only under the account captured when its manifest was created.
-	ss, err := s.session(e.Provider, e.SessionID, account)
-	if err != nil && state == "planned" {
+	if transfer.RecoveryLeaseFromContext(ctx) != nil && e.AccountID != account {
+		return nil, LoginRequired(e.Provider)
+	}
+	ss, err := s.recoverySession(ctx, e.Provider, e.SessionID, account)
+	if err != nil && state == "planned" && transfer.RecoveryLeaseFromContext(ctx) == nil {
 		// A fresh permission to the same shared originals survives cookie/UID
 		// rotation. It never authorizes copying into another account.
 		ss = s.sourceSession(e)
