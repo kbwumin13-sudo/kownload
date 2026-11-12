@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 import 'package:gopeed/api/model/create_task.dart';
+import 'package:gopeed/api/model/http_path_create.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/app/modules/create/controllers/create_controller.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
@@ -1255,6 +1256,108 @@ void main() {
     expect(input(t), 'https://fixture.invalid/new');
     expect(MacPanel.taskResult.value, isNull);
     expect(f.posts, 1);
+  });
+  testWidgets(
+      'path opt-in waits for capability and journals one POST; changed intent only queries',
+      (t) async {
+    var supported = false;
+    const caps = [httpPathCapability, 'http-sha256-completion/v1'];
+    f.override = (q) async {
+      final root = '/api/v1/datasets/${f.dataset}/http-path/v1';
+      if (!q.uri.path.startsWith(root)) {
+        await f.handle(q);
+        return;
+      }
+      if (q.uri.path.endsWith('/capability')) {
+        if (!supported) {
+          q.response.statusCode = 404;
+          q.response.write('<html>old</html>');
+          await q.response.close();
+          return;
+        }
+        await f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'kind': httpPathCreateKind,
+          'requestVersion': 1,
+          'supported': true,
+          'requiredCapabilities': caps,
+          'methods': {
+            'create': 'POST',
+            'query': 'GET',
+            'cancel': 'POST',
+            'preview': 'POST'
+          }
+        });
+      } else if (q.method == 'POST') {
+        expect(journalBox.puts, 1,
+            reason: 'journal ACK must precede first POST');
+        final op = (f.requests.last['body'] as Map)['operationId'] as String;
+        f.receipts[op] = f.receipt(op, count: 1);
+        await f.respond(q, null,
+            status: 503,
+            code: 1000,
+            msg: 'operation_unavailable_query_same_id');
+      } else {
+        final op = Uri.decodeComponent(q.uri.pathSegments.last);
+        await f.respond(q, {
+          ...f.wrapper(f.receipts[op] ?? f.receipt(op, state: 'unknown')),
+          'kind': httpPathCreateKind,
+          'requiredCapabilities': f.receipts.containsKey(op) ? caps : []
+        });
+      }
+    };
+    await checksum(t);
+    final toggle = find.byKey(const ValueKey('http-path-opt-in'));
+    Future<void> togglePath(bool value) async {
+      final checkbox = find.descendant(of: toggle, matching: find.byType(Checkbox));
+      await t.ensureVisible(checkbox);
+      await t.pumpAndSettle();
+      expect(checkbox.hitTestable(), findsOneWidget,
+          reason: 'the real opt-in checkbox must be rendered and hittable');
+      await t.tap(checkbox);
+      await t.pump();
+      expect(t.widget<CheckboxListTile>(toggle).value, value);
+    }
+    await togglePath(true);
+    await confirmChecksum(t);
+    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    expect(f.posts, 0);
+    expect(journalBox.puts, 0);
+    supported = true;
+    await confirmChecksum(t);
+    await spin(t,
+        () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final body =
+        f.requests.firstWhere((q) => q['method'] == 'POST')['body'] as Map;
+    expect(body['requiredCapabilities'], caps);
+    expect(body['pathIntent'],
+        {'version': 1, 'path': dir.path, 'origin': 'default'});
+    expect(body['request']['opts']['path'], dir.path);
+    expect(body['integrity']['expectedSHA256'], 'a' * 64);
+    expect(singles, 0);
+    final op = body['operationId'];
+    await togglePath(false);
+    final gets = f.requests
+        .where((q) => q['method'] == 'GET' && q['uri'].path.endsWith('/$op'))
+        .length;
+    final query = find.text('查询原批次');
+    await t.ensureVisible(query);
+    await t.tap(query);
+    await spin(
+        t,
+        () =>
+            f.requests
+                .where((q) =>
+                    q['method'] == 'GET' && q['uri'].path.endsWith('/$op'))
+                .length >
+            gets);
+    await t
+        .runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await t.pump();
+    expect(f.posts, 1);
+    expect(input(t), 'https://fixture.invalid/single');
+    expect(MacPanel.taskResult.value, isNull);
   });
   testWidgets(
       'single and mixed BT multi retain their original single creator path',

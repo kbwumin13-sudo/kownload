@@ -152,6 +152,9 @@ ExtraConfig _$ExtraConfigFromJson(Map<String, dynamic> json) => ExtraConfig(
               .toList() ??
           const [],
     )
+      ..pathPolicyV1 = json.containsKey('pathPolicyV1')
+          ? PathPolicyConfig.fromJson(json['pathPolicyV1'])
+          : null
       ..bt = ExtraConfigBt.fromJson(json['bt'] as Map<String, dynamic>)
       ..githubMirror = ExtraConfigGithubMirror.fromJson(
           json['githubMirror'] as Map<String, dynamic>?);
@@ -166,6 +169,8 @@ Map<String, dynamic> _$ExtraConfigToJson(ExtraConfig instance) =>
       'notifyWhenNewVersion': instance.notifyWhenNewVersion,
       'autoStartTasks': instance.autoStartTasks,
       'desktopNotification': instance.desktopNotification,
+      if (instance.pathPolicyV1 != null)
+        'pathPolicyV1': instance.pathPolicyV1!.toJson(),
       'downloadCategories':
           instance.downloadCategories.map((e) => e.toJson()).toList(),
       'bt': instance.bt.toJson(),

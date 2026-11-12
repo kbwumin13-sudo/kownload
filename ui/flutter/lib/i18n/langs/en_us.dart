@@ -1,5 +1,36 @@
 const enUS = {
   'en_US': {
+    "pathPolicyTitle": "Path rules",
+    "pathPolicyEnabled": "Enable path rules",
+    "pathPolicyScope":
+        "Off by default. Applies only to new single-link HTTP(S) tasks that explicitly select path freezing. Existing files stay in place.",
+    "pathPolicyUnsupportedConfig":
+        "This rule configuration is unsupported. Its original value is preserved and cannot be overwritten here.",
+    "pathPolicyRuleKind": "Match type",
+    "pathPolicyKind_user": "Combined conditions (all must match)",
+    "pathPolicyKind_domain": "Domain",
+    "pathPolicyKind_mime": "MIME type",
+    "pathPolicyKind_extension": "File extension",
+    "pathPolicyDomain": "Exact domain",
+    "pathPolicyMIME": "MIME type",
+    "pathPolicyExtension": "Final file extension",
+    "pathPolicyMoveUp": "Move up",
+    "pathPolicyMoveDown": "Move down",
+    "pathPolicyAddRule": "Add rule",
+    "pathPolicySaveFailed": "Path rules were not saved. Please try again.",
+    "httpPathOptIn": "Freeze the destination for this download",
+    "httpPathOptInHint":
+        "For one manual HTTP(S) link. Uses saved rules without changing existing tasks.",
+    "httpPathPreview": "Preview destination",
+    "httpPathPreviewHint":
+        "Preview creates no task and grants no execution permission. The service confirms the final path.",
+    "httpPathUnavailable":
+        "The download service has not confirmed the required path-freezing capability. No create request was sent.",
+    "httpPathInvalidRequest":
+        "Path freezing requires one direct HTTP(S) link. Check the current draft.",
+    "httpPathPreviewFailed":
+        "The destination preview could not be confirmed for this draft.",
+    "httpPathPreviewResult": "Preview root: @root\nFile name: @name",
     'label': 'English',
     'error': 'Error',
     'httpRecoveryCooldown':

@@ -14,4 +14,12 @@ class PathIntent {
   final PathOrigin origin;
 
   const PathIntent({required this.path, required this.origin});
+
+  String get wireOrigin => switch (origin) {
+        PathOrigin.defaultPath => 'default',
+        PathOrigin.userSelected => 'user_selected',
+        PathOrigin.manualCategory => 'manual_category',
+        PathOrigin.sourceSuggested => 'source_suggested',
+        PathOrigin.unknown => 'unknown',
+      };
 }

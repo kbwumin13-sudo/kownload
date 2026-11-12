@@ -1,4 +1,5 @@
 import 'package:json_annotation/json_annotation.dart';
+import 'path_policy_config.dart';
 
 part 'downloader_config.g.dart';
 
@@ -209,6 +210,9 @@ class ExtraConfig {
   bool autoStartTasks;
   bool desktopNotification;
   List<DownloadCategory> downloadCategories;
+
+  @JsonKey(includeIfNull: false)
+  PathPolicyConfig? pathPolicyV1;
 
   ExtraConfigBt bt = ExtraConfigBt();
   ExtraConfigGithubMirror githubMirror = ExtraConfigGithubMirror();

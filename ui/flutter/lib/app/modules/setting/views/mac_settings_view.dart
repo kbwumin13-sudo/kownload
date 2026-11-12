@@ -917,6 +917,10 @@ class _MacSettingsViewState extends State<MacSettingsView> {
           current.enabled = enabled;
           current.mirrors = mirrors;
         };
+      case 'pathPolicy':
+        final previous = config.extra.pathPolicyV1;
+        config.extra.pathPolicyV1 = draft.extra.pathPolicyV1;
+        return () => config.extra.pathPolicyV1 = previous;
       default:
         throw StateError('Unknown settings section: $section');
     }
@@ -980,6 +984,13 @@ class _MacSettingsViewState extends State<MacSettingsView> {
             (value) => cfg.extra.defaultDirectDownload = value),
         _toggle(context, '打开应用时继续未完成的下载', cfg.extra.autoStartTasks,
             (value) => cfg.extra.autoStartTasks = value),
+        _row(context, 'pathPolicyTitle'.tr,
+            control: MacButton(
+                key: const ValueKey('settings-path-policy'),
+                onPressed: _saving
+                    ? null
+                    : () => _editSection('pathPolicy', 'pathPolicyTitle'.tr),
+                child: const Text('编辑…'))),
       ]),
       _group(context, '下载完成后', [
         _toggle(context, '自动解压压缩包', cfg.archive.autoExtract,

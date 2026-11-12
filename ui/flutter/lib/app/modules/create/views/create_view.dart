@@ -10,6 +10,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
 import 'package:rounded_loading_button_plus/rounded_loading_button.dart';
@@ -26,6 +27,8 @@ import '../../../../api/model/task.dart';
 import '../../task/views/http_task_retry_button.dart';
 import '../../../../api/netdisk.dart';
 import '../../../../api/task_batch_api.dart';
+import '../../../../api/http_path_api.dart';
+import '../../../../api/model/http_path_create.dart';
 import '../../../../api/model/task_batch_operation.dart';
 import '../../../../api/model/task_batch_scope.dart';
 import '../../../../database/task_batch_journal.dart';
@@ -96,24 +99,164 @@ class _ManualBatchAttempt {
   final CreateTaskBatch batch;
   final String input, signature;
   final String? expectedSha256;
+  final HttpPathIntent? pathIntent;
   bool sent = false;
   // A later GET proves only this operation's old history, never acceptance of
   // the draft that already received a conflicting-intent response.
   bool conflicted = false;
   _ManualBatchAttempt(this.api, this.scope, this.operation, this.batch,
       this.input, this.signature,
-      {this.expectedSha256});
+      {this.expectedSha256, this.pathIntent});
 }
 
 class CreateViewState extends State<CreateView> {
   PathIntent _pathIntent =
       const PathIntent(path: '', origin: PathOrigin.defaultPath);
   int _pathDraftEpoch = 0, _pathRevision = 0;
+  bool _pathPolicyOptIn = false;
+  final _pathPreviewBusy = false.obs;
+  final _pathPreviewNotice = RxnString();
+  int _pathPreviewEpoch = 0;
+  CancelToken? _pathPreviewCancel;
+
+  void _invalidatePathPreview() {
+    ++_pathPreviewEpoch;
+    _pathPreviewCancel?.cancel('path_draft_changed');
+    _pathPreviewCancel = null;
+    _pathPreviewBusy.value = false;
+    _pathPreviewNotice.value = null;
+  }
+
+  void _pathOptInChanged(bool value) {
+    final wasWaiting = _manualBusy;
+    setState(() {
+      _pathPolicyOptIn = value;
+      _invalidatePathPreview();
+    });
+    if (wasWaiting) _stopManualWait();
+  }
+
+  bool _pathInputBlocked() {
+    if (!_pathPolicyOptIn || _manualBatch != null) return false;
+    final urls = Util.textToLines(_urlController.text.trim());
+    if (urls.length == 1 &&
+        parseProtocol(urls.single) == Protocol.http &&
+        const {'http', 'https'}.contains(Uri.tryParse(urls.single)?.scheme) &&
+        (Uri.tryParse(urls.single)?.host.isNotEmpty ?? false) &&
+        _panelRequest == null &&
+        _originalRequest == null &&
+        _netdiskRequest.value == null &&
+        Get.find<AppController>().pendingUpdateTask.value == null) return false;
+    _manualNotice.value = 'httpPathInvalidRequest'.tr;
+    return true;
+  }
+
+  String _pathPreviewFingerprint() => jsonEncode({
+        'url': _urlController.text.trim(),
+        'intent': {'path': _pathIntent.path, 'origin': _pathIntent.wireOrigin},
+        'opts': Options(
+                name: _renameController.text,
+                path: _pathController.text,
+                selectFiles: [],
+                extra: parseReqOptsExtra())
+            .toJson(),
+        'sha256': _expectedSha256Controller.text,
+        'optIn': _pathPolicyOptIn,
+      });
+
+  Future<void> _previewPath() async {
+    if (_pathPreviewBusy.value ||
+        !_pathPolicyOptIn ||
+        _manualBatch != null ||
+        _pathInputBlocked() ||
+        _checksumInputBlocked()) return;
+    final snapshot = activeApiSnapshot;
+    if (snapshot?.taskBatchRoute?.supported != true) {
+      _pathPreviewNotice.value = 'httpPathUnavailable'.tr;
+      return;
+    }
+    final epoch = ++_pathPreviewEpoch;
+    final fingerprint = _pathPreviewFingerprint();
+    final cancel = CancelToken();
+    _pathPreviewCancel = cancel;
+    setState(() => _pathPreviewBusy.value = true);
+    bool current() =>
+        mounted &&
+        epoch == _pathPreviewEpoch &&
+        snapshot!.isCurrent &&
+        fingerprint == _pathPreviewFingerprint();
+    try {
+      final batch = _manualPayload(
+          Util.textToLines(_urlController.text.trim()),
+          Options(
+              name: _renameController.text,
+              path: _pathController.text,
+              selectFiles: [],
+              extra: parseReqOptsExtra()));
+      final expected = normalizedExpectedSha256(_expectedSha256Controller.text);
+      if (expected != null) VerifiedHttpApi.validateRequest(batch);
+      final request = HttpPathCreateRequest(batch,
+          pathIntent: HttpPathIntent(
+              path: _pathIntent.path, origin: _pathIntent.wireOrigin),
+          expectedSHA256: expected);
+      final identity = await ScopedTaskBatchApi.readIdentity(snapshot!);
+      if (!current()) return;
+      final bound =
+          HttpPathApi(snapshot: snapshot, identity: identity, request: request);
+      if (!await bound.supported(cancelToken: cancel)) {
+        if (current()) _pathPreviewNotice.value = 'httpPathUnavailable'.tr;
+        return;
+      }
+      if (!current()) return;
+      final op = TaskBatchOperationRef(
+          namespace: TaskBatchOperationRef.namespaceV1,
+          operationId:
+              'preview-${List.generate(16, (_) => math.Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join()}');
+      final preview = await bound.preview(op, cancelToken: cancel);
+      if (current())
+        _pathPreviewNotice.value = 'httpPathPreviewResult'
+            .trParams({'root': preview.root, 'name': preview.name});
+    } catch (_) {
+      if (current()) _pathPreviewNotice.value = 'httpPathPreviewFailed'.tr;
+    } finally {
+      if (mounted && identical(_pathPreviewCancel, cancel))
+        setState(() {
+          _pathPreviewBusy.value = false;
+          _pathPreviewCancel = null;
+        });
+    }
+  }
+
+  Widget _pathPolicyControls() =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        CheckboxListTile(
+            key: const ValueKey('http-path-opt-in'),
+            title: Text('httpPathOptIn'.tr),
+            subtitle: Text('httpPathOptInHint'.tr),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: _pathPolicyOptIn,
+            onChanged: (value) => _pathOptInChanged(value == true)),
+        if (_pathPolicyOptIn) ...[
+          Obx(() => OutlinedButton(
+              key: const ValueKey('http-path-preview'),
+              onPressed:
+                  _pathPreviewBusy.value || _manualBusy || _manualBatch != null
+                      ? null
+                      : _previewPath,
+              child: Text('httpPathPreview'.tr))),
+          Text('httpPathPreviewHint'.tr),
+          Obx(() => _pathPreviewNotice.value == null
+              ? const SizedBox.shrink()
+              : Text(_pathPreviewNotice.value!)),
+        ],
+      ]);
 
   /// Current RAM-only provenance; never serialized into legacy create options.
   PathIntent get pathIntent => _pathIntent;
 
   void _setDraftPath(String path, PathOrigin origin) {
+    _invalidatePathPreview();
     _pathIntent = PathIntent(path: path, origin: origin);
     ++_pathRevision;
     _pathController.text = path;
@@ -147,6 +290,7 @@ class CreateViewState extends State<CreateView> {
   void _manualInputChanged() {
     final text = _urlController.text;
     if (text == _manualObservedText) return;
+    _invalidatePathPreview();
     _manualObservedText = text;
     final wasWaiting = _manualBusy;
     ++_manualEpoch;
@@ -174,12 +318,18 @@ class CreateViewState extends State<CreateView> {
   bool _manualDraftCurrent(_ManualBatchAttempt attempt, int epoch) =>
       _manualReferenceCurrent(attempt, epoch) &&
       _checksumDraftMatches(attempt) &&
+      (attempt.pathIntent == null
+          ? !_pathPolicyOptIn
+          : _pathPolicyOptIn &&
+              attempt.pathIntent!.path == _pathIntent.path &&
+              attempt.pathIntent!.origin == _pathIntent.wireOrigin) &&
       attempt.input == _urlController.text.trim() &&
       attempt.signature ==
           jsonEncode(_manualPayload(
                   Util.textToLines(attempt.input),
                   Options(
-                      name: attempt.expectedSha256 == null
+                      name: attempt.expectedSha256 == null &&
+                              attempt.pathIntent == null
                           ? ''
                           : _renameController.text,
                       path: _pathController.text,
@@ -198,6 +348,7 @@ class CreateViewState extends State<CreateView> {
   }
 
   void _checksumChanged() {
+    _invalidatePathPreview();
     _expectedSha256Url = _urlController.text.trim();
     if (_manualBusy) {
       ++_manualEpoch;
@@ -353,6 +504,20 @@ class CreateViewState extends State<CreateView> {
     final epoch = ++_manualEpoch;
     final raw = jsonEncode(_manualPayload(urls, opts).toJson());
     final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
+    HttpPathCreateRequest? pathRequest;
+    if (_pathPolicyOptIn) {
+      try {
+        pathRequest = HttpPathCreateRequest(frozen,
+            pathIntent: HttpPathIntent(
+                path: _pathIntent.path, origin: _pathIntent.wireOrigin),
+            expectedSHA256: expectedSha256);
+      } on ArgumentError catch (error) {
+        _manualNotice.value = error.message == 'unsupported_option'
+            ? 'SHA-256 校验不支持自动加种或自动解压（unsupported_option），请关闭相应选项后重试。'
+            : 'httpPathInvalidRequest'.tr;
+        return;
+      }
+    }
     // Existing attempts returned through query above. A purely local rejection
     // of a new draft must not create a journal reference or consume permission.
     if (expectedSha256 != null) {
@@ -372,12 +537,21 @@ class CreateViewState extends State<CreateView> {
       if (!mounted || epoch != _manualEpoch || !snapshot.isCurrent) {
         return;
       }
-      final ScopedTaskBatchApi bound = expectedSha256 == null
-          ? ScopedTaskBatchApi(snapshot: snapshot, identity: identity)
-          : VerifiedHttpApi(
-              snapshot: snapshot,
-              identity: identity,
-              expectedSHA256: expectedSha256);
+      final ScopedTaskBatchApi bound = pathRequest != null
+          ? HttpPathApi(
+              snapshot: snapshot, identity: identity, request: pathRequest)
+          : expectedSha256 == null
+              ? ScopedTaskBatchApi(snapshot: snapshot, identity: identity)
+              : VerifiedHttpApi(
+                  snapshot: snapshot,
+                  identity: identity,
+                  expectedSHA256: expectedSha256);
+      if (bound is HttpPathApi && !await bound.supported()) {
+        if (mounted && epoch == _manualEpoch && snapshot.isCurrent) {
+          _manualNotice.value = 'httpPathUnavailable'.tr;
+        }
+        return;
+      }
       if (bound is VerifiedHttpApi && !await bound.supported()) {
         if (mounted && epoch == _manualEpoch && snapshot.isCurrent) {
           _manualNotice.value = '当前下载服务未确认 SHA-256 校验能力，未提交任务。';
@@ -397,7 +571,8 @@ class CreateViewState extends State<CreateView> {
           frozen,
           input,
           raw,
-          expectedSha256: expectedSha256);
+          expectedSha256: expectedSha256,
+          pathIntent: pathRequest?.pathIntent);
       // Preflight is a pure capability/domain query, never a recovered submit permit.
       final preflight = await bound.query(operation);
       if (!mounted ||
@@ -519,6 +694,8 @@ class CreateViewState extends State<CreateView> {
   void initState() {
     super.initState();
     _urlController.addListener(_manualInputChanged);
+    _renameController.addListener(_invalidatePathPreview);
+    _connectionsController.addListener(_invalidatePathPreview);
     if (Util.isMacos()) {
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
@@ -602,6 +779,9 @@ class CreateViewState extends State<CreateView> {
 
   @override
   void dispose() {
+    _invalidatePathPreview();
+    _renameController.removeListener(_invalidatePathPreview);
+    _connectionsController.removeListener(_invalidatePathPreview);
     ++_pathDraftEpoch;
     ++_manualEpoch;
     _urlController.removeListener(_manualInputChanged);
@@ -1286,6 +1466,7 @@ class CreateViewState extends State<CreateView> {
                             controller: _expectedSha256Controller,
                             onChanged: (_) => _checksumChanged(),
                           ),
+                          _pathPolicyControls(),
                           const SizedBox(height: 12),
                         ],
                         _macLabeledField(
@@ -1870,6 +2051,8 @@ class CreateViewState extends State<CreateView> {
 
   void _resetTaskParameters() {
     ++_pathDraftEpoch;
+    _pathPolicyOptIn = false;
+    _invalidatePathPreview();
     _netdiskRequest.value = null;
     _credentialOrigin = null;
     for (final row in _httpHeaderControllers) {
@@ -2671,7 +2854,7 @@ class CreateViewState extends State<CreateView> {
     if (controller.isConfirming.value) {
       return;
     }
-    if (_checksumInputBlocked()) return;
+    if (_checksumInputBlocked() || _pathInputBlocked()) return;
     final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
@@ -2804,7 +2987,10 @@ class CreateViewState extends State<CreateView> {
         );
         if (Util.isMacos() &&
             netdiskInputs.isEmpty &&
-            (isMultiLine || expectedSha256 != null || _manualBatch != null) &&
+            (isMultiLine ||
+                expectedSha256 != null ||
+                _pathPolicyOptIn ||
+                _manualBatch != null) &&
             _panelRequest == null &&
             _originalRequest == null &&
             _netdiskRequest.value == null &&

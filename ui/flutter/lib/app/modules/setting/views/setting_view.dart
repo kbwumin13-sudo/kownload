@@ -36,6 +36,8 @@ import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
 import 'mac_settings_view.dart';
 import 'api_endpoint_draft.dart';
+import 'path_policy_editor.dart';
+import '../../../../api/model/path_policy_config.dart';
 import '../../../../identity/app_identity.dart';
 
 const _padding = SizedBox(height: 10);
@@ -79,6 +81,84 @@ class SettingView extends GetView<SettingController> {
         ? ApiEndpointDraft(
             defaultUnixAddress: () => Util.homePathJoin(AppIdentity.apiSocket))
         : null;
+
+    Widget pathPolicyEditor(Rx<DownloaderConfig> config) => PathPolicyEditor(
+        config: config.value.extra.pathPolicyV1 ?? PathPolicyConfig.disabled(),
+        onChanged: (value) =>
+            config.update((c) => c!.extra.pathPolicyV1 = value));
+
+    Widget buildPathPolicy() => ListTile(
+          title: Text('pathPolicyTitle'.tr),
+          subtitle: Text('pathPolicyScope'.tr),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () async {
+            var proposed = downloaderCfg.value.extra.pathPolicyV1 ??
+                PathPolicyConfig.disabled();
+            var saving = false;
+            String? error;
+            await showDialog<void>(
+                context: context,
+                builder: (dialogContext) => StatefulBuilder(
+                    builder: (context, update) => PopScope(
+                          canPop: !saving,
+                          child: AlertDialog(
+                            title: Text('pathPolicyTitle'.tr),
+                            content: SizedBox(
+                                width: 600,
+                                child: SingleChildScrollView(
+                                    child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                      AbsorbPointer(
+                                          absorbing: saving,
+                                          child: PathPolicyEditor(
+                                              config: proposed,
+                                              onChanged: (value) =>
+                                                  proposed = value)),
+                                      if (error != null) Text(error!),
+                                    ]))),
+                            actions: [
+                              TextButton(
+                                  onPressed: saving
+                                      ? null
+                                      : () => Navigator.pop(dialogContext),
+                                  child: Text('cancel'.tr)),
+                              TextButton(
+                                  onPressed: saving || !proposed.editable
+                                      ? null
+                                      : () async {
+                                          update(() {
+                                            saving = true;
+                                            error = null;
+                                          });
+                                          final current = appController
+                                              .downloaderConfig.value;
+                                          final previous =
+                                              current.extra.pathPolicyV1;
+                                          current.extra.pathPolicyV1 = proposed;
+                                          try {
+                                            await appController.saveConfig();
+                                            appController.downloaderConfig
+                                                .refresh();
+                                            if (dialogContext.mounted)
+                                              Navigator.pop(dialogContext);
+                                          } catch (_) {
+                                            current.extra.pathPolicyV1 =
+                                                previous;
+                                            if (dialogContext.mounted)
+                                              update(() {
+                                                saving = false;
+                                                error =
+                                                    'pathPolicySaveFailed'.tr;
+                                              });
+                                          }
+                                        },
+                                  child: Text('confirm'.tr)),
+                            ],
+                          ),
+                        )));
+          },
+        );
 
     Timer? timer;
     Future<bool> debounceSave(
@@ -1864,6 +1944,7 @@ class SettingView extends GetView<SettingController> {
           'webhook' => [buildWebhook()],
           'script' => [buildScript()],
           'mirrors' => [buildGithubMirror()],
+          'pathPolicy' => [pathPolicyEditor(downloaderCfg)],
           _ => throw StateError('Unknown settings section: $section'),
         };
         return Column(mainAxisSize: MainAxisSize.min, children: rows);
@@ -1904,6 +1985,7 @@ class SettingView extends GetView<SettingController> {
                           children: _addDivider([
                             buildDownloadDir(),
                             buildDownloadCategories(),
+                            buildPathPolicy(),
                             buildMaxRunning(),
                             buildDefaultDirectDownload(),
                             buildAutoStartTasks(),
