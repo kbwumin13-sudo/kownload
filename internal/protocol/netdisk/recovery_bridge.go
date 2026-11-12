@@ -267,12 +267,6 @@ func (f *Fetcher) prepareRefresh(ctx context.Context, operation uint64) (*netdis
 	}
 	// Read only the trusted same-run RAM cursor. A durable query, an old lease
 	// Round or a locally incremented number cannot reconstruct authorization.
-	cursor, ok := lease.Owner.(interface {
-		CurrentRecoveryRound(context.Context, transfer.RecoveryToken) (uint64, error)
-	})
-	if !ok {
-		return nil, transfer.ErrRecoveryHeld
-	}
 	f.mu.Lock()
 	child := f.child
 	f.mu.Unlock()
@@ -296,7 +290,7 @@ func (f *Fetcher) prepareRefresh(ctx context.Context, operation uint64) (*netdis
 	if err := f.checkOperation(ctx, operation); err != nil {
 		return nil, err
 	}
-	seen, err := cursor.CurrentRecoveryRound(ctx, lease.Token)
+	seen, err := owner.CurrentRecoveryRound(ctx, lease.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -316,6 +310,27 @@ func (f *Fetcher) prepareRefresh(ctx context.Context, operation uint64) (*netdis
 	}
 	return &netdiskRefreshPlan{lease: lease, owner: owner, action: permit.ActionID, checkpoint: checkpoint,
 		seal: &netdiskSourceSeal{f: f, operation: operation, lease: lease}}, nil
+}
+
+// Called by Core only after CaptureRunQuiescence has joined the actual parent
+// run and child. This method never waits or grants a new run.
+func (f *Fetcher) RecoverySourceSeal() (transfer.RecoverySourceSeal, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lease := f.recovery.Load()
+	if lease == nil || f.running || f.resolving || f.operation == 0 {
+		return nil, transfer.ErrRecoveryWork
+	}
+	for _, done := range []<-chan struct{}{f.runDone, f.resolveDone} {
+		if done != nil {
+			select {
+			case <-done:
+			default:
+				return nil, transfer.ErrRecoveryWork
+			}
+		}
+	}
+	return &netdiskSourceSeal{f: f, operation: f.operation, lease: lease}, nil
 }
 
 func (f *Fetcher) commitRefresh(ctx context.Context, operation uint64, plan *netdiskRefreshPlan) (context.Context, error) {
