@@ -364,3 +364,42 @@ func (s *mediaSourceSeal) Snapshot(ctx context.Context) (transfer.RecoverySource
 	return transfer.RecoverySourceSnapshot{Token: s.lease.Token, SourceHash: s.lease.SourceHash,
 		Epoch: s.epoch, Members: []string{"media/inspect", "media/download"}, IdentityHash: ""}, nil
 }
+
+// BindRunWait captures the result channel before Resolve/Start. A canceled
+// waiter cannot consume a later run's result, and workers keep their captured
+// channel even when Core prepares a subsequent generation.
+func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
+	f.mu.Lock()
+	f.done = make(chan error, 1)
+	done := f.done
+	f.mu.Unlock()
+	return func() error {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// CaptureRunQuiescence joins only the captured run. These channels close after
+// the process and its pipe/bridge workers have joined, without holding f.mu.
+func (f *Fetcher) CaptureRunQuiescence() func(context.Context) error {
+	f.mu.Lock()
+	run, resolve := f.runDone, f.resolveDone
+	f.mu.Unlock()
+	return func(ctx context.Context) error {
+		for _, done := range []<-chan struct{}{run, resolve} {
+			if done == nil {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+			}
+		}
+		return ctx.Err()
+	}
+}
