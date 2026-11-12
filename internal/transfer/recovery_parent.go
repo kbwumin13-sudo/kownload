@@ -92,3 +92,10 @@ func (scope *RecoveryWorkScope) Leave() {
 		})
 	}
 }
+
+// RecoveryChildWaveController maps one already funded parent HTTP work item
+// into the child's bounded scheduler slots. Metadata-only probes do not claim
+// slots. Rebuilding a child in the same source must not recreate free slots.
+type RecoveryChildWaveController interface {
+	BeginRecoveryChildWave(context.Context, RecoveryToken, int) (bool,error)
+}

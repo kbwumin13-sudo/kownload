@@ -232,10 +232,18 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	if limit < 1 || limit > 1024 {
 		return transfer.ErrRecoveryWork
 	}
+	childFunded := true
+	if owner,ok := run.lease.Owner.(transfer.RecoveryChildWaveController);ok {
+		var err error
+		// No HTTP/connection/barrier lock spans a parent owner callback.
+		childFunded,err = owner.BeginRecoveryChildWave(f.recoveryContext(f.boundRunContext()),run.lease.Token,limit)
+		if err != nil { return err }
+	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	run.initialLimit = limit
 	run.initialClaims = make(map[int]bool)
+	if !childFunded { for id:=0;id<limit;id++ { run.initialClaims[id] = true } }
 	if run.lease.ActionVersion == 4 && len(run.lease.InitialMembers) > 0 {
 		start := len(run.lease.InitialMembers) == 1 && run.lease.InitialMembers[0] == "start"
 		if !start {

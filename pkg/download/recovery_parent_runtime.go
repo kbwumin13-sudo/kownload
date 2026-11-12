@@ -43,6 +43,7 @@ type parentRecoveryRun struct {
 	protocol string
 	children map[string]string
 	committing bool
+	childWaves map[string]*parentRecoveryChildWave
 }
 
 func parentRecoveryWork(protocol, work string) bool {
@@ -147,11 +148,42 @@ func (o *taskRecoveryOwner) BindRecoveryChild(ctx context.Context, token transfe
 	if o.parentRun == nil || o.parentRun.committing || o.parentRun.token != token || !parentRecoveryWork(o.parentRun.protocol,work) || o.parentContext == nil || snapshot.ProxyID() != o.parentContext.ProxyID() { return nil,transfer.ErrRecoveryWork }
 	if _, err := o.observeSharedActionLocked(ctx,token,o.record); err != nil { return nil,err }
 	lease := o.sharedLeaseLocked()
+	if o.parentRun.childWaves == nil { o.parentRun.childWaves = map[string]*parentRecoveryChildWave{} }
+	wave := o.parentRun.childWaves[work]
+	if wave == nil {
+		wave = &parentRecoveryChildWave{source:snapshot.SourceHash()}
+		o.parentRun.childWaves[work] = wave
+	}
+	// One metadata probe plus one actual child is the closed provider plan.
+	// Another URL/source in this work requires a paid source handoff first.
+	if wave.source != snapshot.SourceHash() || wave.bindings >= 2 { return nil,transfer.ErrRecoveryWork }
+	wave.bindings++
+	lease.InitialMembers = []string{"start"}
 	if o.parentRun.children == nil { o.parentRun.children = map[string]string{} }
 	o.parentRun.children[snapshot.SourceHash()] = work
 	lease.SourceHash = snapshot.SourceHash()
 	lease.Owner = &parentHTTPRecoveryOwner{parent:o,token:token,work:work,source:snapshot.SourceHash()}
 	return lease,nil
+}
+
+type parentRecoveryChildWave struct { source string; bindings, limit int; started bool }
+
+func (p *parentHTTPRecoveryOwner) BeginRecoveryChildWave(ctx context.Context,t transfer.RecoveryToken,limit int)(bool,error) {
+	if t != p.token || limit < 1 || limit > 1024 { return false,transfer.ErrRecoveryWork }
+	o := p.parent
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err := o.sharedCurrentLocked(ctx,t);err != nil { return false,err }
+	if o.parentRun == nil || o.parentRun.committing { return false,transfer.ErrRecoveryStale }
+	wave := o.parentRun.childWaves[p.work]
+	if wave == nil || wave.source != p.source { return false,transfer.ErrRecoveryStale }
+	if _,err := o.observeSharedActionLocked(ctx,t,o.record);err != nil { return false,err }
+	if wave.started {
+		if wave.limit != limit { return false,transfer.ErrRecoveryWork }
+		return false,nil // The child's existing Retry path must charge this replacement.
+	}
+	wave.started,wave.limit = true,limit
+	return true,nil
 }
 
 type parentHTTPRecoveryOwner struct { parent *taskRecoveryOwner;token transfer.RecoveryToken;work,source string }
