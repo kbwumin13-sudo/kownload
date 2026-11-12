@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:gopeed/app/views/directory_selector.dart';
+import 'package:gopeed/app/views/compact_checkbox.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
@@ -390,10 +391,23 @@ void main() {
         (t) async {
       f.verified = true;
       await checksum(t);
-      final toggle = find.text(option.tr);
-      await t.ensureVisible(toggle);
-      await t.tap(toggle);
-      await t.pumpAndSettle();
+      final control = find.byWidgetPredicate(
+          (widget) => widget is CompactCheckbox && widget.label == option.tr);
+      final toggle =
+          find.descendant(of: control, matching: find.byType(Checkbox));
+      Future<void> toggleOption(bool value) async {
+        await t.ensureVisible(toggle);
+        await t.pumpAndSettle();
+        expect(toggle.hitTestable(), findsOneWidget,
+            reason: 'the actual option checkbox must receive the tap');
+        expect(t.widget<Checkbox>(toggle).onChanged, isNotNull);
+        expect(t.widget<Checkbox>(toggle).value, !value);
+        await t.tap(toggle);
+        await t.pumpAndSettle();
+        expect(t.widget<Checkbox>(toggle).value, value);
+      }
+
+      await toggleOption(true);
       await confirmChecksum(t);
       await spin(t, () => !Get.find<CreateController>().isConfirming.value);
       expect(journalBox.puts, 0);
@@ -404,9 +418,7 @@ void main() {
       expect(input(t), 'https://fixture.invalid/single');
       final digest = find.byKey(const ValueKey('http-expected-sha256'));
       expect(t.widget<TextFormField>(digest).controller!.text, 'A' * 64);
-      await t.ensureVisible(toggle);
-      await t.tap(toggle);
-      await t.pumpAndSettle();
+      await toggleOption(false);
       await confirmChecksum(t);
       await spin(
           t,
