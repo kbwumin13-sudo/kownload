@@ -1,14 +1,14 @@
 # kownload 使用指南
 
-[← 返回主页](../README.md) · [下载发行版](https://github.com/kbwumin13-sudo/kownload/releases/latest)
+[← 返回主页](../README.md) · [下载发行版](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.32)
 
-本指南涵盖安装、浏览器助手、媒体工具与 main 的可选下载能力。安装包实际功能以对应 Release 为准；当前公开 build 39 不包含下文 build 45 新能力。
+本指南适用于正式 **build 45 · 1.9.3-kownload.32**，涵盖安装、浏览器助手、媒体工具与可选下载能力。配套[完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/kownload-v1.9.3-kownload.32-source.tar.gz)和[SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/SHA256SUMS.txt)与安装包在同一 Release 提供。
 
 ## 安装与升级
 
 需要 macOS 12 或更新系统、Apple Silicon（M 系列芯片）。
 
-1. 从 [Release](https://github.com/kbwumin13-sudo/kownload/releases/latest) 下载 DMG，打开后将 `kownload.app` 拖入 `Applications`。
+1. 从 [Release](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.32) 下载 DMG，打开后将 `kownload.app` 拖入 `Applications`。
 2. 打开应用，跟随使用引导选择下载目录。
 3. 按 **⌃⌥D** 唤起面板，粘贴链接并回车。
 
@@ -26,7 +26,7 @@
 
 支持 Chrome 与 Edge，负责普通下载交接以及网页媒体、网盘文件选择。
 
-1. 在首次引导中打开助手目录，或从 [同一 Release](https://github.com/kbwumin13-sudo/kownload/releases/latest) 下载 `kownload-browser-helper-…zip` 并解压。
+1. 在首次引导中打开助手目录，或下载本版[浏览器助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/kownload-browser-helper-0.6.0-1.9.3-kownload.32.zip) 并解压。
 2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，点「加载已解压的扩展程序」，选择助手目录。
 3. 在 App「设置 → 通用 → 浏览器助手」中点「连接…」，完成连接。助手更新后在扩展页点「重新加载」。
 
@@ -57,7 +57,7 @@ pipx install yt-dlp
 
 ## 路径规则与校验
 
-本节为 **main · build 45 新能力**，不属于公开 build 39 安装包。
+本节能力已随 **build 45** 正式发布。
 
 ### 为本次下载选择路径规则
 
@@ -83,7 +83,7 @@ pipx install yt-dlp
 
 ## MCP：先读取，再按需授权
 
-**main · build 45 新能力。** 包内 Helper 默认提供任务列表、任务详情、进度、统计、错误五个读取工具；没有对应观测的数据会表示不可用，不以零代替。
+**build 45 已发布。** 包内 Helper 默认提供任务列表、任务详情、进度、统计、错误五个读取工具；没有对应观测的数据会表示不可用，不以零代替。
 
 创建、暂停、继续三个写工具默认关闭。需要由可信本机启动配置显式提供 policy，并由 App 确认授权的数据集、允许的输出根、任务 ID 和网络范围。当前创建只接受 HTTP(S)；新建任务不会自动进入允许控制的任务列表。
 
