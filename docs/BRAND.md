@@ -16,3 +16,9 @@ kownload 采用已选定的 B 方案：白色圆角底板，搭配翡翠绿色�
 图标保留透明留白。菜单栏使用纯黑轮廓的透明 PNG，并以 `isTemplate: true` 注册，由系统决定实际显示颜色；不将彩色底板缩成菜单栏图标。
 
 原始选定图稿保存在本目录 `app-icon-artwork.png`，单色图稿为 `menubar-artwork.png`。在 macOS 仓库根目录运行 `swift scripts/export-brand-icons.swift`，可用 AppKit 重新导出透明圆角 PNG、七种应用图标分辨率、ICO 与自包含 SVG。应用位图保留 B 图稿的颜色和折带质感；SVG 是嵌入该位图的展示封装。
+
+## GitHub 主页展示资产
+
+[浅色 Hero](images/kownload-hero-light.svg) 与 [深色 Hero](images/kownload-hero-dark.svg) 是本项目原创 SVG 品牌插画，使用下载箭头与快捷键图形，不代表应用界面截图；README 随 GitHub 明暗主题选择对应版本。
+
+主页沿用的轻面板与设置图为 build 19 的实际截图，保留版本标注。图标与已有截图沿用原项目资源，未引入新的第三方图库素材。

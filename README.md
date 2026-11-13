@@ -3,217 +3,149 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/kownload-hero-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/kownload-hero-light.svg">
-  <img src="docs/images/kownload-hero-light.svg" width="100%" alt="kownload — 下载，顺手的事。按下 Control + Option + D，唤起 macOS 下载轻面板。">
+  <img src="docs/images/kownload-hero-light.svg" width="100%" alt="kownload — 把下载收进菜单栏，把桌面留给正在做的事。Control + Option + D 唤起。">
 </picture>
 
 <div align="center">
 
 # kownload
 
-**把下载收进菜单栏，把桌面留给正在做的事。**
+**一个快捷键，接住链接、磁力、网页媒体和网盘。**
 
-按下 **⌃⌥D**，粘贴，回车。普通文件、磁力链接、网页媒体和网盘，都有一个顺手的入口。
+常驻 macOS 菜单栏。按下 **⌃⌥D**，粘贴链接，回车开始，再回到手头的事。
 
-A keyboard-first download manager for macOS. Paste a link. Get back to what matters.
+A keyboard-first download manager for macOS. One shortcut. Your downloads, in one place.
 
-[**下载 macOS 版 ↗**](https://github.com/kbwumin13-sudo/kownload/releases/latest) · [三步开始](#安装) · [浏览器助手](#浏览器助手) · [反馈与建议](https://github.com/kbwumin13-sudo/kownload/issues)
+[**下载 macOS 版 ↗**](https://github.com/kbwumin13-sudo/kownload/releases/latest) · [三步开始](#安装) · [功能一览](#功能) · [使用指南](docs/GETTING_STARTED.md) · [反馈问题](https://github.com/kbwumin13-sudo/kownload/issues)
 
-<img alt="macOS 12+" src="https://img.shields.io/badge/macOS-12%2B-171717?logo=apple&amp;logoColor=white">
-<img alt="Apple Silicon" src="https://img.shields.io/badge/Apple_Silicon-arm64-2f6f50">
-<a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/License-GPL--3.0-2f6f50"></a>
+![macOS 12+](https://img.shields.io/badge/macOS-12%2B-202b27)
+![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-arm64-267454)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-267454)](LICENSE)
 
 </div>
 
-## 小面板，接住各种下载
-
-| 拿到一个链接 | 看到一段好内容 | 收到一个网盘分享 |
-| :-- | :-- | :-- |
-| 唤起面板，粘贴后回车。多条链接也可以一起交给它。 | 用浏览器助手从播放器选择视频、音轨或字幕，交给应用下载。 | 粘贴分享链接，或在网页勾选文件后交给应用；文件和目录都能接。 |
-| **HTTP / HTTPS · BT / 磁力 · ED2K** | **HLS · DASH · FFmpeg 合并** | **九个网盘适配 · 验证范围见下方** |
-
 <p align="center">
-  <img src="docs/images/kownload-panel.png" width="800" alt="kownload build 19 实际轻面板截图：链接输入、任务筛选、粘贴入口和下载按钮">
+  <img src="docs/images/kownload-panel.png" width="800" alt="kownload build 19 实机轻面板：链接输入、粘贴入口、任务筛选与下载按钮">
   <br>
-  <sub>轻面板实际截图 · build 19；当前发行版的细节以 Release 为准。</sub>
+  <sub>真实轻面板截图 · build 19。展示操作形态，当前版本细节以发行说明为准。</sub>
 </p>
-
-### 随手唤起，安心放到后台
-
-- **不挤占桌面。** 默认只在菜单栏，不占程序坞和 ⌘Tab。喜欢常规应用的切换方式，也能在设置中打开程序坞图标。
-- **下载有来有回。** 支持暂停和断点恢复；HTTP 下载先验证服务器的 Range 能力，再启用多连接分段。
-- **收起，再接着来。** 面板隐藏后保留输入与等待中的登录流程；系统字体、紧凑控件和明暗外观融入 macOS。
-- **常用操作靠键盘。** 开始、搜索、新建、查看详情都有快捷键，完整列表见下方。
-
-<details>
-<summary><strong>看看设置界面</strong></summary>
-
-<p align="center">
-  <img src="docs/images/kownload-settings.png" width="800" alt="kownload 通用设置：菜单栏、快捷键、外观和使用引导">
-</p>
-
-第一次使用会引导你选择下载目录、连接浏览器助手；之后可在「设置 → 通用 → 使用引导」重新打开。
-
-</details>
 
 <a id="安装"></a>
 
-## 安装
+## 三步，把下载交给它
 
-**macOS 12+ · Apple Silicon（M 系列芯片）**。当前独立发行版面向这一平台，其他平台源码尚未作为独立版本发行。
+**macOS 12+ · Apple Silicon（M 系列芯片）**
 
-1. **下载。** 前往 [最新 Release](https://github.com/kbwumin13-sudo/kownload/releases/latest)，下载 `.dmg` 安装包。
-2. **装好。** 打开 DMG，将 **kownload.app** 拖入 **Applications**；升级前先退出正在运行的应用。
-3. **开始。** 打开应用，按引导设置保存位置。按 **⌃⌥D** 唤起面板，粘贴链接，按 **↩** 开始下载。
+1. **下载并安装** — 在 [最新 Release](https://github.com/kbwumin13-sudo/kownload/releases/latest) 下载 DMG，将 **kownload.app** 拖入 **Applications**。升级前先正常退出旧版。
+2. **选好保存位置** — 打开应用，按首次引导选择下载目录；需要从网页接管下载时，再连接浏览器助手。
+3. **按下 ⌃⌥D** — 粘贴链接，按 **↩** 开始。面板可以收起，任务留在后台。
 
-本版使用本机 ad-hoc 签名，**未做 Apple 公证**。首次打开如被系统拦截，在「系统设置 → 隐私与安全性」中选择「仍要打开」。系统询问「下载」文件夹的访问权限时，请选择允许。
+安装包采用 ad-hoc 签名，尚未经过 Apple 公证。首次打开被拦截时，到「系统设置 → 隐私与安全性」选择「仍要打开」；如系统询问访问「下载」文件夹，请允许。更多步骤见 [安装与升级](docs/GETTING_STARTED.md#安装与升级)。
 
-<details>
-<summary><strong>从 build 25 或更早版本升级</strong></summary>
+> **版本提示**：当前公开下载为 [build 39 · 1.9.3-kownload.26](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.26)。main 已推进到 build 45；下方标注「main 新能力」的功能尚不属于 build 39 安装包。
 
-从 build 25 及更早版本升级时，首次打开会把旧数据目录 `~/Library/Application Support/com.gopeed.gopeed` 只读导入到 `~/Library/Application Support/io.github.kbwumin13-sudo.kownload`，任务、设置和扩展继续沿用，旧目录保持不变；导入前请先退出旧版。导入后到「设置 → 通用 → 浏览器助手」点「连接…」，再按下文重新加载浏览器助手。回退步骤见对应 Release 说明。
+<a id="功能"></a>
 
-</details>
+## 小面板，完整的下载工作流
+
+### 随手开始，安静运行
+
+- **菜单栏常驻**：默认不占程序坞和 ⌘Tab；也可在设置中打开程序坞图标。
+- **一个输入入口**：普通链接、多条链接、磁力和种子文件，按内容进入对应下载流程。
+- **为 macOS 操作习惯设计**：键盘唤起、系统文件选择、明暗外观；收起面板后保留输入和等待中的登录流程。
 
 <a id="浏览器助手"></a>
 
-### 浏览器助手
+### 网页上的内容，也能接进来
 
-让网页上的下载入口直接连接 kownload，适用于 **Chrome / Edge**。
+- **Chrome / Edge 助手**：接管可明确关联的 HTTP(S) GET 普通下载，可选在 App 中确认。POST、blob/data、无痕及无法确认关联的下载保留给浏览器。
+- **媒体格式由你选**：从播放器选择视频、音轨或字幕；支持 HLS、DASH 和下载后合并。媒体功能需另装 yt-dlp、FFmpeg、Node.js。
+- **网盘文件与目录**：粘贴分享链接，或在网页选中文件后交给应用；按需同步登录状态。
 
-1. 在应用首次引导中打开助手目录；也可从 [Release 下载助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/latest) 并解压。
-2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，选择「加载已解压的扩展程序」，加载助手目录。
-3. 到应用「设置 → 通用 → 浏览器助手」点「连接…」，完成浏览器连接。助手更新后，在扩展页点「重新加载」。
+[连接浏览器助手 →](docs/GETTING_STARTED.md#浏览器助手) · [配置媒体工具 →](docs/GETTING_STARTED.md#网页媒体) · [网盘支持范围 →](#支持范围)
 
-当前 build 39 配套文件为 `kownload-browser-helper-0.6.0-1.9.3-kownload.26.zip`。[助手源码与说明 →](browser-media-extension/)
+### 保存到哪里、何时算完成，都更明确
 
-在 App 设置中管理各浏览器的普通下载接管、可选确认与媒体偏好；首次启用普通下载接管需在浏览器中允许下载权限。使用本地助手接管时，关闭其他扩展的普通下载接管可避免冲突，其媒体功能可继续保留。可明确关联的 HTTP(S) GET 下载支持交接；POST、blob/data、无痕及关联不明的下载保留给浏览器。确认前浏览器已完成时保留原文件，不再新建第二份下载。
+**main 新能力 · build 45**
 
-### 下载网页媒体
+| 你想做的事 | kownload 的方式 |
+| :-- | :-- |
+| 按来源或文件类型归类 | 设置域名、MIME、扩展名或组合路径规则；**每次新下载主动勾选启用**，已有任务不移动。 |
+| 下载前确认落点 | 支持的流程可预览保存路径；任务受理后固定本次路径，后续规则修改不搬动它。 |
+| 核对发布者提供的摘要 | 手动创建单个直接 HTTP(S) 下载时，可填写 **SHA-256**，校验通过后再确认成品。 |
+| 中断后继续处理 | 根据协议及当前下载服务的能力提供继续、恢复或显式重试；网盘凭据过期时按提示重新同步。 |
 
-媒体功能需要另外安装以下工具；普通文件下载不需要这一步。
+路径规则和恢复按各协议的实际能力工作。HTTP 的 Range 续传依赖源站支持；SHA-256 校验用于手动单链接 HTTP(S)。[使用方式与适用范围 →](docs/GETTING_STARTED.md#路径规则与校验)
 
-```sh
-brew install ffmpeg node pipx
-pipx install yt-dlp
-```
+### 让 AI 助手读懂下载进度
 
-默认路径为 `~/.local/bin/yt-dlp`、`/opt/homebrew/bin/ffmpeg` 和 `/opt/homebrew/bin/node`。安装在其他位置时，在下载设置中填写实际路径。**直播和 DRM 保护内容不在支持范围内。**
+**main 新能力 · build 45**
+
+通过本机 MCP Helper，查询任务列表、单个任务、进度、统计与错误。**默认只开放五个读取工具**；可信启动配置显式授权后，才增加创建、暂停、继续三个工具。
+
+写入权限限定到指定数据集、输出根和任务 ID，不因“创建成功”自动扩大。创建当前限定 HTTP(S)；未提供的统计会明确表示不可用。[MCP 接入与授权指南 →](cmd/kownload-mcp/README.md)
+
+<a id="支持范围"></a>
 
 ## 能下载什么
 
-| 类型 | 已实现的能力 |
+| 类型 | 支持范围 |
 | :-- | :-- |
-| HTTP / HTTPS | 多连接分段、连接复用、断点续传、自定义请求参数 |
-| BT / 磁力 | 种子文件选择、Tracker、做种策略 |
-| ED2K | ed2k 协议、服务器与节点设置 |
-| 网页媒体 | 视频、音频、图片；HLS（含 AES-128）、DASH |
-| 网盘 | 分享链接、网页选中文件、文件与目录任务；各平台能力有差异 |
+| **HTTP / HTTPS** | 多连接分段、断点续传、自定义请求参数；先确认源站能力 |
+| **BT / 磁力** | 种子文件选择、Tracker、做种策略 |
+| **ED2K** | ed2k 链接、服务器与节点设置 |
+| **网页媒体** | 视频、音频、图片、HLS（含 AES-128）、DASH；不支持直播和 DRM 内容 |
+| **网盘** | 百度、夸克、阿里、天翼、迅雷、UC、光鸭、移动、123；平台能力各有不同 |
 
-### 九个网盘，明确标注验证进度
+**百度、夸克**的文件与目录下载有真实账号验收记录；其余七盘已有适配实现与受控接口测试，真实账号验收仍待补齐。网盘登录凭据仅保留在内存中，暂停或重启后可能需要重新同步。[完整网盘能力矩阵 →](NETDISK_PROVIDERS.md)
 
-| 平台 | 验证状态 |
+独立安装包目前仅发行 macOS arm64。仓库保留其他平台源码，不代表已提供对应的 kownload 安装包。
+
+## 常用动作，交给键盘
+
+| 快捷键 | 操作 |
 | :-- | :-- |
-| **百度 · 夸克** | 文件与目录下载已有真实账号验收记录 |
-| 阿里 · 天翼 · 迅雷 · UC · 光鸭 · 移动 · 123 | 已有适配实现与模拟接口测试覆盖，真实账号验收仍待补齐 |
-
-网盘登录凭据保留在内存中，任务保存文件身份。暂停或重启后，按提示打开对应网页并同步登录状态，再继续下载。登录、分享、转存与恢复的具体边界见 [网盘能力矩阵](NETDISK_PROVIDERS.md)。
-
-## 用键盘，更顺手
-
-| 快捷键 | 作用 | 快捷键 | 作用 |
-| :-- | :-- | :-- | :-- |
-| **⌃⌥D** | 唤起 / 收起面板，可重新设置 | **⌘N** | 新建下载 |
-| **↩** | 开始下载 | **⌘F** | 搜索任务 |
-| **Esc** | 收起面板 | **⌘,** | 打开设置 |
-| **⌥⌘I** | 查看任务详情 | | |
-
-## 开放，也交代清楚
-
-- **源码开放。** 以 [GPL-3.0](LICENSE) 发布，保留完整的 [第三方许可与版权声明](THIRD_PARTY_NOTICES.md)。
-- **更新由你决定。** 应用只提示新版本并打开 Release 页面，手动下载和安装。
-- **没有内置在线扩展市场或安装统计上报。** 已安装扩展、配置、更新与手动 Git URL 安装继续保留。
-
-### 当前发行版 · build 39
-
-`1.9.3-kownload.26` · 浏览器助手 `0.6.0`。[查看发行说明与下载 →](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.26)
-
-- 网页普通下载由自有助手接管：先持久保存待交接任务，确认原浏览器取消后才启动同一任务；回执丢失时按同一操作恢复，避免重复创建。
-- 设置、可选确认与媒体格式选择集中在 App 原生面板；下载按钮靠近输入框，任务进度、未完成与真实错误分别显示。
-- 浏览器资料授权读取失败时保留原书签，并明确提示重新允许；同一 Edge `Local State` 重新授权后的 App 资料枚举与两次重复读取已实测。
-
-Chrome/Edge 的本机未限速普通下载、持续失联与同任务恢复，以及 MP4/HLS 完整性已有实测。没有把这些结果扩大为所有网站或九盘完整通过；本轮新的真实网盘登录同步、目录到下载流程尚待样本，新的资料授权也未做冷重启验证。升级保留现有任务与配置。
-
-该版本安装包固定对应源码提交 `5babaf7b2a9e90a7a58e9ff690228c2664f430ea`；main 可另含纯文档更新。随 Release 提供相同提交的源码归档、构建清单与 SHA-256 校验文件。
+| **⌃⌥D** | 唤起 / 收起轻面板，可在设置中自定义 |
+| **↩** | 开始下载 |
+| **Esc** | 收起面板 |
+| **⌘N** / **⌘F** | 新建下载 / 搜索任务 |
+| **⌘,** / **⌥⌘I** | 打开设置 / 查看任务详情 |
 
 <details>
-<summary><strong>历史 build 30 / 28 改动与验证记录</strong></summary>
-
-内核与 Release 版本 `1.9.3-kownload.18`，浏览器助手 0.4.2。
-
-- 默认只在菜单栏，不占程序坞和 ⌘Tab；在「设置 → 通用」打开「在程序坞中显示 kownload」后立即生效，菜单栏随之切换。
-- 文件夹和文件选择框改为应用自己的系统选择框，在轻面板和设置窗口里都会弹到前台。
-
-程序坞开关、菜单栏切换和选择框已在实机上验证；.torrent、扩展目录和浏览器资料三处选择框只有测试覆盖。
-
-build 28 起的改动：
-
-- 修复下载完整性：大小未知或不支持 Range 的单流在失败、重试后不再被判为完成；换链或源站内容变化后，续传前先核对资源身份，不再把新旧版本拼成一个文件。
-- Mail.ru 临时链接过期后自动刷新并回到原任务。
-- 浏览器提交带操作 ID：应答丢失后重试不重复建任务，HTTP 状态与业务错误如实返回。
-- 独立应用身份：新的 Bundle ID 与数据目录，首次启动只读导入旧数据；Native Messaging 主机独立实现；浏览器连接改为在设置里显式切换。
-- 更新改为只提示新版本并打开 Release 页面；构建只接受干净提交，随包附完整许可声明与对应源码包。
-
-build 28 经过三轮独立审查。HTTP 与下载调度相关 Go race、Flutter 194 项、浏览器助手 262 项回归通过；正式数据副本上的迁移、回退与再次升级，以及真实浏览器经助手提交下载均已验证。Mail.ru 链接过期后的真实续传、夸克和百度以外网盘的实际下载仍未验证。
-
-build 19 的验证记录见 [docs/BUILD19_VALIDATION.md](docs/BUILD19_VALIDATION.md)。
-
-</details>
-
-## 参与开发
-
-遇到问题或有个好点子？[提交 Issue](https://github.com/kbwumin13-sudo/kownload/issues)，附上应用版本、复现步骤和脱敏后的错误信息。欢迎改进代码、文档与平台适配。
-
-需要 Xcode、CocoaPods、Flutter 3.41.2 和 Go 1.24 或更新版本。
-
-```sh
-git clone https://github.com/kbwumin13-sudo/kownload.git
-cd kownload
-scripts/macos-frontend-build.sh
-```
-
-可通过 `FLUTTER_BIN`、`GO_BIN` 指定工具链。构建与安装见 [macOS 前端开发](MACOS_FRONTEND.md)，发行与候选隔离见 [发行指南](docs/RELEASING.md)。版本由 `config/release.json` 统一管理。
-
-<details>
-<summary><strong>运行回归检查</strong></summary>
-
-```sh
-# Flutter 回归
-cd ui/flutter
-flutter test
-
-# 浏览器助手回归（在仓库根目录执行）
-node --test browser-media-extension/tests/*.test.js
-```
-
-</details>
-
-| 想了解什么 | 从这里开始 |
-| :-- | :-- |
-| 界面与品牌 | [设计约定](DESIGN.md) · [品牌资源](docs/BRAND.md) |
-| 下载能力 | [媒体引擎](MEDIA_SNIFFER.md) · [网盘接口](NETDISK.md) · [网盘验证](NETDISK_PROVIDERS.md) |
-| 构建与历史 | [发行指南](docs/RELEASING.md) · [来源记录](docs/GOPEED_UPSTREAM.md) |
-
-<details>
-<summary>兼容性说明</summary>
-
-独立应用身份已随 build 28 发布。浏览器助手仍使用兼容的 Native Messaging 名称 `com.gopeed.gopeed`，应用另注册 `gopeed:` 过渡链接。浏览器连接由设置中的「连接…」操作显式建立，应用启动时不会改动浏览器目录。
-
-</details>
+<summary>看看设置界面</summary>
 
 <p align="center">
-  <a href="docs/BRAND.md"><img src="docs/brand/app-icon.png" width="56" height="56" alt="kownload 翡翠绿折带图标"></a>
+  <img src="docs/images/kownload-settings.png" width="800" alt="kownload build 19 实机设置界面，含菜单栏、快捷键、外观与使用引导">
   <br>
-  <strong>粘贴，回车，开始下载。</strong>
+  <sub>真实设置截图 · build 19。</sub>
+</p>
+
+首次使用引导可在「设置 → 通用 → 使用引导」重新打开。
+
+</details>
+
+## 继续了解
+
+| 想做什么 | 从这里开始 |
+| :-- | :-- |
+| 安装、升级、连接助手、配置媒体 | [使用指南](docs/GETTING_STARTED.md) |
+| 了解网页媒体与网盘 | [媒体说明](MEDIA_SNIFFER.md) · [网盘能力矩阵](NETDISK_PROVIDERS.md) |
+| 接入 AI 助手 | [MCP Helper](cmd/kownload-mcp/README.md) |
+| 从源码构建、了解发行产物 | [构建与发行](docs/RELEASING.md) · [版本与工具链](config/release.json) |
+| 查看设计与项目来源 | [设计约定](DESIGN.md) · [品牌资源](docs/BRAND.md) · [上游资料](docs/GOPEED_UPSTREAM.md) |
+
+欢迎 [提交 Issue](https://github.com/kbwumin13-sudo/kownload/issues) 或贡献代码与文档。反馈时请附应用版本、复现步骤和脱敏后的错误信息。
+
+### 开放源码，也保留来处
+
+kownload 基于 [Gopeed](https://github.com/GopeedLab/gopeed) v1.9.3 的 Go 下载内核与 Flutter 应用继续开发，感谢上游作者与贡献者。仓库主许可证为 [GPL-3.0](LICENSE)；第三方改编、依赖与资产的许可及归属见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md) 和 [品牌说明](docs/BRAND.md)。各 Release 随包提供对应源码、构建清单与 SHA-256 校验文件。
+
+应用只提示新版本并打开 Release 页面，安装由你决定。没有内置在线扩展市场或安装统计上报；已安装扩展、设置、更新与手动 Git URL 安装继续保留。
+
+<p align="center">
+  <img src="docs/brand/app-icon.png" width="56" height="56" alt="kownload 翡翠绿折带图标">
   <br>
-  <a href="#readme-top">回到顶部 ↑</a>
+  <strong>粘贴，回车，继续专注。</strong>
+  <br>
+  <a href="https://github.com/kbwumin13-sudo/kownload/releases/latest">下载 kownload</a> · <a href="#readme-top">回到顶部 ↑</a>
 </p>

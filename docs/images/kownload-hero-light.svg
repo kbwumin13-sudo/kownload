@@ -1,36 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" fill="none" role="img" aria-labelledby="title desc">
-  <title id="title">kownload — 下载，顺手的事。</title>
-  <desc id="desc">macOS 下载轻面板。Control + Option + D 唤起，粘贴链接，回车开始。支持普通链接、磁力、网页媒体和网盘。</desc>
-  <rect x="1" y="1" width="1198" height="418" rx="28" fill="#f3f8f5" stroke="#d4e7dc" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">kownload — 把下载收进菜单栏。</title>
+  <desc id="desc">原创品牌插画：下载箭头与 Control、Option、D 快捷键。把桌面留给正在做的事。不是应用界面截图。</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1200" y2="480" gradientUnits="userSpaceOnUse"><stop stop-color="#F4F8F5"/><stop offset="1" stop-color="#E7F2EB"/></linearGradient>
+    <linearGradient id="arrow" x1="866" y1="136" x2="1008" y2="316" gradientUnits="userSpaceOnUse"><stop stop-color="#23714F"/><stop offset="1" stop-color="#173E2E"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="1198" height="478" rx="28" fill="url(#surface)" stroke="#CDDFD3" stroke-width="2"/>
   <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
-    <circle cx="65" cy="60" r="5" fill="#2f7758"/>
-    <text x="82" y="66" fill="#426354" font-size="17" letter-spacing="3">KOWNLOAD / FOR MACOS</text>
-    <text x="56" y="166" fill="#173f30" font-size="60" font-weight="650" letter-spacing="-2">下载，顺手的事。</text>
-    <text x="60" y="217" fill="#426354" font-size="23">一个快捷键，把下载收进菜单栏。</text>
-    <path d="M60 266H575" stroke="#d4e7dc"/>
-    <text x="60" y="309" fill="#2f7758" font-size="20" font-weight="600">粘贴链接</text>
-    <path d="M158 302H200M193 296L200 302L193 308" stroke="#2f7758" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="220" y="309" fill="#2f7758" font-size="20" font-weight="600">回车开始</text>
-    <path d="M318 302H360M353 296L360 302L353 308" stroke="#2f7758" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="380" y="309" fill="#2f7758" font-size="20" font-weight="600">继续专注</text>
-    <text x="60" y="376" fill="#426354" font-size="16" letter-spacing="1">HTTP / HTTPS · 磁力 · 网页媒体 · 网盘</text>
-    <rect x="668" y="85" width="478" height="250" rx="125" fill="#deeee4"/>
-    <path d="M696 150H1118M696 270H1118" stroke="#d4e7dc" stroke-dasharray="4 8"/>
-    <g stroke="#d4e7dc" stroke-width="2">
-      <rect x="704" y="152" width="120" height="120" rx="22" fill="#ffffff"/>
-      <rect x="844" y="152" width="120" height="120" rx="22" fill="#ffffff"/>
-      <rect x="984" y="152" width="120" height="120" rx="22" fill="#ffffff"/>
+    <circle cx="66" cy="61" r="6" fill="#23714F"/>
+    <text x="86" y="72" fill="#173E2E" font-size="32" font-weight="650" letter-spacing="-1">kownload</text>
+    <text x="1136" y="66" text-anchor="end" fill="#476553" font-size="18" letter-spacing="3">MADE FOR YOUR MAC</text>
+    <text x="60" y="193" fill="#173E2E" font-size="56" font-weight="650" letter-spacing="-2">把下载收进菜单栏。</text>
+    <text x="64" y="251" fill="#476553" font-size="31">把桌面留给正在做的事。</text>
+    <g stroke="#CDDFD3" stroke-width="1.5">
+      <rect x="64" y="315" width="70" height="66" rx="13" fill="#B4CFBD"/>
+      <rect x="148" y="315" width="70" height="66" rx="13" fill="#B4CFBD"/>
+      <rect x="232" y="315" width="70" height="66" rx="13" fill="#B4CFBD"/>
+      <rect x="64" y="311" width="70" height="64" rx="13" fill="#FFFFFF"/>
+      <rect x="148" y="311" width="70" height="64" rx="13" fill="#FFFFFF"/>
+      <rect x="232" y="311" width="70" height="64" rx="13" fill="#FFFFFF"/>
     </g>
-    <g stroke="#173f30" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M748 199L764 181L780 199"/>
-      <path d="M884 181H895L914 213H925M910 181H925"/>
+    <g stroke="#173E2E" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M89 344L99 333L109 344"/>
+      <path d="M169 333H176L188 353H199M189 333H199"/>
     </g>
-    <text x="1044" y="215" text-anchor="middle" fill="#173f30" font-size="48" font-weight="550">D</text>
-    <g fill="#426354" font-size="13" text-anchor="middle" letter-spacing="1">
-      <text x="764" y="250">CONTROL</text>
-      <text x="904" y="250">OPTION</text>
-      <text x="1044" y="250">DOWNLOAD</text>
-    </g>
-    <text x="904" y="376" text-anchor="middle" fill="#426354" font-size="16" letter-spacing="1">随手唤起 · 安静下载</text>
+    <text x="267" y="354" text-anchor="middle" fill="#173E2E" font-size="31" font-weight="600">D</text>
+    <text x="332" y="353" fill="#173E2E" font-size="25" font-weight="500">唤起 · 粘贴 · 开始</text>
+    <path d="M64 415H1136" stroke="#CDDFD3"/>
+    <text x="64" y="452" fill="#476553" font-size="22">链接 / 磁力 / 网页媒体 / 网盘</text>
+    <text x="1136" y="452" text-anchor="end" fill="#476553" font-size="18" letter-spacing="1">ONE SHORTCUT. LESS FRICTION.</text>
   </g>
+  <circle cx="934" cy="239" r="151" stroke="#CDDFD3"/>
+  <circle cx="934" cy="239" r="121" fill="#D5E9DC"/>
+  <path d="M919 139H949V242L985 206L1006 227L934 299L862 227L883 206L919 242V139Z" fill="url(#arrow)"/>
+  <path d="M867 304V325C867 333 873 339 881 339H987C995 339 1001 333 1001 325V304" stroke="#23714F" stroke-width="9" stroke-linecap="round"/>
+  <circle cx="1077" cy="191" r="6" fill="#23714F"/>
+  <circle cx="809" cy="326" r="4" fill="#23714F"/>
 </svg>
