@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -23,7 +25,14 @@ import (
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/download"
 	"github.com/GopeedLab/gopeed/pkg/rest/model"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
+	gitfile "github.com/go-git/go-git/v5/plumbing/transport/file"
 )
+
+const restExtensionRepo = "https://fixture.invalid/rest-extensions"
 
 var (
 	restPort int
@@ -64,7 +73,7 @@ var (
 		Opts: createOpts,
 	}
 	installExtensionReq = &model.InstallExtension{
-		URL: "https://github.com/GopeedLab/gopeed-extension-samples#github-contributor-avatars-sample",
+		URL: restExtensionRepo + "#sample",
 	}
 )
 
@@ -666,8 +675,75 @@ func TestGetAndPutConfig(t *testing.T) {
 	})
 }
 
+// The REST tests still clone a repository through go-git, but use its local
+// upload-pack transport so installation does not depend on a changing host.
+func doExtensionTest(t *testing.T, handler func()) {
+	t.Helper()
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sampleDir := filepath.Join(dir, "sample")
+	if err := os.Mkdir(sampleDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{
+		"name": "rest-sample",
+		"title": "REST extension fixture",
+		"icon": "icon.png",
+		"version": "1.0.0",
+		"repository": {"url": %q, "directory": "sample"},
+		"settings": [{"name": "ua", "title": "User-Agent", "type": "string"}]
+	}`, restExtensionRepo)
+	if err := os.WriteFile(filepath.Join(sampleDir, "manifest.json"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var icon bytes.Buffer
+	if err := png.Encode(&icon, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sampleDir, "icon.png"), icon.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("sample"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Commit("REST extension fixture", &git.CommitOptions{
+		Author: &object.Signature{Name: "Fixture", Email: "fixture@example.invalid", When: time.Unix(1, 0)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	local, err := transport.NewEndpoint(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The protocol registry is process-wide; these tests run sequentially.
+	previous := gitclient.Protocols["https"]
+	gitclient.InstallProtocol("https", restExtensionTransport{Transport: gitfile.DefaultClient, local: local})
+	t.Cleanup(func() { gitclient.InstallProtocol("https", previous) })
+	doTest(handler)
+}
+
+type restExtensionTransport struct {
+	transport.Transport
+	local *transport.Endpoint
+}
+
+func (f restExtensionTransport) NewUploadPackSession(endpoint *transport.Endpoint, auth transport.AuthMethod) (transport.UploadPackSession, error) {
+	if endpoint.String() != restExtensionRepo+".git" {
+		return nil, transport.ErrRepositoryNotFound
+	}
+	return f.Transport.NewUploadPackSession(f.local, auth)
+}
+
 func TestInstallExtension(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		if identity == "" {
 			t.Errorf("InstallExtension() got = %v, want %v", identity, "not empty")
@@ -675,20 +751,20 @@ func TestInstallExtension(t *testing.T) {
 
 		// not a valid extension repository
 		code, _ := httpRequest[string](http.MethodPost, "/api/v1/extensions", &model.InstallExtension{
-			URL: "https://github.com/GopeedLab/gopeed",
+			URL: restExtensionRepo,
 		})
 		checkCode(code, model.CodeError)
 
 		// not a git repository
 		code, _ = httpRequest[string](http.MethodPost, "/api/v1/extensions", &model.InstallExtension{
-			URL: "https://github.com",
+			URL: "https://fixture.invalid/missing",
 		})
 		checkCode(code, model.CodeError)
 	})
 }
 
 func TestGetExtensions(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		extensions := httpRequestCheckOk[[]*download.Extension](http.MethodGet, "/api/v1/extensions", nil)
 		if len(extensions) == 0 {
@@ -698,7 +774,7 @@ func TestGetExtensions(t *testing.T) {
 }
 
 func TestUpdateExtensionSettings(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/extensions/"+identity+"/settings", &model.UpdateExtensionSettings{
@@ -720,7 +796,7 @@ func TestUpdateExtensionSettings(t *testing.T) {
 }
 
 func TestSwitchExtension(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/extensions/"+identity+"/switch", &model.SwitchExtension{
 			Status: false,
@@ -733,7 +809,7 @@ func TestSwitchExtension(t *testing.T) {
 }
 
 func TestDeleteExtension(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		httpRequestCheckOk[any](http.MethodDelete, "/api/v1/extensions/"+identity, nil)
 		extensions := httpRequestCheckOk[[]*download.Extension](http.MethodGet, "/api/v1/extensions", nil)
@@ -744,7 +820,7 @@ func TestDeleteExtension(t *testing.T) {
 }
 
 func TestUpdateCheckExtension(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		resp := httpRequestCheckOk[*model.UpdateCheckExtensionResp](http.MethodGet, "/api/v1/extensions/"+identity+"/update", nil)
 		// no new version
@@ -757,7 +833,7 @@ func TestUpdateCheckExtension(t *testing.T) {
 }
 
 func TestFsExtension(t *testing.T) {
-	doTest(func() {
+	doExtensionTest(t, func() {
 		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
 		statusCode, _ := doHttpRequest0(http.MethodGet, "/fs/extensions/"+identity+"/icon.png", nil, nil)
 		if statusCode != http.StatusOK {
