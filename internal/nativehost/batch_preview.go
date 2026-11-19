@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 )
 
 const batchPreviewLimit = 64 * 1024
-const kownloadAssistantOrigin = "chrome-extension://jcalkpjhhaachliihlkojhmafniepnoj/"
 
 type batchPreviewItem struct {
 	URL     *string           `json:"url"`
@@ -79,7 +79,7 @@ func previewCredentialOrigin(raw string) (string, error) {
 func (d Dispatcher) batchPreview(ctx context.Context, req Request) Response {
 	if req.IdentityProtocol == nil || req.BridgeBinding == nil ||
 		req.BridgeBinding.HostName != appidentity.HostName || d.Identity == nil ||
-		d.Identity.CallerOrigin != kownloadAssistantOrigin {
+		!slices.Contains(appidentity.KownloadAssistantOrigins, d.Identity.CallerOrigin) {
 		return failure("", "binding_required", nil, nil)
 	}
 	if req.OperationID != "" || req.Meta != nil {

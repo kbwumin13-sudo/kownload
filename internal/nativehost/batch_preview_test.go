@@ -10,7 +10,6 @@ import (
 
 func TestBatchPreviewIsOnlyBoundDraftImport(t *testing.T) {
 	identity := testIdentity(t)
-	identity.CallerOrigin = kownloadAssistantOrigin
 	scope, err := identity.routeScope()
 	if err != nil {
 		t.Fatal(err)
@@ -75,15 +74,52 @@ func TestBatchPreviewIsOnlyBoundDraftImport(t *testing.T) {
 			}
 		})
 	}
-	identity.CallerOrigin = "chrome-extension://mijpgljlfcapndmchhjffkpckknofcnd/"
-	if got := dispatchRequest(t, d, req); got.Code == 0 || f.calls != 1 || f.wakes != 0 {
-		t.Fatalf("official legacy extension could import a draft: %+v", got)
+}
+
+func TestBatchPreviewAssistantOriginPolicy(t *testing.T) {
+	identity := testIdentity(t)
+	scope, err := identity.routeScope()
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := IdentityProtocol
+	req := Request{Method: "batchPreview", IdentityProtocol: &version,
+		BridgeBinding: &BridgeBinding{Version: version, HostName: appidentity.HostName, RouteScope: scope},
+		Params:        json.RawMessage(`{"version":1,"items":[{"url":"https://sample.test/"}]}`)}
+	for _, origin := range appidentity.KownloadAssistantOrigins {
+		t.Run("assistant "+origin, func(t *testing.T) {
+			identity.CallerOrigin = origin
+			f := &fixture{status: 200, body: `{"code":0}`}
+			d := Dispatcher{Client: f, Wakeup: f, Identity: identity}
+			if !AllowedOrigin(origin) {
+				t.Fatal("assistant also needs ordinary native messaging")
+			}
+			if got := dispatchRequest(t, d, req); got.Code != 0 || f.calls != 1 || f.lastPath != "/batchPreview" || f.wakes != 0 {
+				t.Fatalf("assistant import rejected: %+v", got)
+			}
+		})
+	}
+	for _, origin := range []string{
+		"chrome-extension://mijpgljlfcapndmchhjffkpckknofcnd/",
+		"chrome-extension://dkajnckekendchdleoaenoophcobooce/",
+		"{c5d69a8f-2ed0-46a7-afa4-b3a00dc58088}",
+	} {
+		t.Run("compatibility "+origin, func(t *testing.T) {
+			identity.CallerOrigin = origin
+			f := &fixture{status: 200, body: `{"code":0}`}
+			d := Dispatcher{Client: f, Wakeup: f, Identity: identity}
+			if !AllowedOrigin(origin) {
+				t.Fatal("compatibility extension lost ordinary native messaging")
+			}
+			if got := dispatchRequest(t, d, req); got.Error != "binding_required" || f.calls != 0 || f.wakes != 0 {
+				t.Fatalf("compatibility extension gained an assistant import: %+v", got)
+			}
+		})
 	}
 }
 
 func TestBatchPreviewAppRejectionDoesNotFallBack(t *testing.T) {
 	identity := testIdentity(t)
-	identity.CallerOrigin = kownloadAssistantOrigin
 	scope, _ := identity.routeScope()
 	version := IdentityProtocol
 	f := &fixture{status: 409, body: `{"code":1000,"msg":"fixture-private"}`}

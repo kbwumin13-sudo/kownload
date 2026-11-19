@@ -11,6 +11,7 @@
   "migrationExecutable": "kownload-migrate",
   "apiSocket": "ipc/api.sock",
   "hostSocket": "ipc/host.sock",
-  "chromiumExtensionIds": ["jcalkpjhhaachliihlkojhmafniepnoj", "mijpgljlfcapndmchhjffkpckknofcnd", "dkajnckekendchdleoaenoophcobooce"],
+  "kownloadAssistantChromiumIds": ["jcalkpjhhaachliihlkojhmafniepnoj"],
+  "officialCompatChromiumIds": ["mijpgljlfcapndmchhjffkpckknofcnd", "dkajnckekendchdleoaenoophcobooce"],
   "firefoxExtensionIds": ["{c5d69a8f-2ed0-46a7-afa4-b3a00dc58088}"]
 }

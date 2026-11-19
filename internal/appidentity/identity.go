@@ -19,3 +19,5 @@ const (
 var ChromiumExtensionIds = []string{"jcalkpjhhaachliihlkojhmafniepnoj", "mijpgljlfcapndmchhjffkpckknofcnd", "dkajnckekendchdleoaenoophcobooce"}
 
 var FirefoxExtensionIds = []string{"{c5d69a8f-2ed0-46a7-afa4-b3a00dc58088}"}
+
+var KownloadAssistantOrigins = []string{"chrome-extension://jcalkpjhhaachliihlkojhmafniepnoj/"}
