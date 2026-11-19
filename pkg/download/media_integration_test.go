@@ -161,6 +161,71 @@ func mediaOutput(t *testing.T, d *Downloader, id string) string {
 	return task.Meta.SingleFilepath()
 }
 
+func TestPastedPageMediaDownloaderRecovery(t *testing.T) {
+	ytdlp := mediaTool(t, "yt-dlp")
+	ffmpeg := mediaTool(t, "ffmpeg")
+	mediaTool(t, "ffprobe")
+	fixture := filepath.Join(t.TempDir(), "selected.mp4")
+	mediaFFmpeg(t, ffmpeg, "-f", "lavfi", "-i", "color=blue:s=64x64:r=10", "-t", "1", "-c:v", "libx264", fixture)
+	want, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unexpected atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/watch":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<!doctype html><title>Two players</title><video controls src="/other.mp4"></video><video controls src="/selected.mp4"></video>`)
+		case "/selected.mp4":
+			if r.Referer() != "http://"+r.Host+"/watch" {
+				t.Errorf("selected media Referer = %q", r.Referer())
+				http.Error(w, "missing Referer", http.StatusForbidden)
+				return
+			}
+			http.ServeContent(w, r, "selected.mp4", time.Time{}, bytes.NewReader(want))
+		default:
+			unexpected.Add(1)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	out := t.TempDir()
+	d := mediaDownloader(t, NewBoltStorage(t.TempDir()), out, ytdlp, ffmpeg)
+	defer d.Close()
+	ctx := context.Background()
+	page := server.URL + "/watch"
+	// REST decodes the sparse Flutter request into an untyped extra map.
+	extra := map[string]any{"sourceType": "pasted-page", "sourcePage": page}
+	req := &base.Request{URL: page, Protocol: "media", Extra: extra, Proxy: &base.RequestProxy{Mode: base.RequestProxyModeNone}}
+	parent, err := d.InspectMedia(ctx, req)
+	if err == nil && len(parent.Candidates) == 0 && strings.Contains(parent.Reason, "Python yt-dlp") {
+		t.Skip(parent.Reason)
+	}
+	if err != nil || len(parent.Candidates) != 2 {
+		t.Fatalf("parent inspection: %+v, %v", parent, err)
+	}
+	extra["pageCandidateId"] = parent.Candidates[1].ID
+	child, err := d.InspectMedia(ctx, req)
+	if err != nil || !child.Supported || len(child.Formats) != 1 {
+		t.Fatalf("selected inspection: %+v, %v", child, err)
+	}
+	extra["format"], extra["container"], extra["mediaKind"] = child.Formats[0].ID, child.Formats[0].Container, "video"
+	id, err := d.CreateDirect(req, &base.Options{Path: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := mediaWaitStatus(t, d, id, base.DownloadStatusDone, base.DownloadStatusError)
+	_, record, err := readRecovery(d.storage, id)
+	if err != nil || record.Version != recoverySharedVersion || record.SourceRevision != 1 || status != base.DownloadStatusDone {
+		t.Fatalf("media task status=%s version=%d source revision=%d recovery err=%v", status, record.Version, record.SourceRevision, err)
+	}
+	got, err := os.ReadFile(mediaOutput(t, d, id))
+	if err != nil || !bytes.Equal(got, want) || unexpected.Load() != 0 {
+		t.Fatalf("selected output differs: read err=%v, other requests=%d", err, unexpected.Load())
+	}
+}
+
 func TestMediaDownloaderIntegration(t *testing.T) {
 	ytdlp := mediaTool(t, "yt-dlp")
 	ffmpeg := mediaTool(t, "ffmpeg")

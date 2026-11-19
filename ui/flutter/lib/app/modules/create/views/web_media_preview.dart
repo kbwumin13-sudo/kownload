@@ -92,8 +92,9 @@ class _WebMediaPreviewState extends State<WebMediaPreview> {
       quality,
       if (choice.container.isNotEmpty) choice.container,
       if (choice.mergesTracks) 'webMediaMergeAudio'.tr,
-      if (choice.silentVideo) 'webMediaSilentVideo'.tr,
-      if (!choice.hasConfirmedTracks) 'webMediaUnknownTracks'.tr,
+      if (choice.noAudio) 'webMediaSilentVideo'.tr,
+      if (!choice.noAudio && !choice.hasConfirmedTracks)
+        'webMediaUnknownTracks'.tr,
       if (format.language.isNotEmpty) format.language,
       if (format.hasVideo) format.vcodec.split('.').first,
       if (_candidate != null &&

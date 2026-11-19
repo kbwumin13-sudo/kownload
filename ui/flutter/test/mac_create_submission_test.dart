@@ -201,10 +201,16 @@ void main() {
                           'id': 'v720',
                           'height': 720,
                           'ext': 'mp4',
-                          'vcodec': 'h264',
+                          'vcodec': scenario == 'explicit preview' ? '' : 'h264',
                           'acodec': 'none'
                         },
-                        if (scenario != 'explicit preview')
+                        if (scenario == 'explicit preview')
+                          {
+                            'id': 'unknown-tracks',
+                            'height': 360,
+                            'ext': 'webm',
+                          }
+                        else
                           {
                             'id': 'a1',
                             'ext': 'm4a',
@@ -293,7 +299,9 @@ void main() {
           expect(tester.widget<FilledButton>(download).onPressed, isNull);
           await tester.tap(find.byKey(const ValueKey('web-media-format')));
           await advanceTransition();
-          await tester.tap(find.textContaining('webMediaSilentVideo').last);
+          expect(find.text('360p · webm · webMediaUnknownTracks'),
+              findsOneWidget);
+          await tester.tap(find.text('720p · mp4 · webMediaSilentVideo'));
           await advanceTransition();
           await tester.tap(download);
           await tester.pumpAndSettle();

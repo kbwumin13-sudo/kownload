@@ -46,7 +46,7 @@ const enUS = {
     'webMediaAudio': 'Audio only',
     'webMediaUnknownTracks': 'Unconfirmed tracks',
     'webMediaMergeAudio': 'Merge audio track',
-    'webMediaSilentVideo': 'Silent video',
+    'webMediaSilentVideo': 'No audio track',
     'webMediaUnavailable':
         'No downloadable media could be confirmed. Open the source page and select the player using the browser helper.',
     'webMediaNoFormats': 'No downloadable media was found on the page.',

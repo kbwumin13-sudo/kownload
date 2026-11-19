@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -25,7 +26,9 @@ var recoveryWrapper string
 
 type directPageFileKey struct{}
 
-func cloneRequest(req *base.Request) (*base.Request, error) {
+// Keep sparse request JSON intact for the durable source hash. Typed requests
+// from Go callers retain their type. Execution parses a separate copy of Extra.
+func cloneSourceRequest(req *base.Request) (*base.Request, error) {
 	if req == nil {
 		return nil, errors.New("missing media request")
 	}
@@ -34,13 +37,27 @@ func cloneRequest(req *base.Request) (*base.Request, error) {
 		return nil, errors.New("invalid media request")
 	}
 	var out base.Request
-	if json.Unmarshal(data, &out) != nil {
+	switch req.Extra.(type) {
+	case model.ReqExtra, *model.ReqExtra:
+		out.Extra = new(model.ReqExtra)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if decoder.Decode(&out) != nil {
 		return nil, errors.New("invalid media request")
 	}
-	if _, err := extraFor(&out); err != nil {
+	return &out, nil
+}
+
+func cloneRequest(req *base.Request) (*base.Request, error) {
+	out, err := cloneSourceRequest(req)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if _, err := extraFor(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func headerOrigin(raw string) (string, error) {

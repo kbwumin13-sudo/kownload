@@ -120,19 +120,17 @@ class MediaFormatChoice {
       {required this.mergesTracks});
 
   String get mediaKind => format.audioOnly ? 'audio' : 'video';
-  bool get silentVideo =>
-      !mergesTracks && format.hasVideo && format.acodec == 'none';
+  bool get noAudio => !mergesTracks && format.acodec == 'none';
   bool get hasConfirmedTracks =>
       format.audioOnly ||
-      silentVideo ||
-      (format.hasVideo && (format.hasAudio || mergesTracks));
+      (format.hasVideo && (format.hasAudio || noAudio || mergesTracks));
 
   static MediaFormatChoice? defaultVideo(List<MediaFormatChoice> choices) {
     final videos = choices
         .where((choice) =>
             choice.format.hasVideo &&
             choice.hasConfirmedTracks &&
-            !choice.silentVideo)
+            !choice.noAudio)
         .toList();
     videos.sort((a, b) {
       final height = b.format.height.compareTo(a.format.height);

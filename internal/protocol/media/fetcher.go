@@ -147,7 +147,7 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 	if err != nil {
 		return err
 	}
-	req, err = cloneRequest(req)
+	req, err = cloneSourceRequest(req)
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func (f *Fetcher) Start() error {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	req, err := cloneRequest(f.meta.Req)
+	req, err := cloneSourceRequest(f.meta.Req)
 	if err != nil {
 		f.mu.Unlock()
 		cancel()

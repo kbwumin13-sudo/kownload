@@ -2795,9 +2795,13 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 				task.Meta.Res.CalcSize(task.Meta.Opts.SelectFiles)
 			}
 			if task.Protocol == "media" || task.Protocol == "netdisk" {
-				// Media updates resource sizes from its child process. Publish a
-				// detached view until Wait establishes completion synchronization.
-				task.Meta = util.DeepClone(task.Meta)
+				// Publish a detached view until Wait establishes completion
+				// synchronization. Keep the request's exact source hash shape.
+				meta, err := task.cloneExecutionMeta()
+				if err != nil {
+					return err
+				}
+				task.Meta = meta
 			}
 			return nil
 		}(); err != nil {
