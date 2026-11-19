@@ -141,8 +141,15 @@ func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
 			if record.RefreshUsed!=wantRefresh || record.TransportUsed!=wantTransport || record.TotalUsed!=wantRefresh+wantTransport || record.SourceRevision!=uint64(wantRefresh+1) {
 				t.Fatalf("wrong shared debit: total=%d refresh=%d transport=%d source=%d",record.TotalUsed,record.RefreshUsed,record.TransportUsed,record.SourceRevision)
 			}
-			last := record.Actions[len(record.Actions)-1]
-			if last.Kind!="refresh" || last.State!="finished" { t.Fatal("refresh parent not atomically finished") }
+			finishedRefreshes := 0
+			for _, action := range record.Actions {
+				if action.Kind == "refresh" && action.State == "finished" {
+					finishedRefreshes++
+				}
+			}
+			if finishedRefreshes != wantRefresh {
+				t.Fatalf("finished refresh actions = %d, want %d", finishedRefreshes, wantRefresh)
+			}
 			if public && (dispatch.Load()!=2 || oldRanges.Load()!=2) { t.Fatalf("unbounded public plan: dispatcher=%d old=%d",dispatch.Load(),oldRanges.Load()) }
 			if !public && (origin.Load()!=2 || newRanges.Load()!=1) { t.Fatalf("fallback body resent: origin=%d body=%d",origin.Load(),newRanges.Load()) }
 			t.Logf("same Task completed %d bytes SHA=%x refresh=%d transport=%d",len(got),sha256.Sum256(got),record.RefreshUsed,record.TransportUsed)
