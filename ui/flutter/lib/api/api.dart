@@ -383,6 +383,7 @@ Future<T> _parse<T>(
   Future<Response> Function() fetch,
   T Function(dynamic json)? fromJsonT, {
   String timeoutMessage = '请求超时，请稍后重试',
+  bool distinguishRejection = false,
 }) async {
   try {
     var resp = await fetch();
@@ -391,6 +392,7 @@ Future<T> _parse<T>(
     if (result.code == 0) {
       return result.data as T;
     } else {
+      if (distinguishRejection) throw TaskWriteRejected(result);
       throw Exception(result);
     }
   } on DioException catch (e) {
@@ -486,9 +488,17 @@ Future<List<String>> createTaskBatch(CreateTaskBatch createTaskBatch,
       (data) => (data as List).map((e) => e as String).toList());
 }
 
-Future<void> patchTask(String id, ResolveTask patchTask) async {
+/// A parsed rejection from the server, distinguished from an unknown write.
+class TaskWriteRejected implements Exception {
+  final Result message;
+  const TaskWriteRejected(this.message);
+}
+
+Future<void> patchTask(String id, ResolveTask patchTask,
+    {bool distinguishRejection = false}) async {
   return _parse(
-      () => _client.dio.patch("api/v1/tasks/$id", data: patchTask), null);
+      () => _client.dio.patch("api/v1/tasks/$id", data: patchTask), null,
+      distinguishRejection: distinguishRejection);
 }
 
 Future<List<Task>> getTasks(List<Status> statuses) async {
@@ -511,8 +521,10 @@ Future<void> pauseTask(String id) async {
   return _parse(() => _client.dio.put("api/v1/tasks/$id/pause"), null);
 }
 
-Future<void> continueTask(String id) async {
-  return _parse(() => _client.dio.put("api/v1/tasks/$id/continue"), null);
+Future<void> continueTask(String id,
+    {bool distinguishRejection = false}) async {
+  return _parse(() => _client.dio.put("api/v1/tasks/$id/continue"), null,
+      distinguishRejection: distinguishRejection);
 }
 
 Future<void> pauseAllTasks(List<String>? ids) async {

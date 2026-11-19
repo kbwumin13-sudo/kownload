@@ -4,10 +4,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
+import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/create_task.dart';
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/task.dart';
+import 'package:gopeed/api/netdisk.dart';
+import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
+import 'package:gopeed/app/modules/task/controllers/task_recovery_feedback.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/app/modules/create/bindings/create_binding.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
@@ -15,6 +19,7 @@ import 'package:gopeed/app/modules/create/views/netdisk_view.dart';
 import 'package:gopeed/app/routes/app_pages.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/macos/mac_theme.dart';
+import 'package:gopeed/i18n/message.dart' as i18n;
 
 import 'netdisk_test_support.dart';
 
@@ -23,6 +28,11 @@ class _App extends AppController {
   void onReady() {}
   @override
   void onClose() {}
+}
+
+class _RecoveryList extends MacTaskListController {
+  @override
+  Future<void> getTasksState() async {}
 }
 
 class _HistoryBox extends Fake implements Box {
@@ -38,7 +48,10 @@ class _HistoryBox extends Fake implements Box {
 
 Future<_HistoryBox> _mountCreate(
     WidgetTester tester, MockNetdiskTransport transport,
-    {CreateTask? request, Task? pendingTask, MockBrowserTool? browser}) async {
+    {CreateTask? request,
+    Task? pendingTask,
+    MockBrowserTool? browser,
+    _RecoveryList? recoveryList}) async {
   MacPanel.incoming.value = null;
   MacPanel.presentation.value = 'panel';
   MacPanel.cancelAutoHide();
@@ -64,18 +77,27 @@ Future<_HistoryBox> _mountCreate(
         PendingUpdateTask(id: pendingTask.id, name: pendingTask.name);
   }
   Get.put<AppController>(app);
-  await tester.pumpWidget(
-      GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
-    GetPage(name: '/', page: () => const Scaffold(body: Text('首页'))),
-    GetPage(
-        name: Routes.CREATE,
-        page: () => CreateView(
-            netdiskApi: transport.api,
-            netdiskBrowserTool: browser ?? MockBrowserTool()),
-        binding: CreateBinding(),
-        transition: Transition.noTransition),
-    GetPage(name: Routes.TASK, page: () => const Scaffold(body: Text('任务列表'))),
-  ]));
+  if (recoveryList != null) {
+    api.init('tcp', '127.0.0.1:1', '');
+    Get.put<MacTaskListController>(recoveryList);
+  }
+  await tester.pumpWidget(GetMaterialApp.router(
+      translations: i18n.messages,
+      locale: const Locale('zh', 'CN'),
+      fallbackLocale: const Locale('en', 'US'),
+      theme: macTheme(Brightness.light),
+      getPages: [
+        GetPage(name: '/', page: () => const Scaffold(body: Text('首页'))),
+        GetPage(
+            name: Routes.CREATE,
+            page: () => CreateView(
+                netdiskApi: transport.api,
+                netdiskBrowserTool: browser ?? MockBrowserTool()),
+            binding: CreateBinding(),
+            transition: Transition.noTransition),
+        GetPage(
+            name: Routes.TASK, page: () => const Scaffold(body: Text('任务列表'))),
+      ]));
   await tester.pumpAndSettle();
   Get.rootDelegate.toNamed(Routes.CREATE, arguments: request);
   await tester.pumpAndSettle();
@@ -134,6 +156,9 @@ void main() {
     expect(transport.at('/browser/request').single.$3,
         {'source': mockSource.toJson()});
     expect(browser.launches.single, contains(mockSource.url));
+    expect(transport.at('/tasks/original-task/continue'), isEmpty);
+    await tester.tap(find.text('继续原任务'));
+    await tester.pumpAndSettle();
     final resumed = transport.at('/tasks/original-task/continue').single;
     expect(resumed.$2, 'PUT');
     expect(resumed.$3, isNull);
@@ -204,13 +229,17 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();
-    expect(find.textContaining('请登录原账号'), findsOneWidget);
+    await tester.tap(find.text('继续原任务'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('恢复请求被拒绝'), findsOneWidget);
     expect(Get.find<AppController>().pendingUpdateTask.value?.id, original.id);
     expect(find.byType(NetdiskView), findsOneWidget);
     failResume = false;
     await tester.tap(find.text('重新同步登录'));
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('继续原任务'));
     await tester.pumpAndSettle();
     expect(transport.at('/tasks/original-task/continue'), hasLength(2));
     expect(Get.find<AppController>().pendingUpdateTask.value, isNull);
@@ -226,6 +255,49 @@ void main() {
             .text,
         isEmpty);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('unknown netdisk Continue stays blocked after closing recovery',
+      (tester) async {
+    final transport = MockNetdiskTransport();
+    final original = mockExistingTask();
+    final list = _RecoveryList();
+    transport.handler = (path, method, data) async {
+      if (path.contains('/browser/requests/') && method == 'GET') {
+        return transport.envelope({
+          'id': 'request',
+          'source': mockSource.toJson(),
+          'state': 'ready',
+          'sessionId': 'new-session'
+        });
+      }
+      if (path.endsWith('/continue')) {
+        throw const NetdiskException('unknown fixture', 'receive_timeout');
+      }
+      return null;
+    };
+    await _mountCreate(tester, transport,
+        pendingTask: original, recoveryList: list);
+    try {
+      await tester.tap(find.text('重新同步登录'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('继续原任务'));
+      await tester.pumpAndSettle();
+      expect(find.text('恢复结果尚未确认，请查看原任务状态'), findsOneWidget);
+      expect(list.recovery.stage(original), RecoveryStage.unknown);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('开始下载'));
+      await tester.pumpAndSettle();
+      expect(find.byType(NetdiskView), findsNothing);
+      expect(transport.at('/tasks/original-task/continue'), hasLength(1));
+      expect(transport.at('/tasks/batch'), isEmpty);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      Get.delete<MacTaskListController>(force: true);
+    }
   });
 
   testWidgets(

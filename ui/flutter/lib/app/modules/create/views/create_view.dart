@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show FontFeature;
 
@@ -36,7 +35,6 @@ import '../../../../database/task_batch_journal_store.dart';
 import '../../../../database/database.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/message.dart';
-import '../../../../util/log_util.dart';
 import '../../../../util/util.dart';
 import '../../../../util/netdisk_browser.dart';
 import '../../../../macos/mac_widgets.dart';
@@ -45,6 +43,7 @@ import '../../../../macos/mac_appearance.dart';
 import '../../../../macos/mac_panel.dart';
 import '../../../../macos/mac_onboarding.dart';
 import '../../task/controllers/task_controller.dart';
+import '../../task/controllers/task_recovery_feedback.dart';
 import '../../task/views/task_batch_groups.dart';
 import '../../task/views/http_completion_status.dart';
 import '../../../routes/app_pages.dart';
@@ -2586,7 +2585,7 @@ class CreateViewState extends State<CreateView> {
   }
 
   Widget _panelIcon(
-          MacColors c, IconData icon, String label, VoidCallback action) =>
+          MacColors c, IconData icon, String label, VoidCallback? action) =>
       Tooltip(
           message: label,
           child: CupertinoButton(
@@ -2673,29 +2672,35 @@ class CreateViewState extends State<CreateView> {
                 if (failed && completion == null)
                   MacTaskFailure(
                       key: ValueKey('failure-${task.id}'),
-                      taskId: task.id,
+                      task: task,
+                      stage: list.recovery.stage(task),
+                      afterLinkUpdate: list.recovery.isLinkUpdate(task),
                       style: const TextStyle(
                           fontSize: 11, color: CupertinoColors.systemRed))
                 else
                   Text(
-                      task.handoff?.blocked == true
-                          ? task.handoff!.label
-                          : completion != null
-                              ? completion.labelFor(task.status)
-                              : failed
-                                  ? '下载失败 · 查看详情'
-                                  : done
-                                      ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
-                                      : task.fetchingTorrentInfo
-                                          ? '正在获取种子信息'
-                                          : running
-                                              ? (total > 0
-                                                  ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
-                                                  : Util.fmtByte(
-                                                      task.progress.downloaded))
-                                              : task.status == Status.pause
-                                                  ? '已暂停'
-                                                  : '等待下载',
+                      [
+                        if (list.recovery.stage(task) case final stage?)
+                          stage.label,
+                        task.handoff?.blocked == true
+                            ? task.handoff!.label
+                            : completion != null
+                                ? completion.labelFor(task.status)
+                                : failed
+                                    ? '下载失败 · 查看详情'
+                                    : done
+                                        ? '已完成 · ${Util.fmtByte(task.progress.downloaded)}'
+                                        : task.fetchingTorrentInfo
+                                            ? '正在获取种子信息'
+                                            : running
+                                                ? (total > 0
+                                                    ? '${Util.fmtByte(task.progress.downloaded)} / ${Util.fmtByte(total)}'
+                                                    : Util.fmtByte(task
+                                                        .progress.downloaded))
+                                                : task.status == Status.pause
+                                                    ? '已暂停'
+                                                    : '等待下载',
+                      ].join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -2743,8 +2748,16 @@ class CreateViewState extends State<CreateView> {
               width: 56,
               child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
                 if (failed)
-                  _panelIcon(c, CupertinoIcons.info_circle, '查看错误',
-                      () => _showTaskError(task)),
+                  _panelIcon(
+                      c, CupertinoIcons.info_circle, 'taskRecoveryDetails'.tr,
+                      () async {
+                    MacPanel.resize(430);
+                    await showTaskRecovery(context, task, list.recovery,
+                        refresh: list.getTasksState,
+                        currentTask: () => list.tasks.firstWhereOrNull(
+                            (current) => current.id == task.id));
+                    if (mounted) setState(() {});
+                  }),
                 if (task.handoff?.blocked == true)
                   _panelIcon(c, CupertinoIcons.arrow_clockwise, '检查交接',
                       () async {
@@ -2770,82 +2783,62 @@ class CreateViewState extends State<CreateView> {
                       key: ValueKey('retry-${task.id}'),
                       task: task,
                       compact: true,
+                      feedback: list.recovery,
                       color: c.secondary,
-                      legacyContinue: () => continueTask(task.id),
+                      legacyContinue: () =>
+                          continueTask(task.id, distinguishRejection: true),
                       refresh: () async {
                         await list.getTasksState();
                       },
                       notice: (message) => MacPanel.notice.value = message)
+                else if (failed && canSyncTaskLogin(task))
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(24, 28),
+                    onPressed: list.recovery.blocksWrite(task)
+                        ? null
+                        : () => openTaskLogin(task),
+                    child: Tooltip(
+                      message: 'taskRecoverySyncDrive'.tr,
+                      child: Icon(Icons.login, size: 15, color: c.secondary),
+                    ),
+                  )
+                else if (failed &&
+                    (task.protocol == Protocol.media ||
+                        task.protocol == Protocol.netdisk))
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(24, 28),
+                    onPressed: list.recovery.blocksWrite(task)
+                        ? null
+                        : () => continueFailedTask(
+                            task, list.recovery, list.getTasksState),
+                    child: Tooltip(
+                      message: 'httpRetry'.tr,
+                      child: Icon(Icons.refresh, size: 15, color: c.secondary),
+                    ),
+                  )
                 else
                   _panelIcon(
                       c,
                       running ? CupertinoIcons.pause : CupertinoIcons.play,
-                      running ? '暂停' : '继续', () async {
-                    try {
-                      running
-                          ? await pauseTask(task.id)
-                          : await continueTask(task.id);
-                      await list.getTasksState();
-                    } catch (e) {
-                      _panelError.value = e.toString();
-                    }
-                  }),
+                      running ? 'pause'.tr : 'continue'.tr,
+                      !running &&
+                              (list.recovery.blocksWrite(task) ||
+                                  hasUnconfirmedHttpRetry(task))
+                          ? null
+                          : () async {
+                              try {
+                                running
+                                    ? await pauseTask(task.id)
+                                    : await continueTask(task.id);
+                                await list.getTasksState();
+                              } catch (e) {
+                                _panelError.value = e.toString();
+                              }
+                            }),
               ])),
         ]));
-  }
-
-  Future<void> _showTaskError(Task task) async {
-    var reason = '下载失败。可重试；网盘任务可在任务管理中重新同步登录。';
-    var hasReason = false;
-    try {
-      final value = (await getTaskStats(task.id)).lastError;
-      if (value != null && value.trim().isNotEmpty) {
-        reason = displayTaskFailure(value);
-        hasReason = true;
-      }
-    } catch (_) {}
-    if (!hasReason)
-      try {
-        final file = File(path.join(logsDir(), 'core.log'));
-        final handle = await file.open();
-        try {
-          final length = await handle.length();
-          await handle.setPosition(length > 131072 ? length - 131072 : 0);
-          final lines = utf8
-              .decode(await handle.read(131072), allowMalformed: true)
-              .split('\n');
-          for (final line in lines.reversed) {
-            if (!line.contains(task.id)) continue;
-            try {
-              final entry = jsonDecode(line);
-              if (entry is Map && entry['error'] is String) {
-                reason = (entry['error'] as String)
-                    .replaceAll(RegExp(r'https?://\S+'), '[下载地址]')
-                    .replaceAll(RegExp(r'Bearer\s+\S+', caseSensitive: false),
-                        'Bearer …');
-                break;
-              }
-            } catch (_) {}
-          }
-        } finally {
-          await handle.close();
-        }
-      } catch (_) {}
-    if (!mounted) return;
-    MacPanel.resize(380);
-    await showDialog<void>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-              title:
-                  Text(task.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              content: SelectableText(reason),
-              actions: [
-                TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(),
-                    child: const Text('关闭'))
-              ],
-            ));
-    if (mounted) setState(() {});
   }
 
   // parse protocol from url
@@ -3172,18 +3165,76 @@ class CreateViewState extends State<CreateView> {
     final pending = appController.pendingUpdateTask.value;
     if (pending == null) return false;
     final api = netdiskApi ?? NetdiskApi();
+    final snapshot = activeApiSnapshot;
     final task = await api.getTask(pending.id);
     if (task.meta.req.protocol != 'netdisk') return false;
-    final resumed = await _showNetdisk(NetdiskInput.fromRequest(task.meta.req),
-        options: Options.fromJson(task.meta.opts.toJson()),
-        proxy: task.meta.req.proxy,
-        onResume: () => api.continueTask(task.id));
-    if (resumed) {
-      if (appController.pendingUpdateTask.value?.id == task.id) {
-        appController.pendingUpdateTask.value = null;
+    if (task.id != pending.id) return true;
+    final list = Get.isRegistered<MacTaskListController>()
+        ? Get.find<MacTaskListController>()
+        : null;
+    if (_netdiskOpen.value) return true;
+    try {
+      if (!canSyncTaskLogin(task) ||
+          list?.recovery.blocksWrite(task) == true ||
+          !identical(appController.pendingUpdateTask.value, pending)) {
+        MacPanel.notice.value =
+            (list?.recovery.stage(task) ?? RecoveryStage.rejected).label;
+        return true;
       }
-      _netdiskRequest.value = null;
-      _completeCreate();
+      final resumed = await _showNetdisk(
+          NetdiskInput.fromRequest(task.meta.req),
+          options: Options.fromJson(task.meta.opts.toJson()),
+          proxy: task.meta.req.proxy, onResume: () async {
+        if (snapshot?.isCurrent == false) {
+          throw NetdiskException(
+              'taskRecoveryRejected'.tr, 'recovery_rejected');
+        }
+        final current = await api.getTask(task.id);
+        if (snapshot?.isCurrent == false ||
+            !identical(appController.pendingUpdateTask.value, pending) ||
+            current.id != task.id ||
+            current.createdAt != task.createdAt ||
+            !canSyncTaskLogin(current)) {
+          throw NetdiskException(
+              'taskRecoveryRejected'.tr, 'recovery_rejected');
+        }
+        if (list == null) {
+          await api.continueTask(current.id);
+          return;
+        }
+        final stage = await continueFailedTask(
+            current, list.recovery, list.getTasksState,
+            send: () => api.continueTask(current.id));
+        if (stage != RecoveryStage.submitted) {
+          throw NetdiskException(
+              stage.label,
+              stage == RecoveryStage.rejected
+                  ? 'recovery_rejected'
+                  : 'recovery_unconfirmed');
+        }
+      });
+      if (resumed && mounted) {
+        if (identical(appController.pendingUpdateTask.value, pending)) {
+          appController.pendingUpdateTask.value = null;
+        }
+        if (Util.isMacos()) {
+          if (_netdiskRequest.value != null) {
+            _netdiskRequest.value = null;
+            _urlController.clear();
+            _originalRequest = null;
+            _credentialOrigin = null;
+            if (identical(MacPanel.incoming.value, _panelRequest)) {
+              MacPanel.incoming.value = null;
+            }
+            _panelRequest = null;
+          }
+          MacPanel.notice.value = RecoveryStage.submitted.label;
+        } else {
+          await Get.rootDelegate.offNamed(Routes.TASK);
+        }
+      }
+    } on NetdiskException {
+      MacPanel.notice.value = 'taskRecoveryRejected'.tr;
     }
     return true;
   }

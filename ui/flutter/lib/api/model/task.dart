@@ -28,6 +28,10 @@ enum ExtractStatus {
 class Task {
   @JsonKey(includeFromJson: false, includeToJson: false)
   TaskHandoff? handoff;
+
+  /// Read-only capability hint for the existing task PATCH operation.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  bool sourceFrozen = false;
   @JsonKey(includeFromJson: false, includeToJson: false)
   HttpCompletionProjection? completionView;
   String id;
@@ -58,6 +62,7 @@ class Task {
         ? (_$TaskFromJson({...json, 'protocol': null})
           ..protocol = Protocol.netdisk)
         : _$TaskFromJson(json);
+    task.sourceFrozen = json['pathFreeze'] != null;
     if (json['handoff'] is Map)
       task.handoff = TaskHandoff.fromJson(json['handoff']);
     if (task.protocol == Protocol.http &&

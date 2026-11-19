@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart' hide Options;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:get/get.dart' show GetMaterialApp;
+import 'package:gopeed/i18n/message.dart' as i18n;
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/meta.dart';
 import 'package:gopeed/api/model/request.dart';
@@ -34,7 +36,8 @@ Task mockExistingTask({String sessionId = 'lost-after-restart'}) => Task(
     progress: Progress(
         used: 3, speed: 0, downloaded: 512, uploadSpeed: 0, uploaded: 0),
     createdAt: DateTime.utc(2026),
-    updatedAt: DateTime.utc(2026));
+    updatedAt: DateTime.utc(2026))
+  ..protocol = Protocol.netdisk;
 
 class MockBrowserTool extends NetdiskBrowserTool {
   final launches = <String>[];
@@ -148,7 +151,10 @@ Future<void> mountNetdisk(WidgetTester tester, MockNetdiskTransport transport,
     Duration pollInterval = const Duration(milliseconds: 100)}) async {
   await tester.binding.setSurfaceSize(const Size(800, 600));
   addTearDown(() => tester.binding.setSurfaceSize(null));
-  await tester.pumpWidget(MaterialApp(
+  await tester.pumpWidget(GetMaterialApp(
+      translations: i18n.messages,
+      locale: const Locale('zh', 'CN'),
+      fallbackLocale: const Locale('en', 'US'),
       theme: macTheme(Brightness.light),
       home: Builder(
         builder: (context) => Scaffold(
