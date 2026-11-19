@@ -53,11 +53,11 @@ class Util {
     } else if (byte < 1024) {
       return "$byte B";
     } else if (byte < 1024 * 1024) {
-      return "${(byte / 1024).toStringAsFixed(2)} KB";
+      return "${(byte / 1024).toStringAsFixed(2)} KiB";
     } else if (byte < 1024 * 1024 * 1024) {
-      return "${(byte / 1024 / 1024).toStringAsFixed(2)} MB";
+      return "${(byte / 1024 / 1024).toStringAsFixed(2)} MiB";
     } else {
-      return "${(byte / 1024 / 1024 / 1024).toStringAsFixed(2)} GB";
+      return "${(byte / 1024 / 1024 / 1024).toStringAsFixed(2)} GiB";
     }
   }
 

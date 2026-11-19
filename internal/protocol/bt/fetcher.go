@@ -360,52 +360,85 @@ func (f *Fetcher) Wait() (err error) {
 	if f.pathStorage != nil {
 		return f.BindRunWait(context.Background())()
 	}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-f.torrentDropCtx.Done():
-			return
-		case <-time.After(time.Second):
-			if f.torrentReady.Load() && len(f.meta.Opts.SelectFiles) > 0 {
-				if f.isDone() {
-					if f.pathStorage != nil {
-						// D6 files remain identity-bound, including boundary bytes in
-						// unselected members; never pathname-delete frozen entries.
-						f.pathStorage.mu.RLock()
-						output := f.pathStorage.output
-						f.pathStorage.mu.RUnlock()
-						if output == nil {
-							return transfer.ErrLayoutStorageHeld
-						}
-						return output.Sync()
-					}
-					// remove unselected files
-					for i, file := range f.torrent.Files() {
-						selected := false
-						for _, selectIndex := range f.meta.Opts.SelectFiles {
-							if i == selectIndex {
-								selected = true
-								break
-							}
-						}
-						if !selected {
-							util.SafeRemove(filepath.Join(f.meta.Opts.Path, f.meta.Res.Name, file.Path()))
-						}
-					}
-					return
-				}
+			return nil
+		case <-tick.C:
+			done, err := f.finishLegacyDownload()
+			if done || err != nil {
+				return err
 			}
 		}
 	}
 }
 
+func (f *Fetcher) finishLegacyDownload() (bool, error) {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if !f.torrentReady.Load() || f.torrentDropCtx.Err() != nil {
+		return false, f.torrentDropCtx.Err()
+	}
+	files := f.torrent.Files()
+	selection := f.meta.Opts.SelectFiles
+	if !selectedPiecesComplete(files, selection) {
+		return false, nil
+	}
+	// Piece hashes only cover the extents declared in the torrent. A reused
+	// .part file can have bytes beyond its last extent even if every hash passes.
+	for _, index := range selection {
+		file := files[index]
+		relative := file.Path()
+		if f.torrent.Info().BestName() == metainfo.NoName {
+			relative = strings.TrimPrefix(relative, metainfo.NoName+"/")
+		}
+		stat, err := os.Stat(filepath.Join(f.meta.Opts.Path, filepath.FromSlash(relative)))
+		if err != nil {
+			return false, fmt.Errorf("读取 BT 成品失败: %w", err)
+		}
+		if stat.Size() != file.Length() {
+			return false, fmt.Errorf("BT 文件 %q 大小与种子不符（实际 %d 字节，应为 %d 字节），请换一个空目录重试", file.DisplayPath(), stat.Size(), file.Length())
+		}
+	}
+	for i, file := range files {
+		if !slices.Contains(selection, i) {
+			util.SafeRemove(filepath.Join(f.meta.Opts.Path, f.meta.Res.Name, file.Path()))
+		}
+	}
+	return true, nil
+}
+
 func (f *Fetcher) isDone() bool {
-	if f.meta.Opts == nil {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	if !f.torrentReady.Load() || f.meta.Opts == nil {
 		return false
 	}
-	for _, selectIndex := range f.meta.Opts.SelectFiles {
-		file := f.torrent.Files()[selectIndex]
+	selection := f.meta.Opts.SelectFiles
+	if f.pathStorage != nil {
+		selection = f.pathSelection
+	}
+	return selectedPiecesComplete(f.torrent.Files(), selection)
+}
+
+func selectedPiecesComplete(files []*torrent.File, selection []int) bool {
+	if len(selection) == 0 {
+		return false
+	}
+	for _, index := range selection {
+		file := files[index]
 		if file.BytesCompleted() < file.Length() {
 			return false
+		}
+	}
+	// BytesCompleted includes written chunks that may still fail their hash.
+	for _, index := range selection {
+		for _, piece := range files[index].State() {
+			if !piece.Ok || !piece.Complete || piece.Hashing || piece.QueuedForHash || piece.Marking {
+				return false
+			}
 		}
 	}
 	return true
@@ -417,6 +450,8 @@ func (f *Fetcher) Patch(req *base.Request, opts *base.Options) error {
 	if opts == nil {
 		return nil
 	}
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
 	if f.pathStorage != nil && f.meta.Res != nil && opts.SelectFiles != nil && !sameFrozenSelection(f.meta.Opts.SelectFiles, opts.SelectFiles, len(f.meta.Res.Files)) {
 		return transfer.ErrLayoutStorageHeld
 	}

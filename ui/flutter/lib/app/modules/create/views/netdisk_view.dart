@@ -981,10 +981,10 @@ class _NetdiskViewState extends State<NetdiskView> {
 
   String _fileSize(int size) {
     if (size < 1024) return '$size B';
-    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
+    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KiB';
     if (size < 1024 * 1024 * 1024) {
-      return '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
+      return '${(size / (1024 * 1024)).toStringAsFixed(1)} MiB';
     }
-    return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GiB';
   }
 }

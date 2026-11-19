@@ -218,14 +218,7 @@ func (f *Fetcher) BindRunWait(ctx context.Context) func() error {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				done := true
-				for _, index := range selection {
-					if files[index].BytesCompleted() < files[index].Length() {
-						done = false
-						break
-					}
-				}
-				if !done {
+				if !selectedPiecesComplete(files, selection) {
 					continue
 				}
 				if err := ctx.Err(); err != nil {
