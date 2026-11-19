@@ -1,0 +1,131 @@
+{
+  "title": {
+    "message": "kownload 下载助手"
+  },
+  "extension": {
+    "message": "扩展已在当前浏览器资料中运行 · v$value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "host": {
+    "message": "Native 宿主"
+  },
+  "app": {
+    "message": "桌面 App"
+  },
+  "identity": {
+    "message": "App 身份"
+  },
+  "sync": {
+    "message": "设置同步"
+  },
+  "check": {
+    "message": "检查连接"
+  },
+  "syncSettings": {
+    "message": "同步设置"
+  },
+  "settings": {
+    "message": "打开 App 设置"
+  },
+  "resources": {
+    "message": "查看网页资源"
+  },
+  "permission": {
+    "message": "允许接管普通下载"
+  },
+  "ready": {
+    "message": "握手通过"
+  },
+  "hostMissing": {
+    "message": "找不到宿主注册"
+  },
+  "hostForbidden": {
+    "message": "浏览器拒绝访问宿主"
+  },
+  "hostFailed": {
+    "message": "宿主响应失败"
+  },
+  "hostTimeout": {
+    "message": "宿主响应超时"
+  },
+  "hostUnsupported": {
+    "message": "宿主不支持身份握手"
+  },
+  "reachable": {
+    "message": "可达"
+  },
+  "unreachable": {
+    "message": "不可达"
+  },
+  "matched": {
+    "message": "身份匹配"
+  },
+  "bindingMismatch": {
+    "message": "已保存的连接路由不同或无效"
+  },
+  "routeMismatch": {
+    "message": "宿主与 App 路由不一致"
+  },
+  "appUnsupported": {
+    "message": "无法验证身份"
+  },
+  "unchecked": {
+    "message": "尚未检查"
+  },
+  "lastSync": {
+    "message": "上次同步：$value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "noSync": {
+    "message": "无同步记录"
+  },
+  "repairRoute": {
+    "message": "请确认要连接哪一份 kownload，在该 App 中检查此浏览器的注册。已有下载交接仍使用原来绑定的路由。"
+  },
+  "repairApp": {
+    "message": "请手动打开 kownload，再检查一次。"
+  },
+  "repairVersion": {
+    "message": "请更新至配套的 kownload 和下载助手，在扩展管理页重新加载助手后重试。"
+  },
+  "repairHost": {
+    "message": "打开 kownload 的「设置 → 通用 → 浏览器助手」，检查或注册当前浏览器，再回到这里重试。"
+  },
+  "syncDone": {
+    "message": "设置已同步。"
+  },
+  "actionFailed": {
+    "message": "操作失败，请检查连接后重试。"
+  },
+  "permissionGranted": {
+    "message": "已授权。请在 App 设置中选择普通下载方式。"
+  },
+  "permissionDeclined": {
+    "message": "未授权，普通下载继续由浏览器处理。"
+  },
+  "permissionSync": {
+    "message": "已授权。请打开 kownload，然后点击「同步设置」。"
+  },
+  "bindingUnknown": {
+    "message": "无法读取已保存的路由"
+  },
+  "repairStorage": {
+    "message": "在当前浏览器资料重新加载助手后重试。"
+  },
+  "checkedAt": {
+    "message": "检查时间 $time$",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  }
+}

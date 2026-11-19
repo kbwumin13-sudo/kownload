@@ -20,16 +20,21 @@ Cookie 仅在获得 claim 或按钮点击后，由后台按标签所属 cookie s
 
 交接字段约定：Capture 的 `tokens` 使用原站字段名。百度保留 `bdstoken/sign/timestamp/jsToken/sekey/shareid`（数值 shareid 保留在 tokens，URL 分享身份在 share.shareId）；阿里保留 `access_token/token_type/user_id/default_drive_id/resource_drive_id`，文件 driveId 在 meta；天翼为 `accessToken`；迅雷/光鸭为 `access_token/token_type/user_id/client_id/captcha_token/deviceid`；夸克/UC 为 `stoken` 和每文件 `meta.share_fid_token`；123 为 `authorToken/LoginUuid`、文件 `hash`（Etag）及 `meta.S3KeyFlag/StorageNode`。移动云盘读取后台 Cookie 中的 authorization。已有 access_token/authorToken 自动生成 Capture.headers.Authorization，设备/验证码/客户端字段只生成固定对应 Header；这些头只存在于 capture，不能进入 create 的 task extra。
 
-## 加载
+## 安装与首次连接
 
-1. 在 Chrome 打开 `chrome://extensions`，或在 Edge 打开 `edge://extensions`。
-2. 开启开发者模式，选择“加载已解压的扩展程序”。
-3. 选择本目录 `browser-media-extension/`。工具栏图标打开 App 中的网页资源；播放器按钮只打开该播放器的资源。
-4. 使用支持 `/browser` 设置与回执接口的配套 kownload App，并注册 Native Messaging 主机 `com.gopeed.gopeed`。
+1. 打开配套版本的 kownload。首次引导中点「设置浏览器下载 → 打开助手文件夹」，也可从 [kownload GitHub Releases](https://github.com/kbwumin13-sudo/kownload/releases) 下载同版本的助手 ZIP 并解压，保留该目录。
+2. 在实际使用的 Chrome 资料打开 `chrome://extensions`，或在 Edge 资料打开 `edge://extensions`。开启开发者模式，点「加载已解压的扩展程序」，选择包含 `manifest.json` 的目录。确认扩展已启用，并从扩展菜单打开或固定 kownload 下载助手。
+3. 在 App「设置 → 通用 → 浏览器助手」打开对应浏览器的「检查…」。如新名称未登记，确认使用当前这份 App，再点「注册 Chrome…」或「注册 Edge…」。App 检查磁盘上的清单、来源和宿主文件。它无法确认当前浏览器资料中扩展是否启用，实时握手请从该资料的助手弹窗检查。
+4. 点击助手的「检查连接」。若宿主找不到或被拒绝，核对上一步的登记和扩展 ID。App 不可达时手动打开配套 App；身份无法验证时核对 App 与助手是否为配套版本；路由不同则确认使用的 App 和浏览器资料，保留已有绑定及待确认交接。
+5. 身份匹配后点「同步设置」，然后按需点「允许接管普通下载」，在 App 里选择由浏览器下载、在 kownload 中确认或直接交给 kownload。启用普通接管前，请先关闭其他扩展的普通下载接管。无需接管普通下载时，可继续手动添加链接或在助手里点击「查看网页资源」。
 
-固定扩展 ID：`jcalkpjhhaachliihlkojhmafniepnoj`。Chrome 和 Edge 使用同一个 `manifest.key`，Native Messaging 主机的 `allowed_origins` 需加入 `chrome-extension://jcalkpjhhaachliihlkojhmafniepnoj/`。此公开 key 只用于固定 ID；目录中没有私钥。Main 可用该 ID 在 Chrome / Edge 实际安装验收。
+「检查连接」只查询宿主握手、App 可达和身份，读取本资料上次成功应用的同步时间。它不会唤醒 App、同步设置、访问标签页或读取网页内容。旧扩展留下的偏好缓存可能没有同步时间。App 设置标示最近上报及当时的权限，实时检查以当前资料的助手弹窗为准。
 
-面板默认隐藏宽、高都已知且小于 128 像素的图片；未知尺寸保留。“显示小图”可切换。选择媒体清单后会检查格式并默认选中最高画质的带音轨组合；每档单独视频轨会自动配音轨，保留仅音频和原有含音轨格式。暂停或失败任务可按当前资源来源页与协议查找，选择任务名称后更新资源地址并继续。每个可见播放器拥有自己的下载按钮；点击后只显示该播放器对应的一个视频，可选择清晰度、名称和目录。单视频界面不提供全选或其他资源，来源失效后提示回原页面重新点击。`blob:` 只有同一播放器显式提供清单地址时才关联，否则显示“未识别这个视频”并禁用下载。整页视频、图片、音频列表与批量下载仅通过工具栏图标进入，默认不选中任何资源。分片不会作为完整视频提交。
+未打包扩展 ID 为 `jcalkpjhhaachliihlkojhmafniepnoj`，来自 Chrome 和 Edge 共用的公开 `manifest.key`。助手使用 `io.github.kbwumin13_sudo.kownload`，登记清单必须允许 `chrome-extension://jcalkpjhhaachliihlkojhmafniepnoj/`。旧名 `com.gopeed.gopeed` 单独保留，供既有兼容客户端使用。商店签发 ID 及其允许来源须在发布前另行核对。
+
+更新后在相应资料的扩展管理页重新加载，再刷新原媒体或网盘页面。播放器按钮只查看对应播放器的资源，整页资源通过助手的「查看网页资源」打开。
+
+面板默认隐藏宽、高都已知且小于 128 像素的图片；未知尺寸保留。“显示小图”可切换。选择媒体清单后会检查格式并默认选中最高画质的带音轨组合；每档单独视频轨会自动配音轨，保留仅音频和原有含音轨格式。暂停或失败任务可按当前资源来源页与协议查找，选择任务名称后更新资源地址并继续。每个可见播放器拥有自己的下载按钮；点击后只显示该播放器对应的一个视频，可选择清晰度、名称和目录。单视频界面不提供全选或其他资源，来源失效后提示回原页面重新点击。`blob:` 只有同一播放器显式提供清单地址时才关联，否则显示“未识别这个视频”并禁用下载。整页视频、图片、音频列表与批量下载通过工具栏助手的「查看网页资源」进入，默认不选中任何资源。分片不会作为完整视频提交。
 
 明确打开资源、检查或下载时才唤醒 kownload；被动嗅探不会唤醒。Cookie 按所选资源或预览的实际 URL、标签所属 store 和 frame partition 获取；缩略图不会继承视频 URL 的认证头。候选状态只存 `storage.session`。站点关闭、显示小图和普通接管偏好由 App 单点持久保存，扩展的 `storage.local` 保留偏好同步缓存和无凭据的交接恢复元数据。
 
@@ -85,4 +90,4 @@ Prepare 回执丢失时只查询同一 operationId，不重新建任务。查询
 
 ## 许可与源码
 
-发行 ZIP 附主 GPLv3 许可证、第三方许可与来源声明、`SOURCE.txt`，并保留 LinkSwift 的 AGPL 来源。对应源码与应用使用相同提交，随正式 Release 提供。Native host 名称 `com.gopeed.gopeed` 与 manifest 固定公钥本阶段保留兼容；公钥不是私钥。
+发行 ZIP 附主 GPLv3 许可证、第三方许可与来源声明、`SOURCE.txt`，并保留 LinkSwift 的 AGPL 来源。对应源码与应用使用相同提交，随正式 Release 提供。Native 宿主新旧名称与来源规则见 [Native Messaging 契约](../docs/NATIVE_MESSAGING.md)。

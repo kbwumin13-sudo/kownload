@@ -1,7 +1,7 @@
 import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
 import {installNetdiskBridge} from './netdisk.js';
 import {installDownloadCapture,createAppBridge,createAppMediaBridge} from './lib.js';
-import {sendNativeBound,nativeBinding,validBridgeBinding} from './native-identity.js';
+import {checkNativeConnection,sendNativeBound,nativeBinding,validBridgeBinding} from './native-identity.js';
 
 installNetdiskBridge(chrome);
 const appBridge = createAppBridge(chrome,message => native(message,false,true));
@@ -376,6 +376,11 @@ async function update(item,options) {
   return {taskId:options.taskId};
 }
 chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
+  if (msg?.type === 'CONNECTION_CHECK') {
+    if (sender.url !== chrome.runtime.getURL('popup.html')) return false;
+    void checkNativeConnection(chrome).then(data => sendResponse({ok:true,data}),() => sendResponse({ok:false}));
+    return true;
+  }
   if (msg?.type === 'DOWNLOAD_CAPTURE') return false;
   if (typeof msg?.type==='string' && msg.type.startsWith('NETDISK_')) return false;
   if (msg?.type === 'APP_MEDIA_OPEN') {

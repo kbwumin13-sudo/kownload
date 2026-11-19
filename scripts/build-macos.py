@@ -375,6 +375,7 @@ def main():
     for file in (source / 'browser-media-extension').iterdir():
         if file.is_file() and file.suffix in ['.js', '.json', '.css', '.html', '.md'] and file.name != 'package.json':
             shutil.copy2(file, helper / file.name)
+    shutil.copytree(source / 'browser-media-extension/_locales', helper / '_locales')
     shutil.copy2(source / 'LICENSE', helper / 'LICENSE')
     shutil.copy2(source / 'THIRD_PARTY_NOTICES.md', helper / 'THIRD_PARTY_NOTICES.md')
     shutil.copytree(source / 'third_party', helper / 'third_party')

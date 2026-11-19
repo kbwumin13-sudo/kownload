@@ -26,15 +26,7 @@
 
 支持 Chrome 与 Edge，负责普通下载交接以及网页媒体、网盘文件选择。
 
-1. 在首次引导中打开助手目录，或下载本版[浏览器助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/kownload-browser-helper-0.6.0-1.9.3-kownload.32.zip) 并解压。
-2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，点「加载已解压的扩展程序」，选择助手目录。
-3. 在 App「设置 → 通用 → 浏览器助手」中点「连接…」，完成连接。助手更新后在扩展页点「重新加载」。
-
-普通下载接管、是否先确认及媒体偏好在 App 中按浏览器管理。首次启用普通下载接管时，浏览器会请求下载权限。为避免重复接管，请关闭其他扩展的普通下载接管；其媒体功能可以继续使用。
-
-接管范围是可明确关联的 HTTP(S) GET 下载。POST、blob/data、无痕及关联不明的下载继续由浏览器处理。若确认前浏览器已经完成，保留其原文件，不再另建一次下载。
-
-助手为本地未打包扩展，需要手动更新。更多说明见 [浏览器助手 README](../browser-media-extension/README.md)。
+按 [浏览器助手安装与首次连接](../browser-media-extension/README.md#安装与首次连接) 完成加载、宿主登记和只读连接检查，再按需同步设置并配置普通下载接管。
 
 ## 网页媒体
 

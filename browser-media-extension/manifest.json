@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "default_locale": "zh_CN",
   "name": "kownload 下载助手",
   "version": "0.6.0",
   "description": "接管普通下载，将选中的网盘文件与网页媒体交给 kownload 下载",

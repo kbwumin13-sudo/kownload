@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createBoundTransport,nativeBinding,sendNativeBound,NATIVE_HOST,NATIVE_BINDING_KEY} from '../native-identity.js';
+import {checkNativeConnection,createBoundTransport,nativeBinding,sendNativeBound,NATIVE_HOST,NATIVE_BINDING_KEY} from '../native-identity.js';
 
 function fixture(saved={}) {
   const f={stored:{netdiskInstanceId:'profile-one',...structuredClone(saved)},frames:[],hosts:[],writes:0,storageWrites:[],scope:'a'.repeat(64),running:true,appIdentity:true};
@@ -114,4 +114,60 @@ test('disconnect does not retry or switch hosts; subsequent explicit query keeps
 test('captured pending expected route is checked before journal or Native writes',async()=>{
   const f=fixture();await assert.rejects(nativeBinding(f.browser,binding('z')),{category:'route_mismatch'});
   assert.equal(f.writes,0);assert.deepEqual(f.storageWrites,[]);
+});
+
+test('explicit connection checks separate disconnected layers and read history without binding or syncing',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const syncedAt=Date.UTC(2024,0,1);
+  const cases=[
+    ['matched','ready','reachable','matched'],
+    ['cold','ready','unreachable','unknown'],
+    ['older App','ready','reachable','unsupported'],
+    ['wrong App','ready','reachable','mismatch'],
+    ['wrong profile binding','ready','reachable','binding'],
+    ['storage unavailable','ready','reachable','bindingUnknown'],
+    ['older Host','unsupported','unknown','unknown'],
+    ['missing','missing','unknown','unknown'],
+    ['forbidden','forbidden','unknown','unknown'],
+    ['failed','failed','unknown','unknown'],
+    ['timeout','timeout','unknown','unknown'],
+  ];
+  for(const [label,host,app,identity] of cases) {
+    const f=fixture({lastSettingsSyncAt:syncedAt});
+    delete f.stored.netdiskInstanceId;
+    if(label==='cold') f.running=false;
+    if(label==='older App') f.appIdentity=false;
+    if(label==='wrong profile binding') f.stored[NATIVE_BINDING_KEY]=binding('b');
+    if(label==='storage unavailable') f.browser.storage.local.get=async()=>{throw Error('private storage');};
+    const nativeErrors={
+      missing:'Specified native messaging host not found.',
+      forbidden:'Access to the specified native messaging host is forbidden.',
+      failed:'https://private.invalid/?token=SYNTHETIC_COOKIE',
+    };
+    const calls=[];
+    f.browser.runtime.sendNativeMessage=(hostName,message,reply)=>{
+      calls.push([hostName,message]);
+      if(label==='timeout') return;
+      if(nativeErrors[label]) {
+        f.browser.runtime.lastError={message:nativeErrors[label]};
+        reply();
+        delete f.browser.runtime.lastError;
+        return;
+      }
+      const info=f.info();
+      if(label==='wrong App') info.app.identity.routeScope='c'.repeat(64);
+      reply(label==='older Host' ? {code:1} : {code:0,data:info});
+    };
+    const pending=checkNativeConnection(f.browser);
+    // Let the storage read settle before advancing the native-response deadline.
+    await Promise.resolve();
+    await Promise.resolve();
+    if(label==='timeout') t.mock.timers.tick(3500);
+    const syncKnown=label!=='storage unavailable';
+    assert.deepEqual(await pending,{host,app,identity,syncKnown,syncedAt:syncKnown ? syncedAt : null},label);
+    assert.deepEqual(calls.map(([name,message])=>[name,message.method,message.params.clientId]),
+      [[NATIVE_HOST,'hostInfo','connection-check']],label);
+    assert.deepEqual(f.storageWrites,[],label);
+    assert.equal(f.stored.netdiskInstanceId,undefined,label);
+  }
 });

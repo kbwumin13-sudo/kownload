@@ -1,1 +1,34 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"><title>kownload 下载助手</title></head><body><main><strong>kownload 下载助手</strong><p id="status" role="status">正在打开 App 中的网页资源…</p><button id="resources">查看当前网页资源</button><button id="settings">打开 App 设置</button><button id="permission" hidden>允许接管普通下载</button></main><script type="module" src="popup.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+  <title>kownload</title>
+</head>
+<body>
+  <main>
+    <h1 data-i18n="title">kownload 下载助手</h1>
+    <p id="extension"></p>
+    <section id="connection" aria-live="polite">
+      <dl>
+        <div><dt data-i18n="host"></dt><dd id="host"></dd></div>
+        <div><dt data-i18n="app"></dt><dd id="app"></dd></div>
+        <div><dt data-i18n="identity"></dt><dd id="identity"></dd></div>
+        <div><dt data-i18n="sync"></dt><dd id="sync"></dd></div>
+      </dl>
+      <p id="checked-at"></p>
+      <p id="repair" hidden></p>
+    </section>
+    <button id="check" data-i18n="check"></button>
+    <button id="sync-settings" data-i18n="syncSettings" disabled></button>
+    <p id="status" role="status" hidden></p>
+    <div class="actions">
+      <button id="settings" data-i18n="settings"></button>
+      <button id="resources" data-i18n="resources"></button>
+      <button id="permission" data-i18n="permission" hidden></button>
+    </div>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

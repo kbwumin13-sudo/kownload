@@ -1,1 +1,32 @@
-:root{font:13px system-ui,-apple-system,sans-serif;color:CanvasText;background:Canvas;color-scheme:light dark}*{box-sizing:border-box}body{width:260px;margin:0}main{padding:16px}strong{font-size:15px}p{line-height:1.5;min-height:38px;color:GrayText}button{display:block;width:100%;margin-top:8px;padding:8px 10px;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:7px;background:color-mix(in srgb,CanvasText 4%,Canvas);color:CanvasText;cursor:pointer}button[hidden]{display:none}
+:root {
+  font: 13px system-ui, -apple-system, sans-serif;
+  color: CanvasText;
+  background: Canvas;
+  color-scheme: light dark;
+}
+* { box-sizing: border-box; }
+body { width: 340px; margin: 0; }
+main { padding: 16px; }
+h1 { font-size: 17px; margin: 0; }
+p { margin: 8px 0; line-height: 1.5; color: GrayText; }
+#checked-at:empty { display: none; }
+dl { margin: 12px 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; }
+dl div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 4px 0; }
+dt { flex-shrink: 0; }
+dd { margin: 0; text-align: end; }
+button {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+  color: CanvasText;
+  cursor: pointer;
+}
+button:disabled { color: GrayText; cursor: default; }
+button:focus-visible { outline: 2px solid Highlight; outline-offset: 1px; }
+#check { background: Highlight; color: HighlightText; }
+#check:disabled { opacity: .65; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0 6px; margin-top: 6px; }
+#permission { grid-column: 1 / -1; }

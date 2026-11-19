@@ -1,0 +1,131 @@
+{
+  "title": {
+    "message": "kownload Download Assistant"
+  },
+  "extension": {
+    "message": "Extension is running in this profile · v$value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "host": {
+    "message": "Native Host"
+  },
+  "app": {
+    "message": "Desktop app"
+  },
+  "identity": {
+    "message": "App identity"
+  },
+  "sync": {
+    "message": "Settings sync"
+  },
+  "check": {
+    "message": "Check connection"
+  },
+  "syncSettings": {
+    "message": "Sync settings"
+  },
+  "settings": {
+    "message": "Open App settings"
+  },
+  "resources": {
+    "message": "View page resources"
+  },
+  "permission": {
+    "message": "Allow download handling"
+  },
+  "ready": {
+    "message": "Handshake passed"
+  },
+  "hostMissing": {
+    "message": "Host registration not found"
+  },
+  "hostForbidden": {
+    "message": "Browser denied host access"
+  },
+  "hostFailed": {
+    "message": "Host did not respond correctly"
+  },
+  "hostTimeout": {
+    "message": "Host timed out"
+  },
+  "hostUnsupported": {
+    "message": "Handshake unsupported"
+  },
+  "reachable": {
+    "message": "Reachable"
+  },
+  "unreachable": {
+    "message": "Unreachable"
+  },
+  "matched": {
+    "message": "Matched"
+  },
+  "bindingMismatch": {
+    "message": "Saved route differs or is invalid"
+  },
+  "routeMismatch": {
+    "message": "Host and App routes differ"
+  },
+  "appUnsupported": {
+    "message": "Identity unavailable"
+  },
+  "unchecked": {
+    "message": "Unchecked"
+  },
+  "lastSync": {
+    "message": "Last sync: $value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "noSync": {
+    "message": "No sync recorded"
+  },
+  "repairRoute": {
+    "message": "Confirm which copy of kownload you intend to use. In that App, check this browser’s registration. Existing download handoffs stay on their original route."
+  },
+  "repairApp": {
+    "message": "Open kownload yourself, then check again."
+  },
+  "repairVersion": {
+    "message": "Update kownload and its bundled assistant together. Reload this extension from the browser’s extensions page, then check again."
+  },
+  "repairHost": {
+    "message": "In kownload, open Settings → General → Browser Assistant. Check or register this browser, then retry here."
+  },
+  "syncDone": {
+    "message": "Settings synced."
+  },
+  "actionFailed": {
+    "message": "Action failed. Check the connection and try again."
+  },
+  "permissionGranted": {
+    "message": "Permission granted. Choose a download mode in App settings."
+  },
+  "permissionDeclined": {
+    "message": "Permission declined. The browser keeps handling downloads."
+  },
+  "permissionSync": {
+    "message": "Permission granted. Open kownload and use Sync settings."
+  },
+  "bindingUnknown": {
+    "message": "Saved route unavailable"
+  },
+  "repairStorage": {
+    "message": "Reload the assistant in this profile and try again."
+  },
+  "checkedAt": {
+    "message": "Checked at $time$",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  }
+}

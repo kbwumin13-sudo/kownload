@@ -29,15 +29,17 @@ export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThi
     if (reply?.code !== 0) throw bridgeFailure(reply?.error);
     return nativeData(reply);
   }
-  async function apply(data) {
+  async function apply(data,synced = false) {
     const value=canonical(data);
     if (latest && value.revision < latest.revision) return latest.settings;
     latest=value;
+    const lastSettingsSyncAt = synced ? Date.now() : null;
     writing=writing.catch(()=>{}).then(async()=>{
       if (value !== latest) return;
       // These are read caches of the App's canonical values. Preference edits
       // go through updateSettings; no extension UI writes a second authority.
-      await browser.storage.local.set({browserSettingsCache:value,downloadCapture:value.settings.downloadCapture,disabledSites:value.settings.sniffing.disabledSites,showAll:value.settings.sniffing.showAll,sniffingEnabled:value.settings.sniffing.enabled});
+      await browser.storage.local.set({browserSettingsCache:value,downloadCapture:value.settings.downloadCapture,disabledSites:value.settings.sniffing.disabledSites,showAll:value.settings.sniffing.showAll,sniffingEnabled:value.settings.sniffing.enabled,
+        ...(lastSettingsSyncAt === null ? {} : {lastSettingsSyncAt})});
     });
     await writing;
     return latest.settings;
@@ -46,7 +48,7 @@ export function createAppBridge(browser,send,{browserName=/Edg\//.test(globalThi
     const old=await browser.storage.local.get(['downloadCapture','showAll','disabledSites']);
     const legacySettings={downloadCapture:{enabled:old.downloadCapture?.enabled === true,confirm:old.downloadCapture?.confirm !== false},showAll:old.showAll === true,disabledSites:sites(old.disabledSites)};
     const downloadsPermission=await browser.permissions?.contains({permissions:['downloads']}).catch(()=>false) || false;
-    return apply(await request('sync',{legacySettings,downloadsPermission,version:browser.runtime.getManifest?.().version || '0.5.0'},expectedBinding));
+    return apply(await request('sync',{legacySettings,downloadsPermission,version:browser.runtime.getManifest?.().version || '0.5.0'},expectedBinding),true);
   }
   async function wake(expectedBinding) {
     const reply=await transmit({method:'wakeup',meta:{silent:true},...(expectedBinding?{bridgeBinding:expectedBinding}:{})});

@@ -16,6 +16,53 @@ export function sendNativeRaw(browser,message) {
     });}catch{reject(routeError('ipc_unavailable'));}
   });
 }
+function nativeCheckFailure(message) {
+  if (/specified native messaging host not found|no such native application/i.test(message)) return 'missing';
+  if (/access to the specified native messaging host is forbidden/i.test(message)) return 'forbidden';
+  return 'failed';
+}
+export async function checkNativeConnection(browser) {
+  const saved = await browser.storage.local.get([NATIVE_BINDING_KEY,'lastSettingsSyncAt']).catch(() => null);
+  const result = {host:'failed',app:'unknown',identity:'unknown',syncKnown:saved != null,
+    syncedAt:Number.isSafeInteger(saved?.lastSettingsSyncAt) && saved.lastSettingsSyncAt > 0 &&
+      saved.lastSettingsSyncAt <= Date.now() ? saved.lastSettingsSyncAt : null};
+  const probe = new Promise(resolve => {
+    const timer = setTimeout(() => resolve({host:'timeout'}), 3500);
+    const finish = value => { clearTimeout(timer); resolve(value); };
+    try {
+      browser.runtime.sendNativeMessage(NATIVE_HOST,hostInfoRequest('connection-check'),reply => {
+        const error = browser.runtime.lastError;
+        finish(error ? {host:nativeCheckFailure(error.message)} : {reply});
+      });
+    } catch { finish({host:'failed'}); }
+  });
+  const {host,reply} = await probe;
+  if (host) return {...result,host};
+  let info;
+  try { info = parseHostInfo(browser,reply); }
+  catch { return {...result,host:'unsupported'}; }
+  result.host = 'ready';
+  result.app = info.app.reachable ? 'reachable' : 'unreachable';
+  if (!saved) return {...result,identity:'bindingUnknown'};
+  const stored = saved[NATIVE_BINDING_KEY];
+  if (stored != null) {
+    const candidate = {version:1,hostName:NATIVE_HOST,routeScope:info.routeScope};
+    if (!sameBridgeBinding(stored,candidate)) return {...result,identity:'binding'};
+  }
+  if (!info.app.reachable) return result;
+  try {
+    validateAppIdentity(info);
+    result.identity = info.app.identity ? 'matched' : 'unsupported';
+  } catch (error) {
+    result.identity = error.category === 'route_mismatch' ? 'mismatch' : 'unsupported';
+  }
+  return result;
+}
+
+function hostInfoRequest(clientId) {
+  const reportedBrowser = /Edg\//.test(globalThis.navigator?.userAgent || '') ? 'edge' : 'chrome';
+  return {method:'hostInfo',params:{version:1,reportedBrowser,clientId}};
+}
 function registry(browser) {
   if(!routes.has(browser)) {
     let savedBinding;
@@ -43,17 +90,19 @@ function registry(browser) {
   }
   return routes.get(browser);
 }
-function hostInfo(browser,reply) {
+function parseHostInfo(browser,reply) {
   const info=reply?.data;
   if(reply?.code!==0 || info?.version!==1 || info.product!=='kownload' || info.nativeProtocol!==1 || info.identityProtocol!==1 ||
     !Array.isArray(info.supportedHostNames) || !info.supportedHostNames.includes(NATIVE_HOST) || info.callerOrigin!==`chrome-extension://${browser.runtime.id}/` ||
     typeof info.routeScope!=='string' || !/^[a-f0-9]{64}$/.test(info.routeScope) || typeof info.build?.preview!=='boolean' || typeof info.app?.reachable!=='boolean')throw routeError('identity_unsupported');
-  if(info.app?.identity!=null) {
+  return info;
+}
+function validateAppIdentity(info) {
+  if(info.app.identity!=null) {
     const app=info.app.identity;
     if(app.version!==1 || app.product!=='kownload' || app.identityProtocol!==1)throw routeError('identity_unsupported');
     if(app.routeScope!==info.routeScope || app.build?.preview!==info.build.preview)throw routeError('route_mismatch');
   }
-  return info;
 }
 
 /// Each short-lived Native process or real Port is probed independently. The
@@ -62,8 +111,8 @@ export function createBoundTransport(browser,raw) {
   let initialized,info,binding;
   async function probe() {
     const clientId=await browserClientId(browser);
-    const reportedBrowser=/Edg\//.test(globalThis.navigator?.userAgent || '') ? 'edge' : 'chrome';
-    info=hostInfo(browser,await raw({method:'hostInfo',params:{version:1,reportedBrowser,clientId}}));
+    info=parseHostInfo(browser,await raw(hostInfoRequest(clientId)));
+    validateAppIdentity(info);
     return info;
   }
   function initialize(expected) {

@@ -1,0 +1,131 @@
+{
+  "title": {
+    "message": "kownload 下載助手"
+  },
+  "extension": {
+    "message": "擴充功能正在目前的瀏覽器設定檔執行 · v$value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "host": {
+    "message": "Native 主機"
+  },
+  "app": {
+    "message": "桌面 App"
+  },
+  "identity": {
+    "message": "App 身分"
+  },
+  "sync": {
+    "message": "設定同步"
+  },
+  "check": {
+    "message": "檢查連線"
+  },
+  "syncSettings": {
+    "message": "同步設定"
+  },
+  "settings": {
+    "message": "開啟 App 設定"
+  },
+  "resources": {
+    "message": "查看網頁資源"
+  },
+  "permission": {
+    "message": "允許接管一般下載"
+  },
+  "ready": {
+    "message": "交握成功"
+  },
+  "hostMissing": {
+    "message": "找不到主機註冊"
+  },
+  "hostForbidden": {
+    "message": "瀏覽器拒絕存取主機"
+  },
+  "hostFailed": {
+    "message": "主機回應失敗"
+  },
+  "hostTimeout": {
+    "message": "主機回應逾時"
+  },
+  "hostUnsupported": {
+    "message": "主機不支援身分交握"
+  },
+  "reachable": {
+    "message": "可連線"
+  },
+  "unreachable": {
+    "message": "無法連線"
+  },
+  "matched": {
+    "message": "身分相符"
+  },
+  "bindingMismatch": {
+    "message": "已儲存的連線路徑不同或無效"
+  },
+  "routeMismatch": {
+    "message": "主機和 App 的路徑不符"
+  },
+  "appUnsupported": {
+    "message": "無法驗證身分"
+  },
+  "unchecked": {
+    "message": "尚未檢查"
+  },
+  "lastSync": {
+    "message": "上次同步：$value$",
+    "placeholders": {
+      "value": {
+        "content": "$1"
+      }
+    }
+  },
+  "noSync": {
+    "message": "沒有同步紀錄"
+  },
+  "repairRoute": {
+    "message": "請確認要連線的 kownload，在該 App 中檢查此瀏覽器的註冊。既有下載交接仍使用原先綁定的路徑。"
+  },
+  "repairApp": {
+    "message": "請手動開啟 kownload，再檢查一次。"
+  },
+  "repairVersion": {
+    "message": "請一起更新 kownload 與下載助手，在擴充功能管理頁重新載入助手後再試。"
+  },
+  "repairHost": {
+    "message": "在 kownload 開啟「設定 → 一般 → 瀏覽器助手」，檢查或註冊目前的瀏覽器，再回到這裡重試。"
+  },
+  "syncDone": {
+    "message": "設定已同步。"
+  },
+  "actionFailed": {
+    "message": "操作失敗，請檢查連線後再試。"
+  },
+  "permissionGranted": {
+    "message": "已授權。請在 App 設定中選擇一般下載方式。"
+  },
+  "permissionDeclined": {
+    "message": "未授權，一般下載繼續由瀏覽器處理。"
+  },
+  "permissionSync": {
+    "message": "已授權。請開啟 kownload，再點選「同步設定」。"
+  },
+  "bindingUnknown": {
+    "message": "無法讀取已儲存的路徑"
+  },
+  "repairStorage": {
+    "message": "在目前的瀏覽器設定檔重新載入助手後再試。"
+  },
+  "checkedAt": {
+    "message": "檢查時間 $time$",
+    "placeholders": {
+      "time": {
+        "content": "$1"
+      }
+    }
+  }
+}

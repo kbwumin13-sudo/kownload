@@ -8,6 +8,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../app/modules/app/controllers/app_controller.dart';
 import '../database/database.dart';
+import '../identity/browser_connection.dart';
+import '../util/browser_extension_host/browser_extension_host.dart';
 import 'mac_panel.dart';
 import 'mac_widgets.dart';
 import 'onboarding_checks.dart';
@@ -456,9 +458,85 @@ class _BrowserDownloadGuide extends StatefulWidget {
 
 class _BrowserDownloadGuideState extends State<_BrowserDownloadGuide> {
   static final _documentation = Uri.parse(
-      'https://github.com/kbwumin13-sudo/kownload/blob/main/browser-media-extension/README.md');
+    'https://github.com/kbwumin13-sudo/kownload/blob/main/browser-media-extension/README.md',
+  );
   bool _opening = false;
+  bool _checking = false;
+  final _disk = <Browser, (bool?, BrowserConnectionReport?)>{};
   String? _error;
+
+  String _copy(String zh, String tw, String en) => switch (Get.locale) {
+    Locale(languageCode: 'zh', countryCode: 'TW' || 'HK') => tw,
+    Locale(languageCode: 'zh') || null => zh,
+    _ => en,
+  };
+
+  Future<void> _checkDisk() async {
+    setState(() {
+      _checking = true;
+      _disk.clear();
+    });
+    final results = await Future.wait(
+      [Browser.chrome, Browser.edge].map((browser) async {
+        final installed = await checkBrowserInstalled(
+          browser,
+        ).then<bool?>((value) => value, onError: (_) => null);
+        final report = await BrowserConnection.inspect(browser.name)
+            .then<BrowserConnectionReport?>(
+              (value) => value,
+              onError: (_) => null,
+            );
+        return MapEntry(browser, (installed, report));
+      }),
+    );
+    if (!mounted) return;
+    setState(() {
+      _disk.addEntries(results);
+      _checking = false;
+    });
+  }
+
+  String _diskText(bool? installed, BrowserConnectionReport? report) {
+    final browser = switch (installed) {
+      true => _copy('找到浏览器', '找到瀏覽器', 'Browser found'),
+      false => _copy(
+        '常见位置未发现浏览器',
+        '常見位置未找到瀏覽器',
+        'Browser not found in standard locations',
+      ),
+      null => _copy('浏览器未知', '瀏覽器未知', 'Browser unknown'),
+    };
+    final host = report == null
+        ? _copy('宿主登记未知', '主機註冊未知', 'Host registration unknown')
+        : report.configured
+        ? _copy('宿主已登记（磁盘）', '主機已註冊（磁碟）', 'Host registration found on disk')
+        : _copy('宿主登记未就绪', '主機註冊未就緒', 'Host registration needs attention');
+    return '$browser · $host';
+  }
+
+  String _historyText() {
+    if (!Get.isRegistered<AppController>()) return '';
+    final integration = Get.find<AppController>().browserIntegration;
+    final timestamps =
+        integration.statuses.values.map((status) => status.seen).toList()
+          ..sort();
+    if (timestamps.isEmpty) {
+      return _copy(
+        '本次 App 运行尚未收到设置同步。',
+        '本次 App 執行尚未收到設定同步。',
+        'This App session has received no settings sync.',
+      );
+    }
+    final date = MaterialLocalizations.of(context);
+    final last = timestamps.last.toLocal();
+    final time =
+        '${date.formatShortDate(last)} ${date.formatTimeOfDay(TimeOfDay.fromDateTime(last))}';
+    return _copy(
+      '任一浏览器资料最近上报 $time',
+      '任一瀏覽器設定檔最近回報 $time',
+      'Last report from any browser profile $time',
+    );
+  }
 
   Future<void> _open({bool documentation = false}) async {
     if (_opening) return;
@@ -471,21 +549,51 @@ class _BrowserDownloadGuideState extends State<_BrowserDownloadGuide> {
       if (!documentation && !Directory(directory).existsSync()) {
         if (mounted) {
           setState(
-              () => _error = '此应用中没有附带下载助手。请打开使用文档获取助手，再按上方步骤加载。普通链接仍可直接下载。');
+            () => _error = _copy(
+              '此应用中没有附带下载助手。请打开使用文档获取助手，再按上方步骤加载。普通链接仍可直接下载。',
+              '此 App 未附帶下載助手。請參閱安裝文件取得助手，再按上方步驟載入。',
+              'This App does not include the assistant. Follow the installation guide to obtain and load it.',
+            ),
+          );
         }
         return;
       }
-      final opened = await MacPanel.transient(() => launchUrl(
+      final opened = await MacPanel.transient(
+        () => launchUrl(
           documentation ? _documentation : Uri.directory(directory),
-          mode: LaunchMode.externalApplication));
+          mode: LaunchMode.externalApplication,
+        ),
+      );
       if (!opened && mounted) {
-        setState(() => _error =
-            documentation ? '无法打开使用文档，请检查默认浏览器后重试。' : '无法打开助手文件夹，请重试或查看使用文档。');
+        setState(
+          () => _error = documentation
+              ? _copy(
+                  '无法打开使用文档，请检查默认浏览器后重试。',
+                  '無法開啟安裝文件，請檢查預設瀏覽器後再試。',
+                  'Could not open the installation guide. Check your default browser and retry.',
+                )
+              : _copy(
+                  '无法打开助手文件夹，请重试或查看使用文档。',
+                  '無法開啟助手資料夾，請再試或參閱安裝文件。',
+                  'Could not open the assistant folder. Retry or see the installation guide.',
+                ),
+        );
       }
     } catch (_) {
       if (mounted) {
-        setState(() => _error =
-            documentation ? '无法打开使用文档，请检查默认浏览器后重试。' : '无法打开助手文件夹，请重试或查看使用文档。');
+        setState(
+          () => _error = documentation
+              ? _copy(
+                  '无法打开使用文档，请检查默认浏览器后重试。',
+                  '無法開啟安裝文件，請檢查預設瀏覽器後再試。',
+                  'Could not open the installation guide. Check your default browser and retry.',
+                )
+              : _copy(
+                  '无法打开助手文件夹，请重试或查看使用文档。',
+                  '無法開啟助手資料夾，請再試或參閱安裝文件。',
+                  'Could not open the assistant folder. Retry or see the installation guide.',
+                ),
+        );
       }
     } finally {
       if (mounted) setState(() => _opening = false);
@@ -499,136 +607,259 @@ class _BrowserDownloadGuideState extends State<_BrowserDownloadGuide> {
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       backgroundColor: c.background,
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: BorderSide(color: c.border, width: .5)),
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: c.border, width: .5),
+      ),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 440),
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Flexible(
-              child: SingleChildScrollView(
-                child: Column(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('设置浏览器下载',
-                          style: TextStyle(
-                              color: c.text,
-                              fontSize: 17,
-                              fontWeight: FontWeight.w500)),
+                      Text(
+                        _copy('设置浏览器下载', '設定瀏覽器下載', 'Set up browser downloads'),
+                        style: TextStyle(
+                          color: c.text,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
                       const SizedBox(height: 6),
-                      Text('支持 Chrome 和 Edge。浏览器运行时连接尚未验证；打开助手文件夹或完成教程不代表已连接。',
-                          style: TextStyle(
-                              color: c.secondary, fontSize: 12, height: 1.4)),
-                      const SizedBox(height: 18),
+                      Text(
+                        _copy(
+                          '支持 Chrome 和 Edge。浏览器运行时连接尚未验证。扩展是否已启用，请在实际使用的浏览器资料中确认。',
+                          '支援 Chrome 與 Edge。瀏覽器執行階段連線尚未驗證。請在實際使用的瀏覽器設定檔中確認擴充功能是否啟用。',
+                          'Supports Chrome and Edge. Live connection is unchecked. Verify that the extension is enabled in the browser profile you use.',
+                        ),
+                        style: TextStyle(
+                          color: c.secondary,
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        _historyText(),
+                        style: TextStyle(color: c.secondary, fontSize: 12),
+                      ),
+                      for (final entry in _disk.entries)
+                        Text(
+                          '${entry.key == Browser.edge ? 'Edge' : 'Chrome'} · ${_diskText(entry.value.$1, entry.value.$2)}',
+                          style: TextStyle(color: c.secondary, fontSize: 12),
+                        ),
+                      TextButton(
+                        onPressed: _checking ? null : _checkDisk,
+                        child: Text(
+                          _checking
+                              ? _copy('正在检查磁盘…', '正在檢查磁碟…', 'Checking disk…')
+                              : _copy(
+                                  '检查浏览器与宿主登记',
+                                  '檢查瀏覽器與主機註冊',
+                                  'Check browser and host registration',
+                                ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       Container(
                         decoration: BoxDecoration(
                           color: c.surface,
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: c.border, width: .5),
                         ),
-                        child: Column(children: [
-                          _step(context, '1', '打开浏览器管理页', [
-                            SelectableText(
-                                'Chrome：chrome://extensions\nEdge：edge://extensions',
-                                style: TextStyle(
+                        child: Column(
+                          children: [
+                            _step(
+                              context,
+                              '1',
+                              _copy(
+                                '打开浏览器管理页',
+                                '開啟瀏覽器管理頁',
+                                'Open the extensions page',
+                              ),
+                              [
+                                SelectableText(
+                                  'Chrome：chrome://extensions\nEdge：edge://extensions',
+                                  style: TextStyle(
                                     color: c.secondary,
                                     fontSize: 12,
-                                    height: 1.55)),
-                          ]),
-                          Divider(
+                                    height: 1.55,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Divider(
                               height: .5,
                               thickness: .5,
                               indent: 42,
                               endIndent: 12,
-                              color: c.border),
-                          _step(context, '2', '载入下载助手', [
-                            Text('开启“开发者模式”，点击“加载已解压的扩展程序”，选择助手文件夹。',
-                                style: TextStyle(
+                              color: c.border,
+                            ),
+                            _step(
+                              context,
+                              '2',
+                              _copy(
+                                '载入下载助手',
+                                '載入下載助手',
+                                'Load the Download Assistant',
+                              ),
+                              [
+                                Text(
+                                  _copy(
+                                    '开启“开发者模式”，点击“加载已解压的扩展程序”，选择助手文件夹。',
+                                    '開啟「開發人員模式」，點選「載入未封裝項目」，選擇助手資料夾。',
+                                    'Turn on Developer mode, select Load unpacked, and choose the assistant folder.',
+                                  ),
+                                  style: TextStyle(
                                     color: c.secondary,
                                     fontSize: 12,
-                                    height: 1.45)),
-                            const SizedBox(height: 10),
-                            Wrap(spacing: 8, runSpacing: 8, children: [
-                              MacButton(
-                                  onPressed: _opening ? null : () => _open(),
-                                  child: const Text('打开助手文件夹')),
-                              TextButton(
-                                  style: TextButton.styleFrom(
-                                      minimumSize: const Size(0, 28),
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 4),
-                                      tapTargetSize:
-                                          MaterialTapTargetSize.shrinkWrap),
-                                  onPressed: _opening
-                                      ? null
-                                      : () => _open(documentation: true),
-                                  child: const Text('使用文档')),
-                            ]),
-                          ]),
-                          Divider(
+                                    height: 1.45,
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    MacButton(
+                                      onPressed: _opening
+                                          ? null
+                                          : () => _open(),
+                                      child: Text(
+                                        _copy(
+                                          '打开助手文件夹',
+                                          '開啟助手資料夾',
+                                          'Open assistant folder',
+                                        ),
+                                      ),
+                                    ),
+                                    TextButton(
+                                      style: TextButton.styleFrom(
+                                        minimumSize: const Size(0, 28),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 4,
+                                        ),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                      onPressed: _opening
+                                          ? null
+                                          : () => _open(documentation: true),
+                                      child: Text(
+                                        _copy(
+                                          '使用文档',
+                                          '使用文件',
+                                          'Installation guide',
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            Divider(
                               height: .5,
                               thickness: .5,
                               indent: 42,
                               endIndent: 12,
-                              color: c.border),
-                          _step(context, '3', '发送网页中的下载', [
-                            Text(
-                                '安装或更新后，在对应浏览器资料中确认扩展已启用并按需重新加载，回到视频或网盘网页并刷新。下载接管需要开启助手内开关并按提示允许 管理下载内容的权限；未授权时可继续使用手动下载。播放视频后点击下载按钮；网盘勾选文件后点击“kownload 下载”。连接及账号同步仍须在实际使用时确认，此教程未进行验证。',
-                                style: TextStyle(
+                              color: c.border,
+                            ),
+                            _step(
+                              context,
+                              '3',
+                              _copy(
+                                '检查连接并同步设置',
+                                '檢查連線並同步設定',
+                                'Check the connection and sync settings',
+                              ),
+                              [
+                                Text(
+                                  _copy(
+                                    '在浏览器工具栏打开助手，点击「检查连接」查看 Native 握手、App 可达和身份。身份匹配后可点击「同步设置」。找不到宿主时，到 App「设置 → 通用 → 浏览器助手」检查或注册对应浏览器。更新后重新加载助手，回到视频或网盘网页并刷新。',
+                                    '在瀏覽器工具列開啟助手，點選「檢查連線」查看 Native 交握、App 可達性與身分。身分相符後可點選「同步設定」。找不到主機時，到 App「設定 → 一般 → 瀏覽器助手」檢查或註冊該瀏覽器。更新後請重新載入助手並重新整理原網頁。',
+                                    'Open the toolbar assistant and select Check connection to verify the native handshake, App reachability and identity. Then select Sync settings. If the host is missing, check or register the browser under Settings → General → Browser Assistant. After updating, reload the extension and refresh the source page.',
+                                  ),
+                                  style: TextStyle(
                                     color: c.secondary,
                                     fontSize: 12,
-                                    height: 1.45)),
-                          ]),
-                        ]),
+                                    height: 1.45,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                       if (_error != null) ...[
                         const SizedBox(height: 12),
                         Semantics(
                           liveRegion: true,
-                          child: Text(_error!,
-                              style: TextStyle(
-                                  color: Theme.of(context).colorScheme.error,
-                                  fontSize: 12)),
+                          child: Text(
+                            _error!,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                              fontSize: 12,
+                            ),
+                          ),
                         ),
                       ],
-                    ]),
+                    ],
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
-            Align(
-              alignment: Alignment.centerRight,
-              child: MacButton(
+              const SizedBox(height: 24),
+              Align(
+                alignment: Alignment.centerRight,
+                child: MacButton(
                   primary: true,
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('返回教程')),
-            ),
-          ]),
+                  child: Text(_copy('返回教程', '返回教學', 'Back to tutorial')),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _step(
-      BuildContext context, String number, String title, List<Widget> body) {
+    BuildContext context,
+    String number,
+    String title,
+    List<Widget> body,
+  ) {
     final c = MacColors.of(context);
     return Padding(
       padding: const EdgeInsets.all(12),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        SizedBox(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
             width: 18,
-            child: Text(number,
-                style: TextStyle(fontSize: 12, color: c.secondary))),
-        const SizedBox(width: 8),
-        Expanded(
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: TextStyle(fontSize: 13, color: c.text)),
-            const SizedBox(height: 5),
-            ...body,
-          ]),
-        ),
-      ]),
+            child: Text(
+              number,
+              style: TextStyle(fontSize: 12, color: c.secondary),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: TextStyle(fontSize: 13, color: c.text)),
+                const SizedBox(height: 5),
+                ...body,
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
