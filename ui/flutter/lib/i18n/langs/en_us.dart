@@ -43,6 +43,75 @@ const enUS = {
     "pathLoadingMembers": "Reading the file list…",
     'label': 'English',
     'error': 'Error',
+    'taskFailureUnknown': 'Download failed',
+    'taskFailureExpired': 'The link or sign-in has expired',
+    'taskFailureAccess': 'The source denied access or requires sign-in',
+    'taskFailureInvalidLink': 'The download link is unavailable',
+    'taskFailureCooldown': 'The source is rate-limiting requests',
+    'taskFailureUnsafeResume':
+        'The link could not be verified against the original file',
+    'taskFailureDisk': 'There was a problem with the destination or disk',
+    'taskFailureNetwork': 'The network connection failed or timed out',
+    'taskRecoveryChecking': 'Checking or submitting recovery…',
+    'taskRecoverySubmitted':
+        'Recovery accepted. Waiting for new download data.',
+    'taskRecoveryUnknown':
+        'Recovery result is unknown. Check the original task.',
+    'taskRecoveryQueryRetry':
+        'Retry result is unknown. Check the original retry.',
+    'taskRecoveryRejected':
+        'Recovery was refused. Check the original task and source.',
+    'taskRecoveryContinueRejected':
+        'Link saved. The resume request was refused.',
+    'taskRecoveryStopped': 'The original task is paused. Check its status.',
+    'taskRecoveryUnsafeLink':
+        'The replacement failed the original-file check. Partial data was kept.',
+    'taskRecoveryCooldown': 'Still cooling down. Check again later.',
+    'taskRecoveryFailed': 'The recovery attempt did not resume the download',
+    'taskRecoveryResumed': 'The original task resumed transferring',
+    'taskRecoveryCheckHandoff': 'Check the browser handoff first',
+    'taskRecoveryCheckDisk':
+        'Check destination permissions and free space, then retry',
+    'taskRecoverySyncDriveHint':
+        'Sign in to the original drive page with the same account, sync, and then confirm resuming the original task.',
+    'taskRecoveryMediaHint':
+        'Open the source site to check sign-in, or retry with the existing source. Browser sign-in is separate from this media task.',
+    'taskRecoveryReplaceHint':
+        'Get a fresh download link for the same file, then update the original task.',
+    'taskRecoveryLinkUnavailable':
+        'Safe link replacement is unavailable for this task. Check the original source before retrying.',
+    'taskRecoveryRetryHint':
+        'Check the source or connection, then retry the original task.',
+    'taskRecoveryNewLink': 'New download link for the same file',
+    'taskRecoveryInvalidInput':
+        'Enter a different HTTP or HTTPS download link.',
+    'taskRecoverySiteFailed': 'Could not open the source site',
+    'taskRecoveryOpenSite': 'Open source site to sign in',
+    'taskRecoverySyncDrive': 'Sync drive sign-in again',
+    'taskRecoveryReplaceAndContinue': 'Replace link and resume original task',
+    'taskRecoveryDetails': 'Failure and recovery',
+    'taskRecoveryDriveSynced':
+        'Sign-in synced. Confirm to resume the original task.',
+    'taskRecoveryDriveSyncFailed':
+        'Sign-in sync did not complete. Check the original page, account, and browser helper.',
+    'taskRecoveryContinueOriginal': 'Resume original task',
+    'httpRetry': 'Retry',
+    'httpRetryAgain': 'Retry again',
+    'httpRetryStop': 'Stop waiting',
+    'httpRetryQuery': 'Check original retry',
+    'httpRetryStale':
+        'The original retry state changed. No new request was sent.',
+    'httpRetryHeld':
+        'Recovery is protected for this task. Retry is unavailable.',
+    'httpRetryUnavailable':
+        'The download service could not confirm that retry is safe.',
+    'httpRetryNoConnection':
+        'The current connection cannot confirm a safe retry.',
+    'httpRetryNotFailed': 'The task is no longer in a retryable failed state.',
+    'httpRetryScopeChanged':
+        'The connection or dataset changed. The original retry was kept without sending to the new dataset.',
+    'httpRetryCheckFailed':
+        'Retry state could not be checked. No retry was submitted.',
     'httpRecoveryCooldown':
         'The task is still cooling down and cannot be retried yet. Check its state again later.',
     'tip': 'Tip',

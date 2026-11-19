@@ -98,6 +98,15 @@ class BuildTaskListView extends GetView {
         : taskController.tabIndex.value == 0
             ? Get.find<TaskDownloadingController>()
             : Get.find<TaskDownloadedController>();
+    final macList =
+        taskListController is MacTaskListController ? taskListController : null;
+    Task? currentTask() => taskListController.tasks
+        .firstWhereOrNull((current) => current.id == task.id);
+    Future<void> openRecovery() =>
+        showTaskRecovery(context, task, macList!.recovery,
+            refresh: taskListController.getTasksState,
+            currentTask: currentTask);
+
     bool isDone() {
       return task.status == Status.done;
     }
@@ -298,14 +307,9 @@ class BuildTaskListView extends GetView {
                         }
                       }
 
-                      final existingExtra = task.meta.req.extra;
-                      final reqExtra = task.protocol == Protocol.media &&
-                              existingExtra is Map
-                          ? <String, dynamic>{
-                              ...Map<String, dynamic>.from(existingExtra),
-                              'header': headers,
-                            }
-                          : ReqExtraHttp(header: headers).toJson();
+                      final reqExtra = {
+                        'header': headers,
+                      };
 
                       // Create patch request
                       final patchData = ResolveTask(
@@ -535,22 +539,19 @@ class BuildTaskListView extends GetView {
               showMessage('浏览器交接', result.message);
               return;
             }
-            await continueAllTasks(
-              filterSelectedTaskIds({
-                ...taskListController.selectedTaskIds,
-                task.id,
-              })
-                  .where(
-                    (id) => tasks.any(
-                      (t) =>
-                          t.id == id &&
-                          t.handoff?.blocked != true &&
-                          t.status != Status.done &&
-                          t.status != Status.running,
-                    ),
-                  )
-                  .toList(),
-            );
+            final ids = filterSelectedTaskIds({
+              ...taskListController.selectedTaskIds,
+              task.id,
+            })
+                .where((id) => tasks.any((t) =>
+                    t.id == id &&
+                    t.handoff?.blocked != true &&
+                    macList?.recovery.blocksWrite(t) != true &&
+                    !hasUnconfirmedHttpRetry(t) &&
+                    t.status != Status.done &&
+                    t.status != Status.running))
+                .toList();
+            if (ids.isNotEmpty) await continueAllTasks(ids);
           } catch (e) {
             showErrorMessage(e);
           } finally {
@@ -599,63 +600,59 @@ class BuildTaskListView extends GetView {
           }
         },
       ),
-      if (task.protocol == Protocol.netdisk)
+      if (task.status == Status.error && macList != null)
+        MenuItem(
+          icon: const Icon(Icons.info_outline),
+          label: Text('taskRecoveryDetails'.tr),
+          onSelected: (_) => openRecovery(),
+        ),
+      if (canSyncTaskLogin(task))
         MenuItem(
           icon: const Icon(Icons.login),
-          label: const Text('重新同步网盘登录'),
-          enabled: task.handoff?.blocked != true &&
-              (task.status == Status.pause || task.status == Status.error),
-          onSelected: (_) {
-            appController.pendingUpdateTask.value =
-                PendingUpdateTask(id: task.id, name: task.name);
-            if (Util.isMacos()) {
-              MacPanel.showPanel();
-            } else {
-              Get.rootDelegate.toNamed(Routes.CREATE);
-            }
-          },
+          label: Text('taskRecoverySyncDrive'.tr),
+          enabled: macList?.recovery.blocksWrite(task) != true,
+          onSelected: (_) => openTaskLogin(task),
         ),
-      // Update URL submenu - only enabled for HTTP tasks in pause or error status
       const MenuDivider(),
-      MenuItem.submenu(
-        icon: const Icon(Icons.link),
-        label: Text('updateUrl'.tr),
-        enabled: task.handoff?.blocked != true &&
-            (task.protocol == Protocol.http ||
-                task.protocol == Protocol.media) &&
-            (task.status == Status.pause || task.status == Status.error),
-        items: [
-          MenuItem(
-            icon: const Icon(Icons.edit_note),
-            label: Text('updateUrlManual'.tr),
-            onSelected: (_) async {
-              await showUpdateUrlDialog(context, task);
-            },
-          ),
-          MenuItem(
-            icon: Icon(
-              appController.pendingUpdateTask.value?.id == task.id
-                  ? Icons.cancel
-                  : Icons.sensors,
+      if (canReplaceTaskLink(task, null) &&
+          (task.status == Status.pause || macList == null))
+        MenuItem.submenu(
+          icon: const Icon(Icons.link),
+          label: Text('updateUrl'.tr),
+          enabled: !hasUnconfirmedHttpRetry(task) &&
+              macList?.recovery.blocksWrite(task) != true,
+          items: [
+            MenuItem(
+              icon: const Icon(Icons.edit_note),
+              label: Text('updateUrlManual'.tr),
+              onSelected: (_) async {
+                await showUpdateUrlDialog(context, task);
+              },
             ),
-            label: Text(
-              appController.pendingUpdateTask.value?.id == task.id
-                  ? 'updateUrlCancelListen'.tr
-                  : 'updateUrlListen'.tr,
+            MenuItem(
+              icon: Icon(
+                appController.pendingUpdateTask.value?.id == task.id
+                    ? Icons.cancel
+                    : Icons.sensors,
+              ),
+              label: Text(
+                appController.pendingUpdateTask.value?.id == task.id
+                    ? 'updateUrlCancelListen'.tr
+                    : 'updateUrlListen'.tr,
+              ),
+              onSelected: (_) {
+                if (appController.pendingUpdateTask.value?.id == task.id) {
+                  appController.pendingUpdateTask.value = null;
+                } else {
+                  appController.pendingUpdateTask.value = PendingUpdateTask(
+                    id: task.id,
+                    name: task.name,
+                  );
+                }
+              },
             ),
-            onSelected: (_) {
-              if (appController.pendingUpdateTask.value?.id == task.id) {
-                appController.pendingUpdateTask.value = null;
-              } else {
-                appController.pendingUpdateTask.value = PendingUpdateTask(
-                  id: task.id,
-                  name: task.name,
-                );
-              }
-            },
-          ),
-        ],
-      ),
+          ],
+        ),
     ];
 
     final contextMenu = ContextMenu(
@@ -784,10 +781,14 @@ class BuildTaskListView extends GetView {
                               ],
                             ),
                             const SizedBox(height: 3),
-                            if (task.status == Status.error)
+                            if (task.status == Status.error &&
+                                httpCompletion == null)
                               MacTaskFailure(
                                   key: ValueKey('failure-${task.id}'),
-                                  taskId: task.id,
+                                  task: task,
+                                  stage: macList!.recovery.stage(task),
+                                  afterLinkUpdate:
+                                      macList.recovery.isLinkUpdate(task),
                                   suffix: getProgressText(),
                                   style: TextStyle(
                                       fontSize: 11,
@@ -797,6 +798,9 @@ class BuildTaskListView extends GetView {
                             else
                               Text(
                                 [
+                                  if (macList!.recovery.stage(task)
+                                      case final stage?)
+                                    stage.label,
                                   status,
                                   getProgressText(),
                                   getPercentText(),
@@ -877,6 +881,13 @@ class BuildTaskListView extends GetView {
                             ]),
                       ),
                       const SizedBox(width: 8),
+                      if (task.status == Status.error)
+                        IconButton(
+                          tooltip: 'taskRecoveryDetails'.tr,
+                          color: isSelect() ? Colors.white : colors.secondary,
+                          icon: const Icon(Icons.info_outline, size: 17),
+                          onPressed: openRecovery,
+                        ),
                       if (isDone())
                         IconButton(
                           color: isSelect() ? Colors.white : colors.secondary,
@@ -890,12 +901,41 @@ class BuildTaskListView extends GetView {
                         HttpTaskRetryButton(
                             key: ValueKey('retry-${task.id}'),
                             task: task,
+                            feedback: macList.recovery,
                             color: isSelect() ? Colors.white : colors.secondary,
-                            legacyContinue: () => continueTask(task.id),
+                            legacyContinue: () => continueTask(task.id,
+                                distinguishRejection: true),
                             refresh: () async {
                               await taskListController.getTasksState();
                             },
-                            notice: (message) => showMessage('重试', message))
+                            notice: (message) =>
+                                showMessage('httpRetry'.tr, message))
+                      else if (task.status == Status.error &&
+                          task.handoff?.blocked != true &&
+                          (task.protocol == Protocol.media ||
+                              task.protocol == Protocol.netdisk))
+                        IconButton(
+                          tooltip: (canSyncTaskLogin(task)
+                                  ? 'taskRecoverySyncDrive'
+                                  : 'httpRetry')
+                              .tr,
+                          color: isSelect() ? Colors.white : colors.secondary,
+                          icon: Icon(
+                              canSyncTaskLogin(task)
+                                  ? Icons.login
+                                  : Icons.refresh,
+                              size: 18),
+                          onPressed: macList.recovery.blocksWrite(task)
+                              ? null
+                              : () {
+                                  if (canSyncTaskLogin(task)) {
+                                    openTaskLogin(task);
+                                  } else {
+                                    continueFailedTask(task, macList.recovery,
+                                        taskListController.getTasksState);
+                                  }
+                                },
+                        )
                       else
                         IconButton(
                           color: isSelect() ? Colors.white : colors.secondary,
@@ -912,24 +952,29 @@ class BuildTaskListView extends GetView {
                                     : Icons.play_arrow,
                             size: 18,
                           ),
-                          onPressed: () async {
-                            try {
-                              if (isRunning()) {
-                                await pauseTask(task.id);
-                              } else {
-                                if (task.handoff?.blocked == true) {
-                                  final result = await Get.find<AppController>()
-                                      .checkBrowserHandoff(task);
-                                  showMessage('浏览器交接', result.message);
-                                } else {
-                                  await continueTask(task.id);
-                                }
-                              }
-                              await taskListController.getTasksState();
-                            } catch (e) {
-                              showErrorMessage(e);
-                            }
-                          },
+                          onPressed: !isRunning() &&
+                                  task.handoff?.blocked != true &&
+                                  (macList.recovery.blocksWrite(task) ||
+                                      hasUnconfirmedHttpRetry(task))
+                              ? null
+                              : () async {
+                                  try {
+                                    if (isRunning()) {
+                                      await pauseTask(task.id);
+                                    } else {
+                                      if (task.handoff?.blocked == true) {
+                                        final result = await Get.find<AppController>()
+                                            .checkBrowserHandoff(task);
+                                        showMessage('浏览器交接', result.message);
+                                      } else {
+                                        await continueTask(task.id);
+                                      }
+                                    }
+                                    await taskListController.getTasksState();
+                                  } catch (e) {
+                                    showErrorMessage(e);
+                                  }
+                              },
                         ),
                     ],
                   ),

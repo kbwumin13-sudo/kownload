@@ -151,7 +151,8 @@ void main() {
       await f.handle(q);
     };
     await mount(t, locale: const Locale('en', 'US'));
-    await click(t, '重试');
+    await t.pumpAndSettle();
+    await click(t, 'Retry');
     await spin(t, () => messages.isNotEmpty);
     expect(messages.single,
         'The task is still cooling down and cannot be retried yet. Check its state again later.');

@@ -83,7 +83,7 @@ class _NetdiskViewState extends State<NetdiskView> {
   }
 
   late NetdiskSource _source = widget.input.source;
-  late String _sessionId = widget.input.sessionId;
+  late String _sessionId = _resumeOnly ? '' : widget.input.sessionId;
   late List<NetdiskFile> _files = List.of(widget.input.files);
   final _selected = <String, NetdiskFile>{};
   final _directories = <(NetdiskSource, String)>[];
@@ -105,12 +105,18 @@ class _NetdiskViewState extends State<NetdiskView> {
   bool _submitting = false;
   bool _waiting = false;
   bool _batchAttempted = false;
+  bool _resumeUnconfirmed = false;
   bool _closed = false;
   final _pageCursors = <String>{};
 
   bool get _active => mounted && !_closed;
   bool get _resumeOnly => widget.onResume != null;
-  bool get _locked => _loading || _waiting || _submitting || _batchAttempted;
+  bool get _locked =>
+      _loading ||
+      _waiting ||
+      _submitting ||
+      _batchAttempted ||
+      _resumeUnconfirmed;
 
   @override
   void initState() {
@@ -178,6 +184,7 @@ class _NetdiskViewState extends State<NetdiskView> {
   }
 
   String _message(Object error) {
+    if (_resumeOnly) return 'taskRecoveryDriveSyncFailed'.tr;
     if (error is NetdiskException) {
       if (['login_required', 'expired', 'invalid_context']
           .contains(error.reasonCode)) {
@@ -373,6 +380,7 @@ class _NetdiskViewState extends State<NetdiskView> {
     final generation = ++_generation;
     setState(() {
       _waiting = true;
+      if (_resumeOnly) _sessionId = '';
       _error = null;
     });
     try {
@@ -417,24 +425,20 @@ class _NetdiskViewState extends State<NetdiskView> {
       final request = await _api.browserStatus(_requestId!);
       if (!_active || generation != _generation) return;
       if (request.state == 'ready' && request.sessionId.isNotEmpty) {
-        if (!_resumeOnly) {
-          setState(() {
-            _sessionId = request.sessionId;
-          });
-        }
+        setState(() {
+          _sessionId = request.sessionId;
+        });
         _stopWaiting();
-        if (_resumeOnly) {
-          await _resume();
-        } else {
-          await _load();
-        }
+        if (!_resumeOnly) await _load();
         return;
       }
       if (['expired', 'cancelled', 'error', 'failed'].contains(request.state)) {
         setState(() {
-          _error = request.message.isNotEmpty
-              ? '${request.message}。请确认所选个人资料已启用网页助手，并在原网盘页面登录后重试。'
-              : '页面同步已结束，请启用网页助手并在原网盘页面登录后重试。';
+          _error = _resumeOnly
+              ? 'taskRecoveryDriveSyncFailed'.tr
+              : request.message.isNotEmpty
+                  ? '${request.message}。请确认所选个人资料已启用网页助手，并在原网盘页面登录后重试。'
+                  : '页面同步已结束，请启用网页助手并在原网盘页面登录后重试。';
         });
         _stopWaiting();
         return;
@@ -559,7 +563,7 @@ class _NetdiskViewState extends State<NetdiskView> {
   }
 
   Future<void> _resume() async {
-    if (!_active || _submitting) return;
+    if (!_active || _locked || _sessionId.isEmpty) return;
     setState(() {
       _submitting = true;
       _error = null;
@@ -573,7 +577,18 @@ class _NetdiskViewState extends State<NetdiskView> {
       if (_active) {
         setState(() {
           _submitting = false;
-          _error = _message(e);
+          final rejected = e is NetdiskException &&
+              const {
+                'request_failed',
+                'login_required',
+                'invalid_context',
+                'expired',
+                'recovery_rejected'
+              }.contains(e.reasonCode);
+          _resumeUnconfirmed = !rejected;
+          _error =
+              (rejected ? 'taskRecoveryRejected' : 'taskRecoveryUnknown').tr;
+          if (rejected) _sessionId = '';
         });
       }
     }
@@ -668,7 +683,9 @@ class _NetdiskViewState extends State<NetdiskView> {
                                         ? null
                                         : _syncBrowser,
                                 child: Text(_resumeOnly || _sessionId.isNotEmpty
-                                    ? '重新同步登录'
+                                    ? (_resumeOnly
+                                        ? 'taskRecoverySyncDrive'.tr
+                                        : '重新同步登录')
                                     : '打开页面并同步')),
                             TextButton(
                                 onPressed:
@@ -691,10 +708,14 @@ class _NetdiskViewState extends State<NetdiskView> {
                         ]),
                       ],
                       if (_resumeOnly)
-                        const Padding(
-                            padding: EdgeInsets.only(top: 6),
-                            child: Text('请登录下载时的同一账号；同步成功后继续原任务。',
-                                style: TextStyle(fontSize: 12))),
+                        Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                                (_sessionId.isEmpty
+                                        ? 'taskRecoverySyncDriveHint'
+                                        : 'taskRecoveryDriveSynced')
+                                    .tr,
+                                style: const TextStyle(fontSize: 12))),
                       if (_sessionId.isEmpty || _waiting)
                         const Padding(
                             padding: EdgeInsets.only(top: 6),
@@ -921,10 +942,18 @@ class _NetdiskViewState extends State<NetdiskView> {
                         MacButton(
                             onPressed: _submitting ? null : _close,
                             child: const Text('取消')),
-                        if (_resumeOnly && _submitting)
-                          const Padding(
-                              padding: EdgeInsets.only(left: 10),
-                              child: Text('正在继续任务…')),
+                        if (_resumeOnly) ...[
+                          const SizedBox(width: 10),
+                          MacButton(
+                              primary: true,
+                              onPressed: _locked || _sessionId.isEmpty
+                                  ? null
+                                  : _resume,
+                              child: Text((_submitting
+                                      ? 'taskRecoveryChecking'
+                                      : 'taskRecoveryContinueOriginal')
+                                  .tr)),
+                        ],
                         if (!_resumeOnly) ...[
                           const SizedBox(width: 10),
                           if (_preparedPathBatch != null)

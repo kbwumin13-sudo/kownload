@@ -6,6 +6,7 @@ import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/task.dart';
 import 'package:gopeed/api/model/task_stats.dart';
 import 'task_list_controller.dart';
+import 'task_recovery_feedback.dart';
 
 class TaskController extends GetxController {
   final tabIndex = 0.obs;
@@ -42,6 +43,8 @@ class MacTaskListController extends TaskListController {
           return b.updatedAt.compareTo(a.updatedAt);
         });
 
+  final recovery = TaskRecoveryFeedback();
+
   String? selectionAnchor;
   String? selectionCursor;
 
@@ -50,7 +53,13 @@ class MacTaskListController extends TaskListController {
 
   @override
   Future<void> getTasksState() async {
+    final snapshot = api.activeApiSnapshot;
     await super.getTasksState();
+    if (snapshot?.isCurrent == true &&
+        error.value == null &&
+        !isLoading.value) {
+      recovery.observe(tasks, completeList: true);
+    }
     await refreshStats();
   }
 
