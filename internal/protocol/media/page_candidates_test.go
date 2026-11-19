@@ -132,7 +132,7 @@ func TestPastedPageSelectsExactPlayerAndFormat(t *testing.T) {
 		t.Fatalf("legacy inspection unexpectedly supported a list: %+v, %v", legacy, err)
 	}
 	parent, err := Inspect(ctx, req, ctl)
-	if err != nil || parent.Supported || len(parent.Formats) != 0 || len(parent.Candidates) != 2 {
+	if err != nil || parent.Supported || parent.Formats == nil || len(parent.Formats) != 0 || len(parent.Candidates) != 2 {
 		t.Fatalf("parent inspection: %+v, %v", parent, err)
 	}
 	manager := &FetcherManager{}
@@ -149,7 +149,7 @@ func TestPastedPageSelectsExactPlayerAndFormat(t *testing.T) {
 		t.Fatalf("child inspection after moving player: %+v, %v", child, err)
 	}
 	for _, format := range child.Formats {
-		if strings.HasSuffix(format.SourceURL, "/chosen.mp4") && format.Height == 64 {
+		if strings.HasSuffix(format.SourceURL, "/chosen.mp4") && format.Height == 64 && format.Label == "chosen.mp4" {
 			extra.Format, extra.Container = format.ID, format.Container
 		}
 	}
@@ -175,6 +175,7 @@ func TestPastedPageSelectsExactPlayerAndFormat(t *testing.T) {
 	_, restore := manager.Restore()
 	f = restore(f.Meta(), data).(*Fetcher)
 	f.Setup(ctl)
+	invalidateInspection(req, cfg)
 	if err := assertRun(f); err != nil {
 		t.Fatal(err)
 	}

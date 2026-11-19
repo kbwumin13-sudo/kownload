@@ -356,6 +356,9 @@ func cloneInspection(result *model.Inspection) *model.Inspection {
 	copy.ContextURLs = append([]string(nil), result.ContextURLs...)
 	copy.Formats = append([]model.Format(nil), result.Formats...)
 	copy.Candidates = append([]model.PageCandidate(nil), result.Candidates...)
+	if len(copy.Candidates) != 0 && copy.Formats == nil {
+		copy.Formats = []model.Format{}
+	}
 	copy.Subtitles = append([]model.Subtitle{}, result.Subtitles...)
 	for i := range copy.Subtitles {
 		copy.Subtitles[i].Formats = append([]string(nil), result.Subtitles[i].Formats...)

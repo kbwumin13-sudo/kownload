@@ -3182,8 +3182,8 @@ class CreateViewState extends State<CreateView> {
   }
 
   Widget _webMediaPreviewAction({MacColors? colors}) => ListenableBuilder(
-        listenable: Listenable.merge(
-            [_urlController, _expectedSha256Controller]),
+        listenable:
+            Listenable.merge([_urlController, _expectedSha256Controller]),
         builder: (context, _) => Obx(() {
           final busy = controller.isConfirming.value;
           if (!_canPreviewWebMedia(_urlController.text.trim())) {
@@ -3211,8 +3211,10 @@ class CreateViewState extends State<CreateView> {
       ]);
 
   Request _webMediaRequest(Request source,
-          {String? candidateId, String? expectedMediaId,
-          MediaFormatChoice? format}) => Request(
+          {String? candidateId,
+          String? expectedMediaId,
+          MediaFormatChoice? format}) =>
+      Request(
         url: source.url,
         protocol: 'media',
         proxy: source.proxy,
@@ -3290,7 +3292,8 @@ class CreateViewState extends State<CreateView> {
       final mediaOpts = Options(name: opts.name, path: opts.path);
       if (_pathPolicyOptIn) {
         final prepared = HttpPathCreateRequest(
-            CreateTaskBatch(reqs: [CreateTaskBatchItem(req: req, opts: mediaOpts)]),
+            CreateTaskBatch(
+                reqs: [CreateTaskBatchItem(req: req, opts: mediaOpts)]),
             pathIntent: HttpPathIntent(
                 path: _pathIntent.path, origin: _pathIntent.wireOrigin),
             variant: PathCreateVariant.media);
@@ -3353,15 +3356,22 @@ class CreateViewState extends State<CreateView> {
       if (hasInput && (!await _ensureMacOnboarding() || !mounted)) return;
       if (previewWebMedia) {
         if (_urlController.text.trim() != initialInput ||
-            !_canPreviewWebMedia(initialInput)) return;
+            !_canPreviewWebMedia(initialInput)) {
+          return;
+        }
         final request = _requestForUrl(initialInput);
-        final opt = Options(name: _renameController.text, path: _pathController.text);
+        final opt =
+            Options(name: _renameController.text, path: _pathController.text);
         final snapshot = activeApiSnapshot;
         final epoch = _manualEpoch;
         final draft = _webMediaDraft(initialInput);
         Database.instance.saveCreateHistory(initialInput);
-        await _previewWebMedia(request, opt, draft,
-            () => mounted && epoch == _manualEpoch &&
+        await _previewWebMedia(
+            request,
+            opt,
+            draft,
+            () => mounted &&
+                epoch == _manualEpoch &&
                 activeApiSnapshot == snapshot &&
                 _canPreviewWebMedia(_urlController.text.trim()) &&
                 _webMediaDraft(initialInput) == draft,
@@ -3555,12 +3565,17 @@ class CreateViewState extends State<CreateView> {
               ResolveTask(req: request, opts: opt));
           _checkCaptureCompletion();
           if (draft != null && rr.httpInlineHtml && rr.id.isNotEmpty) {
-            await _previewWebMedia(request, opt, draft,
-                () => mounted && epoch == _manualEpoch &&
+            await _previewWebMedia(
+                request,
+                opt,
+                draft,
+                () => mounted &&
+                    epoch == _manualEpoch &&
                     activeApiSnapshot == snapshot &&
                     _canPreviewWebMedia(_urlController.text.trim()) &&
                     _webMediaDraft(submitUrl) == draft,
-                snapshot, page: rr);
+                snapshot,
+                page: rr);
             return;
           }
           await _showResolveDialog(rr);
