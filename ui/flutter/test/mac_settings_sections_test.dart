@@ -10,6 +10,7 @@ import 'package:hive/hive.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:gopeed/app/modules/app/controllers/app_controller.dart';
 import 'package:gopeed/api/model/downloader_config.dart';
+import 'package:gopeed/api/model/media_tools_status.dart';
 import 'package:gopeed/core/common/start_config.dart';
 import 'package:gopeed/app/modules/extension/controllers/extension_controller.dart';
 import 'package:gopeed/app/modules/extension/views/extension_view.dart';
@@ -29,6 +30,18 @@ import 'package:gopeed/util/package_info.dart';
 import 'package:gopeed/util/util.dart';
 
 import 'support/onboarding_check_fixture.dart';
+
+const _mediaToolsFixture = MediaToolsStatus(
+    ytDlp: MediaToolStatus(MediaToolState.ready,
+        setting: '/custom/resolver',
+        path: '/daemon/configured-yt-dlp',
+        defaultPath: '/daemon/default-yt-dlp',
+        version: '2026.10.26',
+        enabled: true,
+        custom: true),
+    ffmpeg: MediaToolStatus(MediaToolState.missing),
+    node: MediaToolStatus(MediaToolState.inactive),
+    bridge: MediaBridgeStatus(MediaToolState.unsupported));
 
 ManifestEvidence _manifest(String name, String owner) => ManifestEvidence(name,
     present: owner != 'missing',
@@ -129,7 +142,9 @@ class _Box extends Fake implements Box {
 }
 
 Future<_App> _mountSettings(WidgetTester tester, String section,
-    {bool shell = false, Future<void> Function(String)? webhookTest}) async {
+    {bool shell = false,
+    Future<void> Function(String)? webhookTest,
+    Future<MediaToolsStatus> Function()? mediaToolsProbe}) async {
   await tester.binding.setSurfaceSize(const Size(900, 700));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   Database.instance.box = _Box();
@@ -156,7 +171,8 @@ Future<_App> _mountSettings(WidgetTester tester, String section,
   MacPanel.settingsSection.value = section;
   MacPanel.presentation.value = 'settings';
   Widget settings() {
-    final view = SettingView(webhookTest: webhookTest);
+    final view = SettingView(
+        webhookTest: webhookTest, mediaToolsProbe: mediaToolsProbe);
     return shell ? MacShell(selectedIndex: 2, child: view) : view;
   }
 
@@ -273,7 +289,8 @@ void main() {
     'ordinary navigation opens media editor; cancel keeps config; save preserves unknown protocols',
     (tester) async {
       if (!Platform.isMacOS) return;
-      final app = await _mountSettings(tester, 'general', shell: true);
+      final app = await _mountSettings(tester, 'general',
+          shell: true, mediaToolsProbe: () async => _mediaToolsFixture);
       final protocol = app.downloaderConfig.value.protocolConfig.toJson();
       protocol['futureProvider'] = {
         'value': [1, null, true],
@@ -291,7 +308,10 @@ void main() {
           );
       await tester.enterText(resolver(), '/edited/resolver');
       await tester.pumpAndSettle();
-      expect(find.text('yt-dlp：/edited/resolver'), findsOneWidget);
+      expect(find.text('/daemon/configured-yt-dlp'), findsOneWidget);
+      expect(
+          find.text('限定域请求头与共享恢复桥 · 需要使用绝对 Python 解释器的 yt-dlp 入口'),
+          findsOneWidget);
       await tester.tap(find.text('取消').last);
       await tester.pumpAndSettle();
       expect(app.savedConfigs, isEmpty);
@@ -312,6 +332,40 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('media tool failure is unknown, while choose and reset edit draft',
+      (tester) async {
+    if (!Platform.isMacOS) return;
+    var calls = 0;
+    final app =
+        await _mountSettings(tester, 'download', mediaToolsProbe: () async {
+      if (calls++ == 0) throw StateError('fixture offline');
+      return _mediaToolsFixture;
+    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel, (call) async =>
+            call.method == 'chooseFiles' ? ['/selected/new-tool'] : null);
+    await openEditor(tester, 'media');
+    expect(find.text('无法取得下载服务的工具状态。'), findsOneWidget);
+    expect(find.text('未找到'), findsNothing);
+    await tester.tap(find.text('重新检测'));
+    await tester.pumpAndSettle();
+    final resolver = find.byKey(const ValueKey('media-path-yt-dlp'));
+    final choose = find.text('选择 yt-dlp…');
+    final reset = find.text('恢复 yt-dlp 默认');
+    await tester.ensureVisible(choose);
+    await tester.tap(choose);
+    await tester.pumpAndSettle();
+    expect(
+        tester.widget<TextField>(resolver).controller!.text, '/selected/new-tool');
+    await tester.ensureVisible(reset);
+    await tester.tap(reset);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(resolver).controller!.text,
+        '/daemon/default-yt-dlp');
+    expect(find.text('/daemon/configured-yt-dlp'), findsOneWidget);
+    expect(app.savedConfigs, isEmpty);
+  });
 
   for (final section in ['http', 'bt', 'ed2k']) {
     testWidgets(

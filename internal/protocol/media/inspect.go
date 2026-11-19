@@ -78,7 +78,7 @@ type videoFormat struct {
 	HasDRM         bool    `json:"has_drm"`
 }
 
-func configFor(ctl *controller.Controller) model.Config {
+func configDefaults() model.Config {
 	c := model.Config{Connections: 4}
 	if runtime.GOOS == "darwin" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -87,9 +87,18 @@ func configFor(ctl *controller.Controller) model.Config {
 		c.FFmpegPath = "/opt/homebrew/bin/ffmpeg"
 		c.JsRuntimePath = "/opt/homebrew/bin/node"
 	}
+	return c
+}
+
+func configFor(ctl *controller.Controller) model.Config {
+	c := configDefaults()
 	if ctl != nil && ctl.GetConfig != nil {
 		ctl.GetConfig(&c)
 	}
+	return effectiveConfig(c)
+}
+
+func effectiveConfig(c model.Config) model.Config {
 	if c.YtDlpPath == "" {
 		c.YtDlpPath = "yt-dlp"
 	}
@@ -582,8 +591,8 @@ func requestArgs(req *base.Request, extra *model.ReqExtra, ctl *controller.Contr
 		args = args[:len(args)-1]
 	}
 	args = append(args, "--ffmpeg-location", cfg.FFmpegPath)
-	if executablePath(cfg.JsRuntimePath) {
-		args = append(args, "--js-runtimes", "node:"+cfg.JsRuntimePath)
+	if node := enabledNodePath(cfg); node != "" {
+		args = append(args, "--js-runtimes", "node:"+node)
 	}
 	if ctl != nil && ctl.GetProxy != nil {
 		proxyFn := ctl.GetProxy(req.Proxy)
@@ -614,6 +623,13 @@ func requestArgs(req *base.Request, extra *model.ReqExtra, ctl *controller.Contr
 		args = append(args, "--cookies", cookiePath)
 	}
 	return args, cleanup, nil
+}
+
+func enabledNodePath(cfg model.Config) string {
+	if executablePath(cfg.JsRuntimePath) {
+		return cfg.JsRuntimePath
+	}
+	return ""
 }
 
 func executablePath(path string) bool {
