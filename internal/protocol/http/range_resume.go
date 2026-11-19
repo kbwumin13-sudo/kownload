@@ -293,6 +293,15 @@ func (f *Fetcher) verifySavedOverlaps() bool {
 			return false // paused or deferred
 		}
 		f.diag.failure(err)
+		// The failed sample's response and stream permit have been released.
+		// Renew through the shared recovery coordinator before rechecking saved bytes.
+		if handled, refreshErr := f.reportSharedRefresh(f.ctx, "start", err); handled {
+			if refreshErr != nil {
+				f.failRun(fmt.Errorf("resume link refresh failed: %w", refreshErr))
+				return false
+			}
+			continue
+		}
 		if errors.Is(err, ErrUnsafeResume) {
 			f.failRun(err)
 			return false

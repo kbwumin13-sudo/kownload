@@ -135,7 +135,13 @@ func (f *Fetcher) reportSharedRefresh(ctx context.Context, work string, cause er
 		f.connMu.Lock()
 		for _,conn := range f.connections { if !conn.Completed { members = append(members,f.recoveryWork(conn)) } }
 		f.connMu.Unlock()
-		if len(members) == 0 { members = []string{work} }
+		if len(members) == 0 {
+			members = []string{work}
+		} else if work == "start" {
+			// A resumed task's overlap probe runs before its workers start.
+			// Charge the refresh to one of the already saved workers.
+			work = members[0]
+		}
 		members,err := waveMembers(members)
 		if err != nil { s.mu.Unlock();s.run.mu.Unlock();return true,err }
 		p = &sharedHTTPRefresh{request:request,members:members,work:work,done:make(chan struct{})}

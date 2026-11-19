@@ -23,9 +23,9 @@ import (
 // Named Mail.ru/redirect hosts terminate only at this private TLS server.
 // This is the real Core/Bolt/HTTP producer, not an injected owner or permit.
 func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
-	for _,public := range []bool{true,false} {
-		name := "original-body-handoff"
-		if public { name = "mailru-initial-and-expired-CDN" }
+	for _, name := range []string{"original-body-handoff", "mailru-initial-and-expired-CDN", "mailru-resumed-overlap-expired-CDN"} {
+		public := name != "original-body-handoff"
+		resume := name == "mailru-resumed-overlap-expired-CDN"
 		t.Run(name,func(t *testing.T){
 			payload := bytes.Repeat([]byte("same-task-refresh-bytes\n"),32768)
 			var dispatch,oldRanges,newRanges,origin atomic.Int32
@@ -59,10 +59,12 @@ func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
 					if _,err := fmt.Sscanf(r.Header.Get("Range"),"bytes=%d-%d",&begin,&end);err != nil || begin < 0 || end < begin || end >= len(payload) {
 						t.Error("invalid actual Range");w.WriteHeader(400);return
 					}
-					if r.Header.Get("If-Range") != `"same-object"` { t.Error("refresh lost representation validator") }
+					if !resume && r.Header.Get("If-Range") != `"same-object"` { t.Error("refresh lost representation validator") }
 					w.Header().Set("Content-Range",fmt.Sprintf("bytes %d-%d/%d",begin,end,len(payload)))
 				}
-				w.Header().Set("ETag",`"same-object"`)
+				if !resume {
+					w.Header().Set("ETag", `"same-object"`)
+				}
 				w.Header().Set("Accept-Ranges","bytes")
 				w.Header().Set("Content-Length",fmt.Sprint(end-begin+1))
 				if ranged { w.WriteHeader(206) }
@@ -71,6 +73,10 @@ func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
 				if partial {
 					_,_ = w.Write(payload[begin:min(begin+32768,end+1)])
 					w.(http.Flusher).Flush()
+					if resume {
+						<-r.Context().Done()
+						return
+					}
 					panic(http.ErrAbortHandler)
 				}
 				_,_ = w.Write(payload[begin:end+1])
@@ -101,6 +107,22 @@ func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
 			created,err := d.CreateBatchOperation(context.Background(),request)
 			if err != nil || len(created.TaskIDs)!=1 { t.Fatalf("new M: %+v %v",created,err) }
 			id := created.TaskIDs[0]
+			if resume {
+				deadline := time.Now().Add(6 * time.Second)
+				for d.GetTask(id).Progress.Downloaded < 32768 {
+					if time.Now().After(deadline) {
+						t.Fatal("did not receive bytes before pausing")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				filter := &TaskFilter{IDs: []string{id}}
+				if err := d.Pause(filter); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.Continue(filter); err != nil {
+					t.Fatal(err)
+				}
+			}
 			deadline := time.Now().Add(12*time.Second)
 			for time.Now().Before(deadline) {
 				task := d.GetTask(id)
@@ -115,6 +137,7 @@ func TestSharedRecoveryHTTPMailruAndOriginalFallback(t *testing.T) {
 			record := coverageRuntimeRecord(t,d,id,func(r recoveryRecord)bool{return r.Version==4})
 			wantRefresh,wantTransport := 1,0
 			if public { wantRefresh,wantTransport = 2,1 }
+			if resume { wantTransport = 2 }
 			if record.RefreshUsed!=wantRefresh || record.TransportUsed!=wantTransport || record.TotalUsed!=wantRefresh+wantTransport || record.SourceRevision!=uint64(wantRefresh+1) {
 				t.Fatalf("wrong shared debit: total=%d refresh=%d transport=%d source=%d",record.TotalUsed,record.RefreshUsed,record.TransportUsed,record.SourceRevision)
 			}
