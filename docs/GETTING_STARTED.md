@@ -1,14 +1,14 @@
 # kownload 使用指南
 
-[← 返回主页](../README.md) · [下载发行版](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.32)
+[← 返回主页](../README.md) · [发行说明](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.34)
 
-本指南适用于正式 **build 45 · 1.9.3-kownload.32**，涵盖安装、浏览器助手、媒体工具与可选下载能力。配套[完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/kownload-v1.9.3-kownload.32-source.tar.gz)和[SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.32/SHA256SUMS.txt)与安装包在同一 Release 提供。
+本指南适用于正式版 **1.9.3-kownload.34（build 47）**。应用、助手、[完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.34/kownload-v1.9.3-kownload.34-source.tar.gz)和 [SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.34/SHA256SUMS.txt)均由同一 Release 提供。
 
 ## 安装与升级
 
 需要 macOS 12 或更新系统、Apple Silicon（M 系列芯片）。
 
-1. 从 [Release](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.32) 下载 DMG，打开后将 `kownload.app` 拖入 `Applications`。
+1. 下载 [macOS arm64 DMG](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.34/kownload-v1.9.3-kownload.34-macos-arm64.dmg)，打开后将 `kownload.app` 拖入 `Applications`。
 2. 打开应用，跟随使用引导选择下载目录。
 3. 按 **⌃⌥D** 唤起面板，粘贴链接并回车。
 
@@ -26,11 +26,13 @@
 
 支持 Chrome 与 Edge，负责普通下载交接以及网页媒体、网盘文件选择。
 
-按 [浏览器助手安装与首次连接](../browser-media-extension/README.md#安装与首次连接) 完成加载、宿主登记和只读连接检查，再按需同步设置并配置普通下载接管。
+扩展版本仍为 0.6.0，请使用 build 47 配套的 [新版助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.34/kownload-browser-helper-0.6.0-1.9.3-kownload.34.zip)。解压后按 [浏览器助手安装与首次连接](../browser-media-extension/README.md#安装与首次连接) 加载助手，在弹窗检查连接，再按需同步设置、授权接管。Chrome 和 Edge 商店仍处于送审材料准备阶段。
+
+在普通网页中选中链接后，可从助手弹窗打开「预览选中链接」。也可以在 App 内粘贴多行 HTTP(S) 地址。预览中可核对重复或无效项、选定目录，确认后才创建勾选的任务。
 
 ## 网页媒体
 
-普通文件下载不依赖额外媒体工具。下载网页媒体前，先安装：
+普通文件下载不依赖额外媒体工具。「设置 → 下载 → 媒体工具」可查看后台实际使用的工具路径、版本与可用状态，也可安装、切换或回退经签名验证的 yt-dlp 版本。也可以手动安装工具：
 
 ```sh
 brew install ffmpeg node pipx
@@ -49,8 +51,6 @@ pipx install yt-dlp
 
 ## 路径规则与校验
 
-本节能力已随 **build 45** 正式发布。
-
 ### 为本次下载选择路径规则
 
 在设置的路径规则中，按域名、MIME、扩展名或组合条件设置保存目录，并调整顺序。规则默认关闭；创建新任务时，还需勾选 **「为本次下载冻结保存路径」** 才会使用。
@@ -65,7 +65,7 @@ pipx install yt-dlp
 
 ### 按协议恢复
 
-暂停后使用「继续」恢复原任务；错误后的显式「重试」按当前协议与服务提供的能力操作。HTTP 续传需源站支持 Range，网页媒体和网盘还可能需要更新链接或重新同步登录状态。各协议保留自己的任务语义，不会把任务自动换成另一种协议。
+暂停后使用「继续」恢复原任务。任务失败时按提示处理，例如检查网络、回原网页更新资源或重新同步网盘登录，再按当前协议提供的操作恢复或重试。HTTP 续传需源站支持 Range。
 
 ## 网盘登录与文件选择
 
@@ -75,7 +75,7 @@ pipx install yt-dlp
 
 ## MCP：先读取，再按需授权
 
-**build 45 已发布。** 包内 Helper 默认提供任务列表、任务详情、进度、统计、错误五个读取工具；没有对应观测的数据会表示不可用，不以零代替。
+包内 Helper 默认提供任务列表、任务详情、进度、统计、错误五个读取工具；没有对应观测的数据会表示不可用，不以零代替。
 
 创建、暂停、继续三个写工具默认关闭。需要由可信本机启动配置显式提供 policy，并由 App 确认授权的数据集、允许的输出根、任务 ID 和网络范围。当前创建只接受 HTTP(S)；新建任务不会自动进入允许控制的任务列表。
 
