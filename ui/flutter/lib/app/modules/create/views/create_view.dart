@@ -2716,6 +2716,7 @@ class CreateViewState extends State<CreateView> {
     final failed = task.status == Status.error;
     final done = task.status == Status.done;
     final completion = HttpCompletionView.forTask(task);
+    final diskImageLabel = task.diskImageStatusKey?.tr;
     final total = task.meta.res?.size ?? 0;
     final progress =
         total > 0 ? (task.progress.downloaded / total).clamp(0.0, 1.0) : 0.0;
@@ -2745,7 +2746,7 @@ class CreateViewState extends State<CreateView> {
                         fontWeight: FontWeight.w400,
                         color: c.text)),
                 const SizedBox(height: 3),
-                if (failed && completion == null)
+                if (failed && completion == null && diskImageLabel == null)
                   MacTaskFailure(
                       key: ValueKey('failure-${task.id}'),
                       task: task,
@@ -2758,7 +2759,7 @@ class CreateViewState extends State<CreateView> {
                       [
                         if (list.recovery.stage(task) case final stage?)
                           stage.label,
-                        task.handoff?.blocked == true
+                        diskImageLabel ?? (task.handoff?.blocked == true
                             ? task.handoff!.label
                             : completion != null
                                 ? completion.labelFor(task.status)
@@ -2775,7 +2776,7 @@ class CreateViewState extends State<CreateView> {
                                                         .progress.downloaded))
                                                 : task.status == Status.pause
                                                     ? '已暂停'
-                                                    : '等待下载',
+                                                    : '等待下载'),
                       ].join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,

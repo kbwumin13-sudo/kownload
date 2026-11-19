@@ -105,7 +105,10 @@ func (d *Downloader) completeTaskPath(task *Task, f fetcher.Fetcher, generation 
 			return false, err
 		}
 		next.Phase = MCPWriteOutputPublished
-		owned, fresh, err := SavePathOutput(d.storage.(AtomicStorage), identity.DatasetID, e.Token, s, next, &Progress{Used: task.timer.Used(), Downloaded: info.Size()})
+		task.dataLock.RLock()
+		diskImageStatus := task.Progress.DiskImageStatus
+		task.dataLock.RUnlock()
+		owned, fresh, err := SavePathOutput(d.storage.(AtomicStorage), identity.DatasetID, e.Token, s, next, &Progress{Used: task.timer.Used(), Downloaded: info.Size(), DiskImageStatus: diskImageStatus})
 		if err != nil || !fresh {
 			return false, errors.Join(err, ErrPathFreezeUnavailable)
 		}

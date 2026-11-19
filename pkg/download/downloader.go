@@ -79,7 +79,8 @@ type Progress struct {
 	// Downloaded size(bytes)
 	Downloaded int64 `json:"downloaded"`
 	// MediaPhase keeps merging distinct from a completed media task.
-	MediaPhase string `json:"mediaPhase,omitempty"`
+	MediaPhase      string `json:"mediaPhase,omitempty"`
+	DiskImageStatus string `json:"diskImageStatus,omitempty"`
 	// Uploaded speed(bytes/s)
 	UploadSpeed int64 `json:"uploadSpeed"`
 	// Uploaded size(bytes)
@@ -1650,6 +1651,10 @@ type taskRunWatch struct {
 }
 
 func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, wait func() error, leases ...*transfer.RecoveryLease) {
+	d.watchRunContext(context.Background(), task, f, generation, wait, leases...)
+}
+
+func (d *Downloader) watchRunContext(ctx context.Context, task *Task, f fetcher.Fetcher, generation uint64, wait func() error, leases ...*transfer.RecoveryLease) {
 	var runLease *transfer.RecoveryLease
 	if len(leases) > 0 {
 		runLease = leases[0]
@@ -1752,6 +1757,12 @@ func (d *Downloader) watchRun(task *Task, f fetcher.Fetcher, generation uint64, 
 			return
 		}
 		expected = []uint64{generation}
+	}
+	if err == nil {
+		err = d.verifyDownloadedDiskImages(ctx, task, f, generation)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			return
+		}
 	}
 	coverageSeal := d.recordRunRecoveryCoverage(task, f, runLease)
 	if err != nil {
@@ -2949,7 +2960,7 @@ func (d *Downloader) startTask(task *Task, onlyWaiting bool) (err error) {
 		startWatch = func() {
 			go func() {
 				defer runCancel()
-				d.watchRun(task, f, generation, boundWait, transfer.RecoveryLeaseFromContext(runCtx))
+				d.watchRunContext(runCtx, task, f, generation, boundWait, transfer.RecoveryLeaseFromContext(runCtx))
 			}()
 		}
 		return nil

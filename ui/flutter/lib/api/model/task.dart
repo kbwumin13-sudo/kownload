@@ -87,6 +87,14 @@ extension TaskTorrentInfo on Task {
   /// has no files or size to show, and it waits without a deadline.
   bool get fetchingTorrentInfo =>
       protocol == Protocol.bt && status == Status.running && meta.res == null;
+
+  String? get diskImageStatusKey => switch ((status, progress.diskImageStatus)) {
+        (Status.running, 'checking') => 'diskImageChecking',
+        (Status.done, 'verified') => 'diskImageVerified',
+        (Status.done, 'unverified') => 'diskImageUnverified',
+        (Status.error, 'failed') => 'diskImageFailed',
+        _ => null,
+      };
 }
 
 @JsonSerializable()
@@ -95,6 +103,7 @@ class Progress {
   int speed;
   int downloaded;
   String mediaPhase;
+  String diskImageStatus;
   int uploadSpeed;
   int uploaded;
   ExtractStatus extractStatus;
@@ -105,6 +114,7 @@ class Progress {
     required this.speed,
     required this.downloaded,
     this.mediaPhase = '',
+    this.diskImageStatus = '',
     required this.uploadSpeed,
     required this.uploaded,
     this.extractStatus = ExtractStatus.none,

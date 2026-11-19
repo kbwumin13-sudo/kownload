@@ -980,6 +980,12 @@ func (f *Fetcher) doStart() error {
 
 	state := f.getState()
 	if state == stateDone {
+		// The byte transfer may have completed even if a later integrity
+		// check failed. Notify the new waiter so it can recheck the same file.
+		select {
+		case f.doneCh <- nil:
+		default:
+		}
 		return nil
 	}
 

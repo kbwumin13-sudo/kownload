@@ -60,6 +60,7 @@ Progress _$ProgressFromJson(Map<String, dynamic> json) => Progress(
       speed: (json['speed'] as num).toInt(),
       downloaded: (json['downloaded'] as num).toInt(),
       mediaPhase: json['mediaPhase'] as String? ?? '',
+      diskImageStatus: json['diskImageStatus'] as String? ?? '',
       uploadSpeed: (json['uploadSpeed'] as num).toInt(),
       uploaded: (json['uploaded'] as num).toInt(),
       extractStatus:
@@ -73,6 +74,7 @@ Map<String, dynamic> _$ProgressToJson(Progress instance) => <String, dynamic>{
       'speed': instance.speed,
       'downloaded': instance.downloaded,
       'mediaPhase': instance.mediaPhase,
+      'diskImageStatus': instance.diskImageStatus,
       'uploadSpeed': instance.uploadSpeed,
       'uploaded': instance.uploaded,
       'extractStatus': _$ExtractStatusEnumMap[instance.extractStatus]!,

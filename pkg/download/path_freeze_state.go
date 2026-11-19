@@ -955,7 +955,7 @@ func SavePathOutput(store AtomicStorage, dataset string, token transfer.Recovery
 				used = task.Progress.Used
 			}
 			task.Status = base.DownloadStatusDone
-			task.Progress = &Progress{Used: used, Downloaded: progress.Downloaded}
+			task.Progress = &Progress{Used: used, Downloaded: progress.Downloaded, DiskImageStatus: progress.DiskImageStatus}
 		}
 		r.Members[task.CreationOperation.Index].PathFreeze = &candidate
 		r.UpdatedAt = task.UpdatedAt

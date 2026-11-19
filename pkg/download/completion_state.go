@@ -288,7 +288,7 @@ func commitTaskCompletionState(store AtomicStorage, dataset string, token transf
 		}
 		currentTask.Status = base.DownloadStatusDone
 		currentTask.UpdatedAt = time.Now()
-		currentTask.Progress = &Progress{Used: used, Downloaded: next.Size}
+		currentTask.Progress = &Progress{Used: used, Downloaded: next.Size, DiskImageStatus: finalProgress.DiskImageStatus}
 		if err := tx.Put(bucketTask, token.TaskID, currentTask); err != nil {
 			return completionStateError(TaskCompletionUnavailable, err)
 		}

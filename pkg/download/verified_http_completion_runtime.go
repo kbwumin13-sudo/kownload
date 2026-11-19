@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/fetcher"
@@ -168,6 +170,19 @@ func (d *Downloader) completeVerifiedHTTPStored(task *Task, f fetcher.Fetcher, g
 	}
 	// No hash slot occupies a network slot, and no second scheduler is used.
 	d.notifyRunning()
+	if runtime.GOOS == "darwin" && strings.EqualFold(filepath.Ext(current.FinalName), ".dmg") {
+		if !setDiskImageStatus(task, generation, diskImageChecking) {
+			return false, transfer.ErrRecoveryStale
+		}
+		status, verifyErr := verifyDiskImage(ctx, file)
+		if ctx.Err() != nil || !setDiskImageStatus(task, generation, status) {
+			return false, transfer.ErrRecoveryStale
+		}
+		if verifyErr != nil {
+			return false, verifyErr
+		}
+		finalProgress.DiskImageStatus = status
+	}
 	permit, err := d.verifiedCompleter.Complete(ctx, directory, file, current, transfer.VerifiedCompletionHooks{
 		CheckRun: lease.Check,
 		Fence: func(callCtx context.Context, fn func() error) error {

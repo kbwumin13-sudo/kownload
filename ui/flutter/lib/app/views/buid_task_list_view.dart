@@ -782,7 +782,8 @@ class BuildTaskListView extends GetView {
                             ),
                             const SizedBox(height: 3),
                             if (task.status == Status.error &&
-                                httpCompletion == null)
+                                httpCompletion == null &&
+                                task.diskImageStatusKey == null)
                               MacTaskFailure(
                                   key: ValueKey('failure-${task.id}'),
                                   task: task,
@@ -801,7 +802,7 @@ class BuildTaskListView extends GetView {
                                   if (macList!.recovery.stage(task)
                                       case final stage?)
                                     stage.label,
-                                  status,
+                                  task.diskImageStatusKey?.tr ?? status,
                                   getProgressText(),
                                   getPercentText(),
                                   if (isRunning())
