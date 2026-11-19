@@ -91,14 +91,17 @@ func TestMediaToolStatusBoundsAndCheckFailures(t *testing.T) {
 	noisy := toolFixture(t, dir, "ffmpeg", "#!/bin/sh\nprintf '%s\\n' 'ffmpeg version 8.2.1'; printf '%4500s' 'private output'")
 	start := time.Now()
 	status, err := CheckTools(context.Background(), model.Config{
-		YtDlpPath: slow, FFmpegPath: noisy, JsRuntimePath: noExec,
+		YtDlpPath: slow, FFmpegPath: filepath.Join(dir, "missing-ffmpeg"), JsRuntimePath: noExec,
 	})
 	if err != nil || time.Since(start) > 4*time.Second {
 		t.Fatalf("query should return quickly: %+v (%v)", status, err)
 	}
 	if status.YtDlp.State != toolTimedOut || status.Node.State != toolNotRunnable ||
-		status.Node.Enabled || status.FFmpeg.State != toolUnrecognized || status.FFmpeg.Version != "" {
+		status.Node.Enabled || status.FFmpeg.State != toolMissing {
 		t.Fatalf("timeout, permission, and unrecognized output: %+v", status)
+	}
+	if version, state := readToolVersion(context.Background(), 5*time.Second, noisy, ffmpegVersion, "-version"); state != toolUnrecognized || version != "" {
+		t.Fatalf("noisy output escaped the limit: %q %s", version, state)
 	}
 
 	hangingPipe := toolFixture(t, dir, "descendant", "#!/bin/sh\n(sleep 0.5) &\necho 2026.10.26")

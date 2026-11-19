@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GopeedLab/gopeed/internal/protocol/media"
 	"github.com/GopeedLab/gopeed/pkg/download"
 	"github.com/GopeedLab/gopeed/pkg/rest/model"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -153,6 +154,9 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
 	if startCfg.Network == "unix" {
 		registerMediaToolRoute(r, core)
+		if managed := media.NewManagedYtDlp(startCfg.StorageDir, startCfg.Address); managed != nil {
+			registerManagedYtDlpRoutes(r, core, managed)
+		}
 	}
 	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(browserHandoffHandler(core))
 	r.Methods(http.MethodGet).Path("/api/v1/netdisk/providers").HandlerFunc(NetdiskProviders)
