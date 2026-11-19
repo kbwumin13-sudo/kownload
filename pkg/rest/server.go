@@ -151,6 +151,9 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	registerVerifiedHTTPEventRoutes(r, verifiedHTTPEventsAdapter{core: Downloader})
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
+	if startCfg.Network == "unix" {
+		registerMediaToolRoute(r, core)
+	}
 	r.Methods(http.MethodGet, http.MethodPost).Path("/api/v1/browser/handoff").HandlerFunc(browserHandoffHandler(core))
 	r.Methods(http.MethodGet).Path("/api/v1/netdisk/providers").HandlerFunc(NetdiskProviders)
 	r.Methods(http.MethodPost).Path("/api/v1/netdisk/browser/request").HandlerFunc(NetdiskBrowserRequest)

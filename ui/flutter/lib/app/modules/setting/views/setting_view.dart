@@ -9,7 +9,6 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:gopeed/app/views/copy_button.dart';
 import 'package:intl/intl.dart';
-import 'package:path/path.dart' as path;
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:gopeed/macos/mac_widgets.dart';
@@ -17,6 +16,7 @@ import 'package:gopeed/macos/mac_panel.dart';
 
 import '../../../../api/api.dart' as api;
 import '../../../../api/model/downloader_config.dart';
+import '../../../../api/model/media_tools_status.dart';
 import '../../../../core/common/start_config.dart';
 import '../../../../i18n/message.dart';
 import '../../../../util/input_formatter.dart';
@@ -35,6 +35,7 @@ import '../../../views/text_button_loading.dart';
 import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
 import 'mac_settings_view.dart';
+import 'mac_media_tools_editor.dart';
 import 'api_endpoint_draft.dart';
 import 'path_policy_editor.dart';
 import '../../../../api/model/path_policy_config.dart';
@@ -48,9 +49,15 @@ class SettingView extends GetView<SettingController> {
   final Rx<DownloaderConfig>? draft;
   final Rx<StartConfig>? startDraft;
   final Future<void> Function(String)? webhookTest;
+  final Future<MediaToolsStatus> Function()? mediaToolsProbe;
 
   const SettingView(
-      {Key? key, this.section, this.draft, this.startDraft, this.webhookTest})
+      {Key? key,
+      this.section,
+      this.draft,
+      this.startDraft,
+      this.webhookTest,
+      this.mediaToolsProbe})
       : assert((section == null) == (draft == null)),
         assert(section != 'api' || startDraft != null),
         super(key: key);
@@ -72,7 +79,8 @@ class SettingView extends GetView<SettingController> {
               section: section,
               draft: draft,
               startDraft: startDraft,
-              webhookTest: webhookTest));
+              webhookTest: webhookTest,
+              mediaToolsProbe: mediaToolsProbe));
     }
     final appController = Get.find<AppController>();
     final downloaderCfg = draft ?? appController.downloaderConfig;
@@ -1887,33 +1895,13 @@ class SettingView extends GetView<SettingController> {
     }
 
     // The macOS sheet reuses these exact editors against an in-memory draft.
-    // No legacy page, startup option, or backend write runs inside the sheet.
+    // These editors do not persist changes until the sheet saves the draft.
     if (section != null) {
       return Obx(() {
-        final effectiveMedia = downloaderCfg.value.protocolConfig.media;
         final rows = switch (section) {
           'media' => [
-              buildYtDlpPath(),
-              buildFfmpegPath(),
-              buildJsRuntimePath(),
+              MacMediaToolsEditor(draft: mediaConfig, probe: mediaToolsProbe),
               buildMediaConnections(),
-              Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('有效路径（按配置规则显示，尚未探测文件）'),
-                      Text(
-                          'yt-dlp：${effectiveMedia.ytDlpPath.isEmpty ? 'yt-dlp（PATH）' : effectiveMedia.ytDlpPath}',
-                          key: const ValueKey('effective-yt-dlp')),
-                      Text(
-                          'ffmpeg：${path.isAbsolute(effectiveMedia.ffmpegPath) ? effectiveMedia.ffmpegPath : '/opt/homebrew/bin/ffmpeg'}',
-                          key: const ValueKey('effective-ffmpeg')),
-                      Text(
-                          'Node：${effectiveMedia.jsRuntimePath == null ? '/opt/homebrew/bin/node（默认）' : path.isAbsolute(effectiveMedia.jsRuntimePath!) ? effectiveMedia.jsRuntimePath : '未显式启用，需填写绝对路径'}',
-                          key: const ValueKey('effective-node')),
-                    ]),
-              ),
             ],
           'http' => [
               buildHttpUa(),

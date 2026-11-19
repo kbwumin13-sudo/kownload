@@ -5,10 +5,12 @@ import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart' as getx;
+import 'package:path/path.dart' as path;
 
 import '../app/routes/app_pages.dart';
 import '../database/database.dart';
 import '../database/task_batch_journal.dart';
+import '../identity/app_identity.dart';
 import '../util/util.dart';
 import 'model/create_task.dart';
 import 'model/browser_handoff.dart';
@@ -25,6 +27,7 @@ import 'model/task.dart';
 import 'model/task_stats.dart';
 import 'model/task_batch_catalog.dart';
 import 'model/http_recovery.dart';
+import 'model/media_tools_status.dart';
 import 'model/update_check_extension_resp.dart';
 import 'model/update_extension_settings.dart';
 
@@ -552,6 +555,34 @@ Future<DownloaderConfig> getConfig() async {
 
 Future<void> putConfig(DownloaderConfig config) async {
   return _parse(() => _client.dio.put("api/v1/config", data: config), null);
+}
+
+ActiveApiSnapshot? get activeMediaToolsSnapshot {
+  final snapshot = activeApiSnapshot;
+  if (!Util.isMacos() ||
+      snapshot == null ||
+      snapshot.network != 'unix' ||
+      snapshot.taskBatchRoute?.supported != true ||
+      snapshot.address != path.join(Util.getStorageDir(), AppIdentity.apiSocket)) {
+    return null;
+  }
+  return snapshot;
+}
+
+Future<MediaToolsStatus> getMediaToolsStatus(ActiveApiSnapshot snapshot) async {
+  if (!identical(snapshot, activeMediaToolsSnapshot)) {
+    throw StateError('media_tools_route_unavailable');
+  }
+  final status = await _parse(
+      () => snapshot._transport.dio.get('/api/v1/media/tools/v1/status',
+          options: Options(
+              followRedirects: false,
+              receiveTimeout: const Duration(seconds: 5))),
+      (value) => MediaToolsStatus.fromJson(value as Map));
+  if (!identical(snapshot, activeMediaToolsSnapshot)) {
+    throw StateError('media_tools_route_changed');
+  }
+  return status;
 }
 
 Future<String> installExtension(InstallExtension installExtension) async {
