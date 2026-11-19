@@ -19,13 +19,7 @@ const mediaToolPath = "/api/v1/media/tools/v1/status"
 func registerMediaToolRoute(router *mux.Router, core *download.Downloader) {
 	active := make(chan struct{}, 1)
 	router.Methods(http.MethodGet).Path(mediaToolPath).HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		if !privateMediaSocket(r) || r.Header.Get("Origin") != "" {
-			WriteStatusJson(w, http.StatusForbidden, model.NewErrorResult("local_media_tools_required"))
-			return
-		}
-		if r.URL.RawQuery != "" || r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
-			WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_arguments"))
+		if !authorizeMediaToolsRequest(w, r) {
 			return
 		}
 		select {
@@ -46,6 +40,19 @@ func registerMediaToolRoute(router *mux.Router, core *download.Downloader) {
 		}
 		WriteStatusJson(w, http.StatusServiceUnavailable, model.NewErrorResult("media_tools_unavailable"))
 	})
+}
+
+func authorizeMediaToolsRequest(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Set("Cache-Control", "no-store")
+	if !privateMediaSocket(r) || r.Header.Get("Origin") != "" {
+		WriteStatusJson(w, http.StatusForbidden, model.NewErrorResult("local_media_tools_required"))
+		return false
+	}
+	if r.URL.RawQuery != "" || r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+		WriteStatusJson(w, http.StatusBadRequest, model.NewErrorResult("invalid_arguments"))
+		return false
+	}
+	return true
 }
 
 func privateMediaSocket(r *http.Request) bool {

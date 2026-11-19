@@ -597,6 +597,39 @@ Future<MediaToolsStatus> getMediaToolsStatus(ActiveApiSnapshot snapshot) async {
   return status;
 }
 
+Future<ManagedYtDlpState> managedYtDlpRequest(
+    ActiveApiSnapshot snapshot, ManagedYtDlpAction action) async {
+  if (!identical(snapshot, activeMediaToolsSnapshot)) {
+    throw const ManagedYtDlpException('managed_ytdlp_unavailable');
+  }
+  const route = '/api/v1/media/tools/v1/managed/yt-dlp';
+  final (method, endpoint) = switch (action) {
+    ManagedYtDlpAction.read => ('GET', route),
+    ManagedYtDlpAction.update => ('POST', '$route/update'),
+    ManagedYtDlpAction.rollback => ('POST', '$route/rollback'),
+  };
+  Response<dynamic> response;
+  try {
+    response = await snapshot._transport.dio.request(endpoint,
+        options: Options(
+            method: method,
+            followRedirects: false,
+            receiveTimeout: const Duration(seconds: 95)));
+  } on DioException catch (error) {
+    if (error.response == null) rethrow;
+    response = error.response!;
+  }
+  if (!identical(snapshot, activeMediaToolsSnapshot) || response.data is! Map) {
+    throw const ManagedYtDlpException('managed_ytdlp_unavailable');
+  }
+  final result = response.data as Map;
+  if (result['code'] != 0 || result['data'] is! Map) {
+    throw ManagedYtDlpException(
+        result['msg'] as String? ?? 'managed_ytdlp_unavailable');
+  }
+  return ManagedYtDlpState.fromJson(result['data'] as Map);
+}
+
 Future<String> installExtension(InstallExtension installExtension) async {
   return _parse<String>(
       () => _client.dio.post("api/v1/extensions", data: installExtension),

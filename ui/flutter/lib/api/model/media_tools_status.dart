@@ -82,3 +82,29 @@ class MediaToolsStatus {
         bridge: MediaBridgeStatus.fromJson(value['bridge'] as Map),
       );
 }
+
+enum ManagedYtDlpAction { read, update, rollback }
+
+class ManagedYtDlpState {
+  final String entry, activeVersion, previousVersion;
+  final bool inUse;
+
+  const ManagedYtDlpState(
+      {this.entry = '',
+      this.activeVersion = '',
+      this.previousVersion = '',
+      this.inUse = false});
+
+  factory ManagedYtDlpState.fromJson(Map value) => ManagedYtDlpState(
+        entry: value['entry'] as String,
+        activeVersion: value['activeVersion'] as String,
+        previousVersion: value['previousVersion'] as String,
+        inUse: value['inUse'] as bool,
+      );
+}
+
+class ManagedYtDlpException implements Exception {
+  final String code;
+
+  const ManagedYtDlpException(this.code);
+}
