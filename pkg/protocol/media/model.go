@@ -41,6 +41,7 @@ type ReqExtra struct {
 	ContextID               string            `json:"contextId,omitempty"`
 	SourceType              string            `json:"sourceType,omitempty"`
 	ExpectedMediaID         string            `json:"expectedMediaId,omitempty"`
+	PageCandidateID         string            `json:"pageCandidateId,omitempty"`
 	// Empty preserves the behavior of tasks created before explicit track intent.
 	MediaKind string `json:"mediaKind,omitempty"`
 }
@@ -70,22 +71,30 @@ type Format struct {
 	SourceURL   string  `json:"sourceUrl,omitempty"`
 }
 
+type PageCandidate struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Thumbnail string  `json:"thumbnail,omitempty"`
+	Duration  float64 `json:"duration,omitempty"`
+}
+
 type Inspection struct {
-	ContextURLs []string   `json:"contextUrls"`
-	Thumbnail   string     `json:"thumbnail"`
-	Subtitles   []Subtitle `json:"subtitles"`
-	ID          string     `json:"id,omitempty"`
-	MediaID     string     `json:"mediaId,omitempty"`
-	SourceURL   string     `json:"sourceUrl,omitempty"`
-	WebpageURL  string     `json:"webpageUrl,omitempty"`
-	ManifestURL string     `json:"manifestUrl,omitempty"`
-	Protocol    string     `json:"protocol,omitempty"`
-	Title       string     `json:"title"`
-	Duration    float64    `json:"duration"`
-	Formats     []Format   `json:"formats"`
-	Supported   bool       `json:"supported"`
-	Reason      string     `json:"reason,omitempty"`
-	IsLive      bool       `json:"isLive"`
+	ContextURLs []string        `json:"contextUrls"`
+	Thumbnail   string          `json:"thumbnail"`
+	Subtitles   []Subtitle      `json:"subtitles"`
+	ID          string          `json:"id,omitempty"`
+	MediaID     string          `json:"mediaId,omitempty"`
+	SourceURL   string          `json:"sourceUrl,omitempty"`
+	WebpageURL  string          `json:"webpageUrl,omitempty"`
+	ManifestURL string          `json:"manifestUrl,omitempty"`
+	Protocol    string          `json:"protocol,omitempty"`
+	Title       string          `json:"title"`
+	Duration    float64         `json:"duration"`
+	Formats     []Format        `json:"formats"`
+	Candidates  []PageCandidate `json:"candidates,omitempty"`
+	Supported   bool            `json:"supported"`
+	Reason      string          `json:"reason,omitempty"`
+	IsLive      bool            `json:"isLive"`
 }
 
 type Stats struct {

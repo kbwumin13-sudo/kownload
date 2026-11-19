@@ -151,6 +151,7 @@ func BuildServer(startCfg *model.StartConfig) (*http.Server, net.Listener, error
 	registerPathOperationRoutes(r, core)
 	registerVerifiedHTTPEventRoutes(r, verifiedHTTPEventsAdapter{core: Downloader})
 	r.Methods(http.MethodPost).Path("/api/v1/resolve").HandlerFunc(Resolve)
+	r.Methods(http.MethodDelete).Path("/api/v1/resolve/{id}").HandlerFunc(DiscardHTTPResolve)
 	r.Methods(http.MethodPost).Path("/api/v1/media/inspect").HandlerFunc(InspectMedia)
 	if startCfg.Network == "unix" {
 		registerMediaToolRoute(r, core)

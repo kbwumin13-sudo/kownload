@@ -18,6 +18,7 @@ import '../../../../api/api.dart';
 import '../../../../api/model/create_task.dart';
 import '../../../../api/model/create_task_batch.dart';
 import '../../../../api/model/downloader_config.dart';
+import '../../../../api/model/media_inspection.dart';
 import '../../../../api/model/options.dart';
 import '../../../../api/model/request.dart';
 import '../../../../api/model/resolve_result.dart';
@@ -59,6 +60,7 @@ import 'netdisk_view.dart';
 import 'batch_preview_dialog.dart';
 import 'create_path_intent.dart';
 import 'browser_media_view.dart';
+import 'web_media_preview.dart';
 import 'http_checksum_input.dart';
 import '../../../../../api/verified_http_api.dart';
 
@@ -69,6 +71,9 @@ class CreateView extends StatefulWidget {
   final NetdiskBrowserTool? netdiskBrowserTool;
   final Future<String> Function(CreateTask)? taskCreator;
   final Future<ResolveResult> Function(ResolveTask)? taskResolver;
+  final Future<MediaInspection> Function(ResolveTask, CancelToken)?
+      webMediaInspector;
+  final Future<void> Function(String)? resolvedTaskDiscarder;
   const CreateView(
       {super.key,
       this.batchJournal,
@@ -76,7 +81,9 @@ class CreateView extends StatefulWidget {
       this.netdiskApi,
       this.netdiskBrowserTool,
       this.taskCreator,
-      this.taskResolver});
+      this.taskResolver,
+      this.webMediaInspector,
+      this.resolvedTaskDiscarder});
   Protocol? parseProtocol(String url) => _parseProtocol(url);
   @override
   State<CreateView> createState() => CreateViewState();
@@ -103,6 +110,7 @@ class _ManualBatchAttempt {
   final HttpPathIntent? pathIntent;
   final bool protocolDialog;
   final bool? previewFromBrowser;
+  final String? webMediaDraft;
   final int pathDraftEpoch, pathRevision;
   final List<int> selection;
   final CreateTask? captureRequest;
@@ -117,6 +125,7 @@ class _ManualBatchAttempt {
       this.pathIntent,
       this.protocolDialog = false,
       this.previewFromBrowser,
+      this.webMediaDraft,
       this.pathDraftEpoch = 0,
       this.pathRevision = 0,
       this.selection = const [],
@@ -341,6 +350,7 @@ class CreateViewState extends State<CreateView> {
   String _manualObservedText = '';
   bool _manualBusy = false;
   bool _batchPreviewOpen = false;
+  bool _webMediaOpen = false;
   Future<bool> Function(BatchPreviewDraft)? _browserBatchPreview;
   final _manualNotice = RxnString();
 
@@ -377,6 +387,13 @@ class CreateViewState extends State<CreateView> {
     if (!_manualReferenceCurrent(attempt, epoch)) return false;
     if (attempt.captureRequest != null &&
         !identical(attempt.captureRequest, _panelRequest)) return false;
+    if (attempt.webMediaDraft case final draft?) {
+      return _pathPolicyOptIn &&
+          _expectedSha256Controller.text.trim().isEmpty &&
+          attempt.pathDraftEpoch == _pathDraftEpoch &&
+          attempt.pathRevision == _pathRevision &&
+          draft == _webMediaDraft(_urlController.text.trim());
+    }
     if (attempt.previewFromBrowser != null) {
       if (attempt.input != _urlController.text.trim() ||
           attempt.pathDraftEpoch != _pathDraftEpoch ||
@@ -590,6 +607,7 @@ class CreateViewState extends State<CreateView> {
       CreateTaskBatch? previewBatch,
       bool? previewFromBrowser,
       bool protocolDialog = false,
+      String? webMediaDraft,
       String? operationId}) async {
     if (_manualBatch != null) {
       await _queryManualBatch();
@@ -686,6 +704,7 @@ class CreateViewState extends State<CreateView> {
           pathIntent: pathRequest?.pathIntent,
           protocolDialog: protocolDialog,
           previewFromBrowser: previewFromBrowser,
+          webMediaDraft: webMediaDraft,
           pathDraftEpoch: _pathDraftEpoch,
           pathRevision: _pathRevision,
           selection: List.unmodifiable(opts.selectFiles),
@@ -874,6 +893,7 @@ class CreateViewState extends State<CreateView> {
           MacPanel.visible.value &&
           MacPanel.presentation.value == 'panel' &&
           !_batchPreviewOpen &&
+          !_webMediaOpen &&
           !_netdiskOpen.value &&
           _onboarding == null) {
         _inputFocus.requestFocus();
@@ -1539,6 +1559,10 @@ class CreateViewState extends State<CreateView> {
                           if (!Util.isMacos()) torrentButton,
                           if (!Util.isMacos()) historyButton,
                         ])),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: _webMediaPreviewAction(),
+                    ),
                     Padding(
                       padding: Util.isMacos()
                           ? const EdgeInsets.only(top: 12)
@@ -2311,6 +2335,7 @@ class CreateViewState extends State<CreateView> {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted &&
                         !_batchPreviewOpen &&
+                        !_webMediaOpen &&
                         !_netdiskOpen.value &&
                         _onboarding == null &&
                         Get.isDialogOpen != true) {
@@ -2515,6 +2540,7 @@ class CreateViewState extends State<CreateView> {
                                           () =>
                                               _panelShowCompleted.value = true),
                                       const Spacer(),
+                                      _webMediaPreviewAction(colors: c),
                                       _panelIcon(
                                           c,
                                           CupertinoIcons.doc_on_clipboard,
@@ -3138,10 +3164,155 @@ class CreateViewState extends State<CreateView> {
     }
   }
 
-  Future<void> _doConfirm() async {
+  bool _canPreviewWebMedia(String input) {
+    final uri = Uri.tryParse(input);
+    return uri != null &&
+        const {'http', 'https'}.contains(uri.scheme) &&
+        uri.host.isNotEmpty &&
+        uri.userInfo.isEmpty &&
+        !input.contains(RegExp(r'\s')) &&
+        parseProtocol(input) == Protocol.http &&
+        _panelRequest == null &&
+        _originalRequest == null &&
+        _netdiskRequest.value == null &&
+        _manualBatch == null &&
+        controller.fileDataUri.isEmpty &&
+        Get.find<AppController>().pendingUpdateTask.value == null &&
+        _expectedSha256Controller.text.trim().isEmpty;
+  }
+
+  Widget _webMediaPreviewAction({MacColors? colors}) => ListenableBuilder(
+        listenable: Listenable.merge(
+            [_urlController, _expectedSha256Controller]),
+        builder: (context, _) => Obx(() {
+          final busy = controller.isConfirming.value;
+          if (!_canPreviewWebMedia(_urlController.text.trim())) {
+            return const SizedBox.shrink();
+          }
+          const key = ValueKey('preview-web-media');
+          final action = busy ? null : () => _doConfirm(previewWebMedia: true);
+          final label = 'webMediaPreview'.tr;
+          if (colors == null) {
+            return TextButton(key: key, onPressed: action, child: Text(label));
+          }
+          return CupertinoButton(
+              key: key,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              minimumSize: const Size(0, 28),
+              onPressed: action,
+              child: Text(label,
+                  style: TextStyle(fontSize: 11, color: colors.secondary)));
+        }),
+      );
+
+  String _webMediaDraft(String url) => jsonEncode([
+        _pathPreviewFingerprint(),
+        _requestForUrl(url).toJson(),
+      ]);
+
+  Request _webMediaRequest(Request source,
+          {String? candidateId, String? expectedMediaId,
+          MediaFormatChoice? format}) => Request(
+        url: source.url,
+        protocol: 'media',
+        proxy: source.proxy,
+        skipVerifyCert: source.skipVerifyCert,
+        extra: {
+          'sourceType': 'pasted-page',
+          'sourcePage': source.url,
+          if (source.extra case ReqExtraHttp(:final header)) 'header': header,
+          if (candidateId != null) 'pageCandidateId': candidateId,
+          if (expectedMediaId?.isNotEmpty == true)
+            'expectedMediaId': expectedMediaId,
+          if (format != null) ...{
+            'format': format.id,
+            'container': format.container,
+            'mediaKind': format.mediaKind,
+          },
+        },
+      );
+
+  Future<void> _discardWebPage(String id, ActiveApiSnapshot? snapshot) async {
+    try {
+      if (widget.resolvedTaskDiscarder case final discard?) {
+        await discard(id);
+      } else if (snapshot != null) {
+        await discardResolvedTask(id, snapshot: snapshot);
+      }
+    } catch (_) {
+      // The service may have already released the response or disconnected.
+    }
+  }
+
+  Future<void> _previewWebMedia(Request source, Options opts, String draft,
+      bool Function() current, ActiveApiSnapshot? snapshot,
+      {ResolveResult? page}) async {
+    var usedPage = false;
+    try {
+      if (!current()) return;
+      final mac = Util.isMacos();
+      final previousHeight = MacPanel.height;
+      WebMediaSelection? selected;
+      _webMediaOpen = true;
+      try {
+        if (mac) await MacPanel.resize(470);
+        if (!current()) return;
+        Future<WebMediaSelection?> show() => showDialog<WebMediaSelection>(
+              context: context,
+              builder: (_) => WebMediaPreview(
+                canSavePage: page != null,
+                inspect: (candidateId, cancel) {
+                  final task = ResolveTask(
+                      req: _webMediaRequest(source, candidateId: candidateId));
+                  return widget.webMediaInspector?.call(task, cancel) ??
+                      inspectWebMedia(task, cancel, snapshot: snapshot);
+                },
+              ),
+            );
+        selected = await (mac ? MacPanel.transient(show) : show());
+      } finally {
+        _webMediaOpen = false;
+        if (mac && mounted) await MacPanel.resize(previousHeight);
+      }
+      if (selected == null || !current()) return;
+      final format = selected.format;
+      if (format == null) {
+        if (page == null) return;
+        usedPage = true;
+        await _createTask(CreateTask(rid: page.id, opts: opts));
+        await _completeCreate();
+        return;
+      }
+      final req = _webMediaRequest(source,
+          candidateId: selected.candidateId,
+          expectedMediaId: selected.expectedMediaId,
+          format: format);
+      final mediaOpts = Options(name: opts.name, path: opts.path);
+      if (_pathPolicyOptIn) {
+        final prepared = HttpPathCreateRequest(
+            CreateTaskBatch(reqs: [CreateTaskBatchItem(req: req, opts: mediaOpts)]),
+            pathIntent: HttpPathIntent(
+                path: _pathIntent.path, origin: _pathIntent.wireOrigin),
+            variant: PathCreateVariant.media);
+        await _submitManualBatch(const [], mediaOpts,
+            preparedRequest: prepared, webMediaDraft: draft);
+      } else {
+        await _createTask(CreateTask(req: req, opts: mediaOpts));
+        await _completeCreate();
+      }
+    } finally {
+      if (page != null && !usedPage) {
+        unawaited(_discardWebPage(page.id, snapshot));
+      }
+    }
+  }
+
+  Future<void> _doConfirm({bool previewWebMedia = false}) async {
     if (controller.isConfirming.value) {
       return;
     }
+    final initialInput = _urlController.text.trim();
+    if (previewWebMedia && !_canPreviewWebMedia(initialInput)) return;
     final textBatch = Util.isMacos() && _isManualTextBatch(_urlController.text);
     final pendingPreview = _manualBatch;
     final queryPreview = pendingPreview?.previewFromBrowser != null &&
@@ -3180,6 +3351,23 @@ class CreateViewState extends State<CreateView> {
           _netdiskRequest.value != null ||
           Get.find<AppController>().pendingUpdateTask.value != null;
       if (hasInput && (!await _ensureMacOnboarding() || !mounted)) return;
+      if (previewWebMedia) {
+        if (_urlController.text.trim() != initialInput ||
+            !_canPreviewWebMedia(initialInput)) return;
+        final request = _requestForUrl(initialInput);
+        final opt = Options(name: _renameController.text, path: _pathController.text);
+        final snapshot = activeApiSnapshot;
+        final epoch = _manualEpoch;
+        final draft = _webMediaDraft(initialInput);
+        Database.instance.saveCreateHistory(initialInput);
+        await _previewWebMedia(request, opt, draft,
+            () => mounted && epoch == _manualEpoch &&
+                activeApiSnapshot == snapshot &&
+                _canPreviewWebMedia(_urlController.text.trim()) &&
+                _webMediaDraft(initialInput) == draft,
+            snapshot);
+        return;
+      }
       _checkCaptureCompletion();
       final handoffRequest = _panelRequest;
       if (handoffRequest?.browserHandoff != null &&
@@ -3357,11 +3545,24 @@ class CreateViewState extends State<CreateView> {
           }));
           _completeCreate();
         } else {
-          final rr = await (widget.taskResolver ?? resolve)(ResolveTask(
-            req: _requestForUrl(submitUrl),
-            opts: opt,
-          ));
+          final request = _requestForUrl(submitUrl);
+          final eligible = netdiskInputs.isEmpty &&
+              !_pathPolicyOptIn && _canPreviewWebMedia(submitUrl);
+          final snapshot = activeApiSnapshot;
+          final epoch = _manualEpoch;
+          final draft = eligible ? _webMediaDraft(submitUrl) : null;
+          final rr = await (widget.taskResolver ?? resolve)(
+              ResolveTask(req: request, opts: opt));
           _checkCaptureCompletion();
+          if (draft != null && rr.httpInlineHtml && rr.id.isNotEmpty) {
+            await _previewWebMedia(request, opt, draft,
+                () => mounted && epoch == _manualEpoch &&
+                    activeApiSnapshot == snapshot &&
+                    _canPreviewWebMedia(_urlController.text.trim()) &&
+                    _webMediaDraft(submitUrl) == draft,
+                snapshot, page: rr);
+            return;
+          }
           await _showResolveDialog(rr);
         }
       }

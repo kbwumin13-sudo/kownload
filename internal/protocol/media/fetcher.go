@@ -2,6 +2,7 @@ package media
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -105,6 +106,7 @@ type Fetcher struct {
 	format        string
 	phase         string
 	tracks        map[string]trackProgress
+	pageVideo     *videoInfo
 }
 
 func (f *Fetcher) Setup(ctl *controller.Controller) {
@@ -180,7 +182,7 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 			return errors.New("DRM media is unsupported")
 		}
 	}
-	if err := validateContainer(extra.Container, info); err != nil {
+	if err := validateContainer(extra.Container, info); err != nil && (extra.PageCandidateID == "" || extra.Container != info.Ext) {
 		return err
 	}
 	if err := validateSelectedSubtitles(extra, info); err != nil {
@@ -257,6 +259,10 @@ func (f *Fetcher) resolve(ctx context.Context, req *base.Request, opts *base.Opt
 	f.identity = identity
 	f.needsResolve = false
 	f.meta = &fetcher.FetcherMeta{Req: req, Opts: opts, Res: &base.Resource{Files: []*base.FileInfo{{Name: name, Size: size}}, Size: size}}
+	f.pageVideo = nil
+	if extra.PageCandidateID != "" {
+		f.pageVideo = info
+	}
 	f.total = size
 	f.format = info.FormatID
 	if extra.Format != "" {
@@ -429,6 +435,7 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	}
 	f.mu.Lock()
 	target := f.meta.SingleFilepath()
+	pageVideo := f.pageVideo
 	execution, strict := f.pathExecution, f.pathOwner != "" || f.pathLayout != nil
 	workPrefix := f.workPrefix
 	if workPrefix == "" {
@@ -462,6 +469,29 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 	if err != nil {
 		return err
 	}
+	commandReq, commandExtra := req, extra
+	var pageInput []byte
+	if extra.PageCandidateID != "" {
+		if pageVideo == nil {
+			// Restored tasks retain the selection ID and selected format, not a
+			// stale payload. Re-identify the direct file before opening it.
+			inspectCtx, stopInspect := context.WithTimeout(ctx, 45*time.Second)
+			var inspection *model.Inspection
+			pageVideo, inspection, err = inspectInfo(inspectCtx, req, ctl, cfg)
+			stopInspect()
+			if err != nil {
+				return err
+			}
+			if !inspection.Supported {
+				return errors.New(inspection.Reason)
+			}
+		}
+		commandReq, commandExtra, pageInput, err = pageVideoInput(req, extra, pageVideo)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, directPageFileKey{}, true)
+	}
 	if err := mediaRecoveryCheck(ctx); err != nil {
 		return err
 	}
@@ -470,7 +500,7 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 			return err
 		}
 	}
-	args, cleanup, err := requestArgs(req, extra, ctl, cfg)
+	args, cleanup, err := requestArgs(commandReq, commandExtra, ctl, cfg)
 	if err != nil {
 		return err
 	}
@@ -486,18 +516,26 @@ func (f *Fetcher) startMediaRun(ctx context.Context, cancel context.CancelFunc, 
 		return err
 	}
 	args = append(args, subArgs...)
-	args = append(args, formatArgs(extra)...)
+	args = append(args, formatArgs(commandExtra)...)
 	args = append(args, "--no-simulate", "--continue", "--newline", "--progress", "--concurrent-fragments", strconv.Itoa(cfg.Connections))
 	args = append(args, "--progress-template", "download:media-progress:%(info.format_id)j\t%(progress)j", "--print", "before_postprocess:media-merge:{}", "--print", "after_move:media-final:%(filepath)j")
 	if strict {
-		args = append(args, "--paths", "home:"+execution.WorkPath(), "--paths", "temp:"+execution.WorkPath(), "-o", strings.ReplaceAll(exactOutput, "%", "%%"), req.URL)
+		args = append(args, "--paths", "home:"+execution.WorkPath(), "--paths", "temp:"+execution.WorkPath(), "-o", strings.ReplaceAll(exactOutput, "%", "%%"))
 	} else {
-		args = append(args, "-o", strings.ReplaceAll(workPrefix, "%", "%%")+".%(ext)s", req.URL)
+		args = append(args, "-o", strings.ReplaceAll(workPrefix, "%", "%%")+".%(ext)s")
 	}
-	cmd, commandCleanup, err := mediaCommand(mediaWorkContext(ctx, "media/download"), cfg, req, extra, args)
+	if pageInput == nil {
+		args = append(args, req.URL)
+	} else {
+		args = append(args, "--load-info-json", "-")
+	}
+	cmd, commandCleanup, err := mediaCommand(mediaWorkContext(ctx, "media/download"), cfg, commandReq, commandExtra, args)
 	if err != nil {
 		cleanup()
 		return err
+	}
+	if pageInput != nil {
+		cmd.Stdin = bytes.NewReader(pageInput)
 	}
 	if strict {
 		cmd.Dir = execution.WorkPath()

@@ -1,13 +1,15 @@
 (() => {
   const KEY = Symbol.for('gopeed.media.deepSearch');
   window[KEY]?.stop?.();
-  const SINGLE = 1024 * 1024, TOTAL = 4 * SINGLE, LIMIT = 64;
+  const SINGLE = 1024 * 1024, TOTAL = 4 * SINGLE, LIMIT = 64, PREFIX = 4096;
+  const sourcePage = window.location?.href;
   const searchId = window.__gopeedMediaSearchId;
   const state = {active:true,used:0,urls:new Set(),stop:null,
     searchId:typeof searchId === 'string' && searchId.length > 0 && searchId.length <= 128 ? searchId : ''};
   const readers = new Set();
-  // Metadata only: never retain or inspect media bytes. Missing/ambiguous evidence
-  // (including transmuxing, workers and pre-hook sources) stays manual.
+  const currentSearch = () => state.active && window.location?.href === sourcePage;
+  // Playback provenance tracks buffer identity without copying media bytes.
+  // Ambiguous evidence (including transmuxing, workers and pre-hook sources) stays manual.
   const MAX_TRACK = 512;
   let tracked = 0, patched = 0;
   const ranges = new WeakMap(), parents = new WeakMap(), objectUrls = new WeakMap();
@@ -151,7 +153,12 @@
   }
   const mediaPath = url => /\.(?:m3u8|mpd|mp4|m4v|mov|webm|mp3|m4a|aac|flac|ogg)(?:$|[?#])/i.test(url);
   const manifestPath = url => /\.(?:m3u8|mpd)(?:$|[?#])/i.test(url);
-  const sensitivePath = url => /(?:^|\/)(?:key|keys|license|drm)(?:[\/._-]|$)|\.key(?:$|[?#])/i.test(new URL(url).pathname);
+  function sensitivePath(url) {
+    try {
+      const path = decodeURIComponent(new URL(url).pathname).replaceAll('\\','/');
+      return /(?:^|\/)(?:keys?|licenses?|drm)(?:[\/._-]|$)|\.key$/i.test(path);
+    } catch { return true; }
+  }
   const manifestMime = mime => /^(?:application\/(?:vnd\.apple\.mpegurl|x-mpegurl|dash\+xml)|audio\/(?:mpegurl|x-mpegurl))\b/i.test(mime);
   const jsonMime = mime => /(?:^|\/)json\b|\+json\b/i.test(mime);
   function category(url,mime) {
@@ -162,11 +169,14 @@
     // Explicit, bounded search must not depend on sites naming APIs "player".
     // Only media references are emitted; arbitrary JSON state is never retained.
     if (jsonMime(mime)) return 'json';
+    const type = mime.split(';',1)[0].trim().toLowerCase();
+    const pathname = new URL(url).pathname.replace(/%2e/gi,'.');
+    if (state.searchId && (!type || type === 'application/octet-stream') && !/\.[^/]+\/?$/.test(pathname)) return 'opaque';
     return '';
   }
   function publish(url,mime,relatedUrls=[],contextUrls=[],more={}) {
     url = safeUrl(url);
-    if (!state.active || !url || sensitivePath(url) || (!more.mediaObjectUrl && state.urls.has(url)) || (!state.urls.has(url) && state.urls.size >= LIMIT)) return;
+    if (!currentSearch() || !url || sensitivePath(url) || (!more.mediaObjectUrl && state.urls.has(url)) || (!state.urls.has(url) && state.urls.size >= LIMIT)) return;
     state.urls.add(url);
     window.postMessage({type:'GOPEED_MEDIA_CANDIDATE',url,mime:mime || '',relatedUrls,contextUrls,searchId:state.searchId,...more},'*');
   }
@@ -252,37 +262,64 @@
       }
     }
   }
-  function parse(text,kind,url,mime) {
-    if (!state.active) return;
+  function opaqueManifestType(prefix) {
+    if (/^\s*#EXTM3U[ \t]*\r?\n/.test(prefix)) return 'hls';
+    if (/^\s*(?:<\?xml\s[^?]*\?>\s*)?(?:<!--(?:(?!-->)[\s\S])*-->\s*)*<MPD(?=[\s/>])/.test(prefix)) return 'dash';
+    return '';
+  }
+  function parse(text,kind,url) {
+    if (!currentSearch()) return;
     if (kind === 'json') { extractJson(text,url); return; }
-    if (/^\s*#EXTM3U(?:\s|$)/.test(text)) manifest(url,'application/vnd.apple.mpegurl',hlsRelated(text,url));
-    else if (/<MPD(?:\s|>)/i.test(text.slice(0,4096))) manifest(url,'application/dash+xml',dashRelated(text,url));
+    let type;
+    if (kind === 'opaque') {
+      if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]/.test(text)) return;
+      type = opaqueManifestType(text.slice(0,PREFIX));
+      if (type === 'hls' && !/^#EXT(?:-X-|INF:)/m.test(text)) return;
+      if (type === 'dash' && !/<\/MPD\s*>|^\s*<MPD[^>]*\/>/.test(text)) return;
+    } else if (/^\s*#EXTM3U(?:\s|$)/.test(text)) type = 'hls';
+    else if (/<MPD(?:\s|>)/i.test(text.slice(0,PREFIX))) type = 'dash';
+
+    if (type === 'hls') manifest(url,'application/vnd.apple.mpegurl',hlsRelated(text,url));
+    else if (type === 'dash') manifest(url,'application/dash+xml',dashRelated(text,url));
   }
   async function inspectResponse(response) {
-    if (!state.active || !response?.ok || state.used >= TOTAL) return;
+    if (!currentSearch() || !response?.ok || state.used >= TOTAL) return;
     const url = response.url, mime = response.headers?.get('content-type') || '';
     const kind = category(url,mime);
     if (!kind || Number(response.headers?.get('content-length')) > SINGLE) return;
+    const opaque = kind === 'opaque';
+    if (opaque && (readers.size >= LIMIT || response.status === 206 || response.headers?.get('content-range'))) return;
     let clone, reader;
     try {
       clone = response.clone();
       reader = clone.body?.getReader();
       if (!reader) return;
       readers.add(reader);
-      const decoder = new TextDecoder();
-      let size = 0, text = '';
-      while (state.active && size <= SINGLE && state.used < TOTAL) {
+      const decoder = new TextDecoder('utf-8',{fatal:opaque});
+      let size = 0, text = '', confirmed = !opaque;
+      while (currentSearch() && size <= SINGLE && state.used < TOTAL) {
         const {done,value} = await reader.read();
+        if (!currentSearch()) return;
         if (done) {
           text += decoder.decode();
-          parse(text,kind,url,mime);
+          parse(text,kind,url);
           return;
         }
         const bytes = value?.byteLength || 0;
         if (!bytes) return;
         if (bytes > SINGLE - size || bytes > TOTAL - state.used) { state.used = Math.min(TOTAL,state.used+bytes); return; }
+        const prefixSpace = PREFIX-size;
         size += bytes; state.used += bytes;
-        text += decoder.decode(value,{stream:true});
+        if (confirmed) text += decoder.decode(value,{stream:true});
+        else {
+          // Probe only the start of an ambiguous response. A typical binary
+          // segment needs just one chunk before we can cancel the clone.
+          const prefix = value.subarray(0,prefixSpace);
+          text += decoder.decode(prefix,{stream:true});
+          confirmed = !!opaqueManifestType(text);
+          if (!confirmed && (size >= PREFIX || !/^\s*(?:$|[<#])/.test(text))) return;
+          if (prefix.length < bytes) text += decoder.decode(value.subarray(prefix.length),{stream:true});
+        }
       }
     } catch { /* The original response still belongs to the page. */ }
     finally { readers.delete(reader); try { const canceled = reader?.cancel(); canceled?.catch?.(() => {}); } catch { /* Ignore clone cancellation. */ } }
@@ -310,18 +347,35 @@
       xhrListeners.set(this,listener); xhrTargets.add(new WeakRef(this));
       this.addEventListener('readystatechange',listener,{capture:true});
     }
-    if (state.active && typeof this.addEventListener === 'function') this.addEventListener('loadend',() => {
-      if (!state.active || this.readyState !== 4 || this.status < 200 || this.status >= 300 || state.used >= TOTAL || (this.responseType && this.responseType !== 'text')) return;
+    if (state.active && typeof this.addEventListener === 'function') this.addEventListener('loadend',event => {
+      if (!currentSearch() || this.readyState !== 4 || this.status < 200 || this.status >= 300 || state.used >= TOTAL) return;
       const url = this.responseURL, mime = this.getResponseHeader?.('content-type') || '';
       const kind = category(url,mime);
       if (!kind || Number(this.getResponseHeader?.('content-length')) > SINGLE) return;
+      if (kind === 'opaque' && (event?.loaded > SINGLE || this.status === 206 || this.getResponseHeader?.('content-range'))) return;
       try {
+        if (this.responseType === 'arraybuffer' && kind === 'opaque') {
+          const body = this.response;
+          if (!body?.byteLength || body.byteLength > SINGLE || body.byteLength > TOTAL - state.used) return;
+          const prefixSize = Math.min(body.byteLength,PREFIX);
+          const decoder = new TextDecoder('utf-8',{fatal:true});
+          state.used += prefixSize;
+          const prefix = decoder.decode(new Uint8Array(body,0,prefixSize),{stream:true});
+          if (!opaqueManifestType(prefix)) return;
+          state.used += body.byteLength-prefixSize;
+          parse(prefix+decoder.decode(new Uint8Array(body,prefixSize)),kind,url);
+          return;
+        }
+        if (this.responseType && this.responseType !== 'text') return;
         const text = this.responseText;
         if (typeof text !== 'string' || text.length > SINGLE) return;
-        const bytes = new TextEncoder().encode(text).byteLength;
+        const prefix = kind === 'opaque' ? text.slice(0,PREFIX) : '';
+        const confirmed = kind !== 'opaque' || !!opaqueManifestType(prefix);
+        const bytes = new TextEncoder().encode(confirmed ? text : prefix).byteLength;
         if (bytes > SINGLE || bytes > TOTAL - state.used) return;
-        state.used += bytes; parse(text,kind,url,mime);
-      } catch { /* Binary and inaccessible XHR bodies are ignored. */ }
+        state.used += bytes;
+        if (confirmed) parse(text,kind,url);
+      } catch { /* Inaccessible XHR bodies and invalid UTF-8 are ignored. */ }
     },{once:true});
     return originalSend.apply(this,args);
   }

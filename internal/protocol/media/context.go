@@ -23,6 +23,8 @@ var contextWrapper string
 //go:embed recovery_bridge.py
 var recoveryWrapper string
 
+type directPageFileKey struct{}
+
 func cloneRequest(req *base.Request) (*base.Request, error) {
 	if req == nil {
 		return nil, errors.New("missing media request")
@@ -176,6 +178,7 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 	if err != nil {
 		return nil, nil, err
 	}
+	directFile, _ := ctx.Value(directPageFileKey{}).(bool)
 	interpreter, interpreterErr := mediaBridgeInterpreter(cfg)
 	if interpreterErr != nil && transfer.RecoveryLeaseFromContext(ctx) != nil {
 		return nil, nil, interpreterErr
@@ -183,6 +186,9 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 	if interpreter == "" {
 		if transfer.RecoveryLeaseFromContext(ctx) != nil {
 			return nil, nil, transfer.ErrRecoveryHeld
+		}
+		if directFile {
+			return nil, nil, errors.New("网页多视频下载需要支持来源隔离的 Python yt-dlp")
 		}
 		return standaloneCommand(ctx, cfg, extra, scopes, args)
 	}
@@ -197,12 +203,17 @@ func mediaCommand(ctx context.Context, cfg model.Config, req *base.Request, extr
 		recovery = map[string]int{"read": 3, "write": 4}
 		args = append([]string{"--retries", "0", "--fragment-retries", "0", "--extractor-retries", "0", "--file-access-retries", "0", "--abort-on-unavailable-fragments"}, args...)
 	}
+	directOrigin := ""
+	if directFile {
+		directOrigin = scopes[1].Origin
+	}
 	payload, err := json.Marshal(struct {
-		Args     []string            `json:"args"`
-		Scopes   []model.HeaderScope `json:"scopes"`
-		Probe    string              `json:"probe"`
-		Recovery map[string]int      `json:"recovery,omitempty"`
-	}{args, scopes, probePath(cfg), recovery})
+		Args         []string            `json:"args"`
+		Scopes       []model.HeaderScope `json:"scopes"`
+		Probe        string              `json:"probe"`
+		Recovery     map[string]int      `json:"recovery,omitempty"`
+		DirectOrigin string              `json:"directOrigin,omitempty"`
+	}{args, scopes, probePath(cfg), recovery, directOrigin})
 	if err != nil {
 		bridge.Close()
 		return nil, nil, errors.New("invalid media context")

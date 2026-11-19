@@ -8,10 +8,13 @@ part 'resolve_result.g.dart';
 class ResolveResult {
   String id;
   Resource res;
+  @JsonKey(includeToJson: false)
+  final bool httpInlineHtml;
 
   ResolveResult({
     this.id = "",
     required this.res,
+    this.httpInlineHtml = false,
   });
 
   factory ResolveResult.fromJson(Map<String, dynamic> json) =>

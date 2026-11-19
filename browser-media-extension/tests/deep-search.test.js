@@ -6,9 +6,9 @@ import {setImmediate as settle} from 'node:timers/promises';
 
 const script = fs.readFileSync(new URL('../deep-search.js',import.meta.url),'utf8');
 const bytes = text => new TextEncoder().encode(text);
-function response(url,mime,chunks,{length} = {}) {
+function response(url,mime,chunks,{length,status=200} = {}) {
   const record = {clones:0,reads:0,cancels:0};
-  const value = {ok:true,url,headers:{get(name) {
+  const value = {ok:true,status,url,headers:{get(name) {
     if (name === 'content-type') return mime;
     if (name === 'content-length') return length ?? null;
     return null;
@@ -32,7 +32,7 @@ function harness(searchId) {
     addEventListener(name,fn) { this.listeners[name] = fn; }
     getResponseHeader(name) { return this.headers?.[name] ?? null; }
     removeEventListener(name,fn) { if (this.listeners[name] === fn) delete this.listeners[name]; }
-    send() { this.listeners.readystatechange?.(); this.onLoad?.(); this.listeners.loadend?.(); return 'original-send'; }
+    send() { this.listeners.readystatechange?.(); this.onLoad?.(); this.listeners.loadend?.({loaded:this.loaded}); return 'original-send'; }
   }
   const originalSend = XHR.prototype.send;
   class SourceBuffer {
@@ -42,6 +42,7 @@ function harness(searchId) {
   class LocalURL extends URL { static createObjectURL(value) { return `blob:test/${++nextTimer}`; } }
   const originals = {create:LocalURL.createObjectURL,add:MediaSource.prototype.addSourceBuffer,append:SourceBuffer.prototype.appendBuffer};
   const window = {URL:LocalURL,MediaSource,SourceBuffer,fetch:originalFetch,XMLHttpRequest:XHR,__gopeedMediaSearchId:searchId,
+    location:{href:'https://page.test/watch'},
     postMessage(data) { if (data.type === 'GOPEED_MEDIA_CANDIDATE') posted.push(data); }};
   const context = vm.createContext({window,URL:LocalURL,TextDecoder,TextEncoder,Promise,
     setTimeout(fn,ms) { const id = ++nextTimer; timers.set(id,{fn,ms}); return id; },
@@ -131,6 +132,109 @@ test('bounded JSON emits explicit media URLs only, and XHR ignores binary and ov
   assert.equal(h.posted.length,3);
 });
 
+const opaqueHls = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1200\nvariant\n';
+const opaqueDash = '<?xml version="1.0"?><!-- MPD -->\n<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"><Period><SegmentList><SegmentURL media="part.m4s"/></SegmentList></Period></MPD>';
+
+test('enhanced fetch recognizes opaque HLS and DASH across chunks and preserves signed URLs', async () => {
+  const h = harness('opaque-search');
+  const manifest = response('https://cdn.test/live/entry?ticket=x.y','Application/Octet-Stream; charset=utf-8',
+    ['\ufeff'+opaqueHls.slice(0,5),opaqueHls.slice(5)]);
+  const dash = response('https://dash.test/live/entry',null,[opaqueDash.slice(0,38),opaqueDash.slice(38)]);
+  for (const item of [manifest,dash]) {
+    const promise = h.setResponse(item.value);
+    assert.strictEqual(h.window.fetch(item.value.url),promise);
+    assert.strictEqual(await promise,item.value);
+    await h.flush();
+  }
+  assert.deepEqual(h.posted.map(x => [x.url,x.mime]),[
+    [manifest.value.url,'application/vnd.apple.mpegurl'],[dash.value.url,'application/dash+xml'],
+  ]);
+  assert.ok(h.posted.every(x => x.manifest && x.protocolHint === 'manifest' && x.searchId === 'opaque-search' && !x.mediaObjectUrl));
+  assert.deepEqual(Array.from(h.posted[0].relatedUrls),['https://cdn.test/live/variant']);
+  assert.deepEqual(Array.from(h.posted[1].contextUrls),['https://dash.test/live/part.m4s']);
+});
+
+test('opaque probes skip unapproved sessions, sensitive paths, known file types, partial and large responses', async () => {
+  const passive = harness();
+  const opaque = response('https://cdn.test/entry','application/octet-stream',[opaqueHls]);
+  passive.setResponse(opaque.value); await passive.window.fetch('/entry'); await passive.flush();
+  assert.equal(opaque.record.clones,0);
+
+  const h = harness('opaque-search');
+  const excluded = [
+    response('https://cdn.test/%6beys%2fentry','application/octet-stream',[opaqueHls]),
+    response('https://cdn.test/licenses/entry',null,[opaqueHls]),
+    response('https://cdn.test/entry%2em4s','application/octet-stream',[opaqueHls]),
+    response('https://cdn.test/video','video/mp4',[opaqueHls]),
+    response('https://cdn.test/font','application/octet-stream',[opaqueHls],{length:1024*1024+1}),
+    response('https://cdn.test/part','application/octet-stream',[opaqueHls],{status:206}),
+  ];
+  for (const item of excluded) {
+    h.setResponse(item.value); await h.window.fetch(item.value.url); await h.flush();
+    assert.equal(item.record.clones,0,item.value.url);
+  }
+  assert.equal(h.posted.length,0);
+});
+
+test('opaque binary, embedded MPD, regular M3U and false HLS prefixes never become candidates', async () => {
+  const h = harness('opaque-search');
+  const binary = response('https://cdn.test/chunk','application/octet-stream',[new Uint8Array([0,255,128]),new Uint8Array(1024*1024)]);
+  const html = response('https://cdn.test/html','application/octet-stream',['<html><MPD></MPD>'+ 'x'.repeat(4096),'tail']);
+  const m3u = response('https://cdn.test/audio','application/octet-stream',['#EXTM3U\nsong.mp3']);
+  const forged = response('https://cdn.test/forged','application/octet-stream',[opaqueHls,new Uint8Array([0,2,3])]);
+  for (const item of [binary,html,m3u,forged]) {
+    h.setResponse(item.value); await h.window.fetch(item.value.url); await h.flush();
+    assert.equal(item.record.cancels,1);
+  }
+  assert.equal(binary.record.reads,1);
+  assert.equal(html.record.reads,1);
+  assert.equal(h.posted.length,0);
+});
+
+test('opaque streaming probes obey the existing response and aggregate byte budgets', async () => {
+  const h = harness('opaque-search');
+  const overSize = response('https://cdn.test/entry','application/octet-stream',[opaqueHls,new Uint8Array(1024*1024)]);
+  h.setResponse(overSize.value); await h.window.fetch(overSize.value.url); await h.flush();
+  assert.equal(overSize.record.reads,2);
+  assert.equal(overSize.record.cancels,1);
+  assert.equal(h.posted.length,0);
+
+  for (let i=0;i<3;i++) {
+    const item = response(`https://cdn.test/chunk-${i}`,'application/octet-stream',[new Uint8Array(1024*1024).fill(255)]);
+    h.setResponse(item.value); await h.window.fetch(item.value.url); await h.flush();
+  }
+  const skipped = response('https://cdn.test/other','application/octet-stream',[opaqueHls]);
+  h.setResponse(skipped.value); await h.window.fetch(skipped.value.url); await h.flush();
+  assert.equal(skipped.record.clones,0);
+  assert.equal(h.posted.length,0);
+});
+
+test('opaque XHR recognizes text and arraybuffers within budget, without accessing oversize or sensitive bodies', () => {
+  const h = harness('opaque-search');
+  const send = props => Object.assign(new h.window.XMLHttpRequest(),props).send();
+  assert.equal(send({responseURL:'https://cdn.test/entry',headers:{'content-type':'application/octet-stream'},responseText:opaqueHls}),'original-send');
+  assert.equal(send({responseURL:'https://dash.test/entry',responseType:'arraybuffer',response:bytes(opaqueDash).buffer}),'original-send');
+  send({responseURL:'https://dash.test/chunk',responseType:'arraybuffer',response:new Uint8Array([1,2,255]).buffer});
+  let bodyAccesses = 0;
+  for (const props of [{loaded:1024*1024+1},{responseURL:'https://cdn.test/%6bey'},{status:206}]) {
+    const xhr = Object.assign(new h.window.XMLHttpRequest(),{responseURL:'https://cdn.test/skipped'},props);
+    Object.defineProperty(xhr,'responseText',{get() { bodyAccesses++; return opaqueHls; }});
+    xhr.send();
+  }
+  assert.equal(bodyAccesses,0);
+  assert.deepEqual(h.posted.map(x => x.mime),['application/vnd.apple.mpegurl','application/dash+xml']);
+});
+
+test('a fetch started before navigation cannot probe its opaque response on the new page', async () => {
+  const h = harness('old-page-search');
+  const item = response('https://cdn.test/entry','application/octet-stream',[opaqueHls]);
+  h.setResponse(item.value); const pending = h.window.fetch(item.value.url);
+  h.window.location.href = 'https://page.test/another-video';
+  await pending; await h.flush();
+  assert.equal(item.record.clones,0);
+  assert.equal(h.posted.length,0);
+});
+
 test('expiry restores only its own hooks and does not replace a later fetch wrapper', async () => {
   const h = harness();
   const later = (...args) => h.originalFetch(...args);
@@ -214,6 +318,23 @@ test('exact response reference proves segment -> variant -> root only for its Me
   assert.ok(proofs(h).every(x => x.mediaObjectUrl === first.blob && x.mediaObjectUrl !== other.blob && x.searchId === 'proof-search'));
   assert.equal(item.record.clones,0); assert.equal(item.record.reads,0);
   h.expire();
+});
+
+test('opaque manifest references enter the existing MSE graph and prove only the consuming blob', async () => {
+  const h = harness('opaque-search'), current = mse(h), other = mse(h);
+  const master = response('https://cdn.test/root','application/octet-stream',[opaqueHls]);
+  const variant = response('https://cdn.test/variant',null,['#EXTM3U\n#EXTINF:2,\nsegment.m4s']);
+  for (const item of [master,variant]) {
+    h.setResponse(item.value); await h.window.fetch(item.value.url); await h.flush();
+  }
+  const segment = binary('https://cdn.test/segment.m4s');
+  h.setResponse(segment.value); await h.window.fetch(segment.value.url);
+  const buffer = await segment.value.arrayBuffer();
+  assert.equal(proofs(h).length,0);
+  current.buffer.appendBuffer(buffer);
+  assert.deepEqual(proofs(h).map(x => x.url),[variant.value.url,master.value.url]);
+  assert.ok(proofs(h).every(x => x.mediaObjectUrl === current.blob && x.mediaObjectUrl !== other.blob && x.searchId === 'opaque-search'));
+  assert.equal(segment.record.clones,0);
 });
 
 test('copies, unknown buffers, pre-hook sources and failed append never prove association',async () => {

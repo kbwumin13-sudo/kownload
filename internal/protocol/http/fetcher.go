@@ -311,6 +311,7 @@ type Fetcher struct {
 	resolveDataPos atomic.Int64 // How many bytes downloaded during resolve
 
 	// Resolve response - kept open for one-time URLs
+	inlineHTML      bool // Captured before prefetch can consume the response.
 	resolveResp     *http.Response
 	resolveRespLock sync.Mutex
 
@@ -656,6 +657,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	// IMPORTANT: Keep the response body open for downloading in Start phase
 	// This is crucial for one-time URLs that can only be accessed once
 	f.resolveRespLock.Lock()
+	f.inlineHTML = httpReq.Method == http.MethodGet && inlineHTMLResponse(resp)
 	f.resolveResp = resp
 	f.resolveRespLock.Unlock()
 

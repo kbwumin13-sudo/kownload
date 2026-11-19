@@ -37,6 +37,14 @@ func Resolve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func DiscardHTTPResolve(w http.ResponseWriter, r *http.Request) {
+	if err := Downloader.DiscardHTTPResolve(mux.Vars(r)["id"]); err != nil {
+		WriteJson(w, model.NewErrorResult(err.Error()))
+		return
+	}
+	WriteJson(w, model.NewNilResult())
+}
+
 func InspectMedia(w http.ResponseWriter, r *http.Request) {
 	var req model.ResolveTask
 	if !ReadJson(r, w, &req) {

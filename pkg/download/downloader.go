@@ -803,13 +803,16 @@ func (d *Downloader) ResolveContext(ctx context.Context, req *base.Request, opts
 	if err = ctx.Err(); err != nil {
 		return
 	}
-	d.fetcherMapLock.Lock()
-	d.fetcherCache[rrId] = resolvedFetcher
-	d.fetcherMapLock.Unlock()
 	rr = &ResolveResult{
 		ID:  rrId,
 		Res: resolvedFetcher.Meta().Res,
 	}
+	if f, ok := resolvedFetcher.(*httpProtocol.Fetcher); ok {
+		rr.HTTPInlineHTML = f.InlineHTML()
+	}
+	d.fetcherMapLock.Lock()
+	d.fetcherCache[rrId] = resolvedFetcher
+	d.fetcherMapLock.Unlock()
 	return
 }
 
@@ -892,18 +895,29 @@ func (d *Downloader) CreateDirectBatch(req *base.CreateTaskBatch) (taskId []stri
 }
 
 func (d *Downloader) Create(rrId string) (taskId string, err error) {
-	d.fetcherMapLock.RLock()
+	d.fetcherMapLock.Lock()
 	fetcher, ok := d.fetcherCache[rrId]
-	d.fetcherMapLock.RUnlock()
+	delete(d.fetcherCache, rrId)
+	d.fetcherMapLock.Unlock()
 	if !ok {
 		return "", errors.New("invalid resource id")
 	}
-	defer func() {
-		d.fetcherMapLock.Lock()
-		delete(d.fetcherCache, rrId)
-		d.fetcherMapLock.Unlock()
-	}()
 	return d.doCreate(fetcher, nil)
+}
+
+// DiscardHTTPResolve closes the retained HTTP response if a preview is abandoned.
+// Claiming the entry under the same lock as Create ensures an active task is never closed.
+func (d *Downloader) DiscardHTTPResolve(id string) error {
+	d.fetcherMapLock.Lock()
+	f, ok := d.fetcherCache[id].(*httpProtocol.Fetcher)
+	if ok {
+		delete(d.fetcherCache, id)
+	}
+	d.fetcherMapLock.Unlock()
+	if !ok {
+		return nil
+	}
+	return f.Close()
 }
 
 // Patch modifies task-specific data based on the protocol.

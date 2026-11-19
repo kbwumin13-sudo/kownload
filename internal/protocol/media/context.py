@@ -26,6 +26,7 @@ def origin(raw):
 
 
 scopes = context['scopes']
+direct_origin = origin(context['directOrigin']) if context.get('directOrigin') else None
 navigation_names = {'referer', 'user-agent'}
 api_auth_names = {'authorization', 'x-csrf-token', 'x-guest-token'}
 initial_names = navigation_names | api_auth_names
@@ -73,6 +74,14 @@ def matching_headers(raw):
     return headers
 
 
+def check_direct_origin(raw):
+    if direct_origin is not None:
+        u = urllib.parse.urlsplit(raw)
+        if u.username is not None or origin(raw) != direct_origin:
+            from yt_dlp.networking.exceptions import RequestError
+            raise RequestError('Webpage video redirected outside its media origin')
+
+
 original_prepare_headers = _urllib.UrllibRH._prepare_headers
 
 
@@ -92,6 +101,7 @@ original_request = _urllib.HTTPHandler.http_request
 def scoped_request(self, req):
     # Called for initial requests AND every redirect by the urllib opener.
     # Remove extractor/copy-propagated credentials before applying destination scope.
+    check_direct_origin(req.full_url)
     initial = extractor_headers(req.headers)
     for key in list(req.headers) + list(req.unredirected_hdrs):
         if key.lower() in scoped_names:
@@ -156,6 +166,7 @@ if _curlcffi is not None:
             for hop in range(6):
                 # Validate each destination, including schemes introduced by
                 # Location. Upstream retains TLS, proxy and impersonation setup.
+                check_direct_origin(request.url)
                 self.validate(request)
                 try:
                     response = super()._send(request)

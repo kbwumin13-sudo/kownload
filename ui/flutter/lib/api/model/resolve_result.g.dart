@@ -10,6 +10,7 @@ ResolveResult _$ResolveResultFromJson(Map<String, dynamic> json) =>
     ResolveResult(
       id: json['id'] as String? ?? "",
       res: Resource.fromJson(json['res'] as Map<String, dynamic>),
+      httpInlineHtml: json['httpInlineHtml'] as bool? ?? false,
     );
 
 Map<String, dynamic> _$ResolveResultToJson(ResolveResult instance) =>

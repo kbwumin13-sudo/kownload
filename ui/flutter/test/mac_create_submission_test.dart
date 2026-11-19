@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,7 @@ import 'package:get/get.dart' hide Progress;
 import 'package:hive/hive.dart';
 import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/create_task.dart';
+import 'package:gopeed/api/model/media_inspection.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/task.dart';
@@ -86,6 +88,234 @@ Task _task(String id, Status status) => Task(
     );
 
 void main() {
+  for (final scenario in [
+    'multiple videos',
+    'save webpage',
+    'cancel inspection',
+    'direct download',
+    'resolved file',
+    'explicit preview',
+    'stale resolution',
+  ]) {
+    testWidgets('pasted web media keeps $scenario distinct', (tester) async {
+      if (!Platform.isMacOS) return;
+      const url = 'https://fixture.test/watch?token=one-use';
+      final root = Directory('/tmp').createTempSync('create-web-media-');
+      await tester.runAsync(() => Util.initStorageDir(previewStorage: root.path));
+      Database.instance.box = _Box()..onboardingCompleted = true;
+      final app = Get.put<AppController>(_App());
+      app.downloaderConfig.value.downloadDir = root.path;
+      app.downloaderConfig.value.extra.defaultDirectDownload =
+          scenario == 'direct download' || scenario == 'explicit preview';
+      Get.put(CreateController());
+      MacPanel.presentation.value = 'panel';
+      MacPanel.incoming.value = null;
+      MacPanel.taskResult.value = null;
+      final creates = <CreateTask>[];
+      final inspections = <Request>[];
+      final discards = <String>[];
+      final pendingResolution = Completer<ResolveResult>();
+      final pendingInspection = Completer<MediaInspection>();
+      final page = ResolveResult(
+          id: 'resolved-page',
+          res: Resource(files: [FileInfo(name: 'watch')]),
+          httpInlineHtml: scenario != 'resolved file');
+      CancelToken? inspectionToken;
+      var resolves = 0;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(MacPanel.channel, (_) async => null);
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.getData') return {'text': url};
+        return null;
+      });
+      await tester.binding.setSurfaceSize(const Size(640, 760));
+      addTearDown(() async {
+        if (!pendingResolution.isCompleted) pendingResolution.complete(page);
+        if (!pendingInspection.isCompleted) {
+          pendingInspection.complete(MediaInspection.fromJson({}));
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        MacPanel.incoming.value = null;
+        MacPanel.taskResult.value = null;
+        MacPanel.cancelAutoHide();
+        Get.reset();
+        Get.routerDelegate = null;
+        Get.routeInformationParser = null;
+        await tester.binding.setSurfaceSize(null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(MacPanel.channel, null);
+        tester.binding.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+        await Util.initStorageDir();
+        root.deleteSync(recursive: true);
+      });
+      await tester.pumpWidget(
+          GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
+        GetPage(
+            name: '/',
+            page: () => CreateView(
+                  taskCreator: (task) async {
+                    creates.add(task);
+                    return 'created';
+                  },
+                  taskResolver: (task) async {
+                    resolves++;
+                    expect(task.req?.url, url);
+                    return scenario == 'stale resolution'
+                        ? await pendingResolution.future
+                        : page;
+                  },
+                  webMediaInspector: (task, cancel) async {
+                    final request = task.req!;
+                    inspections.add(request);
+                    inspectionToken = cancel;
+                    final extra = request.extra as Map;
+                    expect(extra['sourceType'], 'pasted-page');
+                    expect(request.url, url);
+                    if (scenario == 'cancel inspection') {
+                      return pendingInspection.future;
+                    }
+                    if (scenario == 'save webpage') {
+                      return MediaInspection.fromJson({
+                        'supported': false,
+                        'reason': 'DRM media is unsupported',
+                      });
+                    }
+                    if (scenario == 'multiple videos' &&
+                        !extra.containsKey('pageCandidateId')) {
+                      return MediaInspection.fromJson({
+                        'supported': false,
+                        'candidates': [
+                          {'id': 'first', 'title': 'First video'},
+                          {'id': 'second', 'title': 'Second video'},
+                        ],
+                      });
+                    }
+                    return MediaInspection.fromJson({
+                      'supported': true,
+                      'id': 'inspected-media-id',
+                      'title': 'A selected player',
+                      'formats': [
+                        {
+                          'id': 'v720',
+                          'height': 720,
+                          'ext': 'mp4',
+                          'vcodec': 'h264',
+                          'acodec': 'none'
+                        },
+                        if (scenario != 'explicit preview')
+                          {
+                            'id': 'a1',
+                            'ext': 'm4a',
+                            'vcodec': 'none',
+                            'acodec': 'aac'
+                          },
+                      ],
+                    });
+                  },
+                  resolvedTaskDiscarder: (id) async => discards.add(id),
+                ))
+      ]));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('粘贴'));
+      await tester.pumpAndSettle();
+      expect(creates, isEmpty);
+      expect(inspections, isEmpty);
+      expect(resolves, 0);
+      final explicit = find.byKey(const ValueKey('preview-web-media'));
+      expect(explicit, findsOneWidget);
+      Future<void> advanceTransition() async {
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+      await tester.tap(
+          scenario == 'explicit preview' ? explicit : find.text('下载'));
+      await advanceTransition();
+      final preview = find.byKey(const ValueKey('web-media-preview'));
+      final download = find.byKey(const ValueKey('web-media-download'));
+      final savePage = find.byKey(const ValueKey('web-media-save-page'));
+      switch (scenario) {
+        case 'multiple videos':
+          final candidate = find.byKey(const ValueKey('web-media-candidate'));
+          expect(candidate, findsOneWidget);
+          expect(tester.widget<FilledButton>(download).onPressed, isNull);
+          expect(creates, isEmpty);
+          await tester.tap(candidate);
+          await advanceTransition();
+          await tester.tap(find.text('2. Second video'));
+          await advanceTransition();
+          expect((inspections.last.extra as Map)['pageCandidateId'], 'second');
+          expect(creates, isEmpty);
+          await tester.tap(download);
+          await tester.pumpAndSettle();
+          final task = creates.single;
+          expect(task.req?.url, url);
+          expect(task.req?.protocol, 'media');
+          expect(task.req?.extra, containsPair('pageCandidateId', 'second'));
+          expect(task.req?.extra, isNot(contains('expectedMediaId')));
+          expect(task.req?.extra, containsPair('format', 'v720+a1'));
+          expect(task.req?.extra, containsPair('container', 'mp4'));
+          expect(task.req?.extra, containsPair('mediaKind', 'video'));
+          expect(task.opts?.path, root.path);
+          expect(discards, ['resolved-page']);
+        case 'save webpage':
+          expect(tester.widget<FilledButton>(download).onPressed, isNull);
+          expect(find.text('webMediaProtected'), findsOneWidget);
+          expect(creates, isEmpty);
+          await tester.tap(savePage);
+          await tester.pumpAndSettle();
+          expect(creates.single.rid, 'resolved-page');
+          expect(discards, isEmpty);
+        case 'cancel inspection':
+          expect(preview, findsOneWidget);
+          await tester.tap(find.descendant(
+              of: preview, matching: find.text('cancel')));
+          await tester.pumpAndSettle();
+          expect(inspectionToken?.isCancelled, true);
+          expect(discards, ['resolved-page']);
+          expect(creates, isEmpty);
+        case 'direct download':
+          expect(creates.single.req?.url, url);
+          expect(creates.single.req?.protocol, isNull);
+          expect(inspections, isEmpty);
+          expect(resolves, 0);
+          expect(preview, findsNothing);
+        case 'resolved file':
+          expect(creates.single.rid, 'resolved-page');
+          expect(inspections, isEmpty);
+          expect(preview, findsNothing);
+        case 'explicit preview':
+          expect(preview, findsOneWidget);
+          expect(savePage, findsNothing);
+          expect(resolves, 0);
+          expect(inspections, hasLength(1));
+          expect(tester.widget<FilledButton>(download).onPressed, isNull);
+          await tester.tap(find.byKey(const ValueKey('web-media-format')));
+          await advanceTransition();
+          await tester.tap(find.textContaining('webMediaSilentVideo').last);
+          await advanceTransition();
+          await tester.tap(download);
+          await tester.pumpAndSettle();
+          expect(creates.single.req?.protocol, 'media');
+          expect(creates.single.req?.extra, containsPair('format', 'v720'));
+          expect(creates.single.req?.extra,
+              containsPair('expectedMediaId', 'inspected-media-id'));
+        case 'stale resolution':
+          await tester.enterText(
+              find.byKey(const ValueKey('panel-download-input')),
+              'https://fixture.test/changed');
+          pendingResolution.complete(page);
+          await tester.pumpAndSettle();
+          expect(preview, findsNothing);
+          expect(inspections, isEmpty);
+          expect(creates, isEmpty);
+          expect(discards, ['resolved-page']);
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final preview in [true, false]) {
     testWidgets(
         'clipboard isolation preserves explicit paste; preview=$preview',

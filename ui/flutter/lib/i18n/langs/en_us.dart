@@ -38,6 +38,30 @@ const enUS = {
         "The helper has not confirmed media path freezing. No create command was sent.",
     "mediaPathNewOnly":
         "Path freezing is for new video or audio tasks. Existing tasks and images retain their original flow.",
+    'webMediaPreview': 'Preview web media',
+    'webMediaInspecting': 'Looking for downloadable video and audio…',
+    'webMediaChooseVideo': 'Select a video to download',
+    'webMediaChooseFormat': 'Select a download format',
+    'webMediaVideo': 'Video',
+    'webMediaAudio': 'Audio only',
+    'webMediaUnknownTracks': 'Unconfirmed tracks',
+    'webMediaMergeAudio': 'Merge audio track',
+    'webMediaSilentVideo': 'Silent video',
+    'webMediaUnavailable':
+        'No downloadable media could be confirmed. Open the source page and select the player using the browser helper.',
+    'webMediaNoFormats': 'No downloadable media was found on the page.',
+    'webMediaLive': 'Live stream downloads are currently unsupported.',
+    'webMediaProtected': 'Protected media cannot be downloaded.',
+    'webMediaMultiple':
+        'A single video could not be identified. Select a player on the page using the browser helper.',
+    'webMediaToolsUnavailable':
+        'The current media tools could not inspect this page. Check the media tools in Settings.',
+    'webMediaSourceChanged':
+        'The video or format has changed. Preview the page again.',
+    'webMediaSourceAccess':
+        'The source denied access or requires sign-in. Select a player on the page using the browser helper.',
+    'webMediaSavePage': 'Save web page file',
+    'webMediaDownload': 'Download media',
     "pathPreviewAfterSelection":
         "Select the files in the drive confirmation page first. The tree destination will be frozen together.",
     "pathLoadingMembers": "Reading the file list…",

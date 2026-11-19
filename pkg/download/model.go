@@ -20,8 +20,9 @@ import (
 )
 
 type ResolveResult struct {
-	ID  string         `json:"id"`
-	Res *base.Resource `json:"res"`
+	HTTPInlineHTML bool           `json:"httpInlineHtml,omitempty"`
+	ID             string         `json:"id"`
+	Res            *base.Resource `json:"res"`
 }
 
 // TaskCompletionRef declares required completion state. It carries no phase,

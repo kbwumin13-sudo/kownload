@@ -38,6 +38,8 @@ type videoInfo struct {
 	Subtitles         map[string][]subtitleFormat `json:"subtitles"`
 	AutomaticCaptions map[string][]subtitleFormat `json:"automatic_captions"`
 	Type              string                      `json:"_type"`
+	ExtractorKey      string                      `json:"extractor_key"`
+	HTTPHeaders       map[string]string           `json:"http_headers"`
 	Entries           json.RawMessage             `json:"entries"`
 	ID                string                      `json:"id"`
 	WebpageURL        string                      `json:"webpage_url"`
@@ -60,22 +62,24 @@ type videoInfo struct {
 }
 
 type videoFormat struct {
-	URL            string  `json:"url"`
-	ManifestURL    string  `json:"manifest_url"`
-	Protocol       string  `json:"protocol"`
-	Language       string  `json:"language"`
-	FPS            float64 `json:"fps"`
-	TBR            float64 `json:"tbr"`
-	FormatID       string  `json:"format_id"`
-	FormatNote     string  `json:"format_note"`
-	Ext            string  `json:"ext"`
-	Width          int     `json:"width"`
-	Height         int     `json:"height"`
-	VCodec         string  `json:"vcodec"`
-	ACodec         string  `json:"acodec"`
-	Filesize       int64   `json:"filesize"`
-	FilesizeApprox int64   `json:"filesize_approx"`
-	HasDRM         bool    `json:"has_drm"`
+	HTTPHeaders    map[string]string `json:"http_headers"`
+	Fragments      json.RawMessage   `json:"fragments"`
+	URL            string            `json:"url"`
+	ManifestURL    string            `json:"manifest_url"`
+	Protocol       string            `json:"protocol"`
+	Language       string            `json:"language"`
+	FPS            float64           `json:"fps"`
+	TBR            float64           `json:"tbr"`
+	FormatID       string            `json:"format_id"`
+	FormatNote     string            `json:"format_note"`
+	Ext            string            `json:"ext"`
+	Width          int               `json:"width"`
+	Height         int               `json:"height"`
+	VCodec         string            `json:"vcodec"`
+	ACodec         string            `json:"acodec"`
+	Filesize       int64             `json:"filesize"`
+	FilesizeApprox int64             `json:"filesize_approx"`
+	HasDRM         bool              `json:"has_drm"`
 }
 
 func configDefaults() model.Config {
@@ -135,6 +139,9 @@ func extraFor(req *base.Request) (*model.ReqExtra, error) {
 	extra := req.Extra.(*model.ReqExtra)
 	if extra.MediaKind != "" && extra.MediaKind != "video" && extra.MediaKind != "audio" {
 		return nil, errors.New("invalid media kind")
+	}
+	if extra.PageCandidateID != "" && (extra.SourceType != pastedPageSource || !validPageCandidateID(extra.PageCandidateID)) {
+		return nil, errors.New("invalid webpage media selection")
 	}
 	return extra, nil
 }
@@ -348,6 +355,7 @@ func cloneInspection(result *model.Inspection) *model.Inspection {
 	copy := *result
 	copy.ContextURLs = append([]string(nil), result.ContextURLs...)
 	copy.Formats = append([]model.Format(nil), result.Formats...)
+	copy.Candidates = append([]model.PageCandidate(nil), result.Candidates...)
 	copy.Subtitles = append([]model.Subtitle{}, result.Subtitles...)
 	for i := range copy.Subtitles {
 		copy.Subtitles[i].Formats = append([]string(nil), result.Subtitles[i].Formats...)
@@ -448,7 +456,16 @@ func extractInfo(ctx context.Context, req *base.Request, extra *model.ReqExtra, 
 		return nil, nil, err
 	}
 	defer cleanup()
-	args = append(args, formatArgs(extra)...)
+	formatExtra := extra
+	if extra.SourceType == pastedPageSource {
+		// Bound playlist output and leave navigation entries unresolved. A page
+		// candidate's format ID is ours, so it cannot be passed to the extractor.
+		args = append(args, "--flat-playlist", "--playlist-end", fmt.Sprint(pageCandidateLimit+1))
+		if extra.PageCandidateID != "" {
+			formatExtra = &model.ReqExtra{}
+		}
+	}
+	args = append(args, formatArgs(formatExtra)...)
 	args = append(args, "--dump-single-json", "--skip-download", req.URL)
 	cmd, commandCleanup, err := mediaCommand(ctx, cfg, req, extra, args)
 	if err != nil {
@@ -479,10 +496,17 @@ func extractInfo(ctx context.Context, req *base.Request, extra *model.ReqExtra, 
 		return nil, nil, errors.New("invalid media inspection JSON")
 	}
 	if info.Type == "playlist" || info.Type == "multi_video" || (len(info.Entries) != 0 && string(info.Entries) != "null") {
+		if extra.SourceType == pastedPageSource {
+			return inspectPageCandidates(req, extra, &info, cfg)
+		}
 		return &info, &model.Inspection{Formats: []model.Format{}, Reason: "playlist or multi-video media is unsupported"}, nil
 	}
+	if extra.PageCandidateID != "" {
+		return &info, stalePageCandidate(), nil
+	}
 	result := inspectionFromInfo(&info)
-	if extra.SourceType == "page" && extra.ExpectedMediaID != "" && info.ID != "" && result.Supported && verifiedYouTubeID(req.URL, extra.ExpectedMediaID) && info.ID != extra.ExpectedMediaID {
+	if result.Supported && extra.ExpectedMediaID != "" && info.ID != extra.ExpectedMediaID &&
+		(extra.SourceType == pastedPageSource || (extra.SourceType == "page" && info.ID != "" && verifiedYouTubeID(req.URL, extra.ExpectedMediaID))) {
 		result.Supported = false
 		result.Reason = "selected media does not match the requested video"
 		result.Formats = []model.Format{}
@@ -512,7 +536,8 @@ func Inspect(ctx context.Context, req *base.Request, ctl *controller.Controller)
 		return nil, err
 	}
 	_, result, err := inspectInfo(ctx, snapshot, ctl, configFor(ctl))
-	if err == nil && result.Supported && snapshot.Extra.(*model.ReqExtra).CollectContext {
+	extra := snapshot.Extra.(*model.ReqExtra)
+	if err == nil && result.Supported && extra.CollectContext && extra.PageCandidateID == "" {
 		result.ContextURLs, err = discoverContextChecked(ctx, snapshot, ctl, result)
 	}
 	return result, err

@@ -18,6 +18,7 @@ import 'model/create_task_batch.dart';
 import 'model/downloader_config.dart';
 import 'model/extension.dart';
 import 'model/install_extension.dart';
+import 'model/media_inspection.dart';
 import 'model/login.dart';
 import 'model/resolve_result.dart';
 import 'model/resolve_task.dart';
@@ -421,6 +422,36 @@ Future<ResolveResult> resolve(ResolveTask resolveTask) async {
           resolveTask.req?.url.toLowerCase().startsWith('magnet:') == true
               ? '获取种子信息超时，请检查网络或稍后重试'
               : '解析下载链接超时，请检查网络或稍后重试');
+}
+
+Future<MediaInspection> inspectWebMedia(ResolveTask task, CancelToken cancel,
+    {ActiveApiSnapshot? snapshot}) async {
+  if (snapshot?.isCurrent == false) throw StateError('media_route_changed');
+  final dio = (snapshot?._transport ?? _client).dio;
+  final MediaInspection result;
+  try {
+    result = await _parse<MediaInspection>(
+        () => dio.post('api/v1/media/inspect',
+            data: task,
+            cancelToken: cancel,
+            options: Options(receiveTimeout: const Duration(seconds: 50))),
+        (data) => MediaInspection.fromJson(data as Map<String, dynamic>),
+        distinguishRejection: true);
+  } on TaskWriteRejected catch (error) {
+    if (snapshot?.isCurrent == false) throw StateError('media_route_changed');
+    return MediaInspection.fromJson({'reason': error.message.msg});
+  }
+  if (snapshot?.isCurrent == false) throw StateError('media_route_changed');
+  return result;
+}
+
+Future<void> discardResolvedTask(String id,
+    {required ActiveApiSnapshot snapshot}) async {
+  await _parse<void>(
+      () => snapshot._transport.dio.delete(
+          'api/v1/resolve/${Uri.encodeComponent(id)}',
+          options: Options(followRedirects: false)),
+      null);
 }
 
 /// Fixed core endpoint; no fallback to ordinary create on unsupported cores.
