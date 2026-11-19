@@ -11,10 +11,12 @@ import (
 	gohttp "net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
+	"github.com/armon/go-socks5"
 )
 
 var testDownloadOpt = &base.Options{
@@ -201,133 +204,161 @@ func TestDownloader_CreateDirectBatch(t *testing.T) {
 }
 
 func TestDownloader_CreateWithProxy(t *testing.T) {
-	// No proxy
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		return nil
-	}, nil)
-	// Disable proxy
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		proxyCfg.Enable = false
-		return proxyCfg
-	}, nil)
-	// Enable system proxy but not set proxy environment variable
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		proxyCfg.System = true
-		return proxyCfg
-	}, nil)
-	// Enable proxy but error proxy environment variable
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		os.Setenv("HTTP_PROXY", "http://127.0.0.1:1234")
-		os.Setenv("HTTPS_PROXY", "http://127.0.0.1:1234")
-		proxyCfg.System = true
-		return proxyCfg
-	}, func(err error) {
-		if err == nil {
-			t.Fatal("doTestDownloaderCreateWithProxy() got = nil, want error")
-		}
-	})
-	// Enable system proxy and set proxy environment variable
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		os.Setenv("HTTP_PROXY", proxyCfg.ToUrl().String())
-		os.Setenv("HTTPS_PROXY", proxyCfg.ToUrl().String())
-		proxyCfg.System = true
-		return proxyCfg
-	}, nil)
-	// Invalid proxy scheme
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		proxyCfg.Scheme = ""
-		return proxyCfg
-	}, nil)
-	// Invalid proxy host
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		proxyCfg.Host = ""
-		return proxyCfg
-	}, nil)
-	// Use proxy without auth
-	doTestDownloaderCreateWithProxy(t, false, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		return proxyCfg
-	}, nil)
-	// Use proxy with auth
-	doTestDownloaderCreateWithProxy(t, true, nil, func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig {
-		return proxyCfg
-	}, nil)
-
-	// Request proxy mode follow
-	doTestDownloaderCreateWithProxy(t, false, func(reqProxy *base.RequestProxy) *base.RequestProxy {
-		reqProxy.Mode = base.RequestProxyModeFollow
-		return reqProxy
-	}, nil, nil)
-
-	// Request proxy mode none
-	doTestDownloaderCreateWithProxy(t, false, func(reqProxy *base.RequestProxy) *base.RequestProxy {
-		reqProxy.Mode = base.RequestProxyModeNone
-		return reqProxy
-	}, nil, nil)
-
-	// Request proxy mode custom
-	doTestDownloaderCreateWithProxy(t, false, func(reqProxy *base.RequestProxy) *base.RequestProxy {
-		return reqProxy
-	}, nil, nil)
-}
-
-func doTestDownloaderCreateWithProxy(t *testing.T, auth bool, buildReqProxy func(reqProxy *base.RequestProxy) *base.RequestProxy, buildProxyConfig func(proxyCfg *base.DownloaderProxyConfig) *base.DownloaderProxyConfig, errHandler func(err error)) {
-	usr, pwd := "", ""
-	if auth {
-		usr, pwd = "admin", "123"
-	}
-	proxyListener := test.StartSocks5Server(usr, pwd)
-	defer proxyListener.Close()
-
-	downloader := NewDownloader(nil)
-	if err := downloader.Setup(); err != nil {
+	const filename, content = "proxy-fixture.txt", "range-capable fixture served over TLS"
+	origin := httptest.NewTLSServer(gohttp.HandlerFunc(func(w gohttp.ResponseWriter, r *gohttp.Request) {
+		gohttp.ServeContent(w, r, filename, time.Time{}, strings.NewReader(content))
+	}))
+	defer origin.Close()
+	originAddress := origin.Listener.Addr().String()
+	_, originPort, err := net.SplitHostPort(originAddress)
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer downloader.Clear()
-	globalProxyCfg := &base.DownloaderProxyConfig{
-		Enable: true,
-		Scheme: "socks5",
-		Host:   proxyListener.Addr().String(),
-		Usr:    usr,
-		Pwd:    pwd,
-	}
-	if buildProxyConfig != nil {
-		globalProxyCfg = buildProxyConfig(globalProxyCfg)
-	}
-	downloader.cfg.DownloaderStoreConfig.Proxy = globalProxyCfg
 
-	req := &base.Request{
-		URL: test.ExternalDownloadUrl,
-	}
-	if buildReqProxy != nil {
-		req.Proxy = buildReqProxy(&base.RequestProxy{
-			Scheme: "socks5",
-			Host:   proxyListener.Addr().String(),
-			Usr:    usr,
-			Pwd:    pwd,
+	plain, plainDials := startResolveSOCKSProxy(t, originAddress, "", "", false)
+	auth, authDials := startResolveSOCKSProxy(t, originAddress, "admin", "123", false)
+	rejecting, rejectingDials := startResolveSOCKSProxy(t, originAddress, "", "", true)
+	system := &base.DownloaderProxyConfig{Enable: true, System: true}
+	const childEnv = "GOPEED_TEST_CREATE_WITH_PROXY_CHILD"
+
+	for _, tc := range []struct {
+		name       string
+		global     *base.DownloaderProxyConfig
+		reqMode    base.RequestProxyMode
+		envProxy   string
+		proxyDials *atomic.Int64
+		wantError  bool
+	}{
+		{name: "no_global_proxy"},
+		{name: "disabled_global_proxy", global: &base.DownloaderProxyConfig{Scheme: "socks5", Host: plain}},
+		{name: "system_without_proxy_environment", global: system},
+		{name: "system_proxy_error", global: system, envProxy: rejecting, proxyDials: rejectingDials, wantError: true},
+		{name: "system_with_proxy_environment", global: system, envProxy: plain, proxyDials: plainDials},
+		{name: "missing_proxy_scheme", global: &base.DownloaderProxyConfig{Enable: true, Host: plain}},
+		{name: "missing_proxy_host", global: &base.DownloaderProxyConfig{Enable: true, Scheme: "socks5"}},
+		{name: "global_proxy", global: &base.DownloaderProxyConfig{Enable: true, Scheme: "socks5", Host: plain}, proxyDials: plainDials},
+		{name: "authenticated_global_proxy", global: &base.DownloaderProxyConfig{Enable: true, Scheme: "socks5", Host: auth, Usr: "admin", Pwd: "123"}, proxyDials: authDials},
+		{name: "request_follows_global", global: &base.DownloaderProxyConfig{Enable: true, Scheme: "socks5", Host: plain}, reqMode: base.RequestProxyModeFollow, proxyDials: plainDials},
+		{name: "request_disables_global", global: &base.DownloaderProxyConfig{Enable: true, Scheme: "socks5", Host: plain}, reqMode: base.RequestProxyModeNone},
+		{name: "request_custom_proxy", reqMode: base.RequestProxyModeCustom, proxyDials: plainDials},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// net/http caches its environment proxy settings for the lifetime of
+			// the process. Give each system proxy case a fresh test process.
+			if tc.global == system && os.Getenv(childEnv) != tc.name {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDownloader_CreateWithProxy$/^"+tc.name+"$", "-test.timeout=15s")
+				cmd.Env = append(os.Environ(), childEnv+"="+tc.name)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("isolated system proxy test: %v\n%s", err, output)
+				}
+				return
+			}
+			if tc.global == system {
+				for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"} {
+					t.Setenv(key, "")
+				}
+			}
+
+			address := originAddress
+			if tc.envProxy != "" {
+				t.Setenv("HTTP_PROXY", "socks5://"+tc.envProxy)
+				t.Setenv("HTTPS_PROXY", "socks5://"+tc.envProxy)
+				// The environment policy automatically bypasses IP loopback.
+				// Only the local SOCKS5 fixture resolves this hostname.
+				address = net.JoinHostPort(resolveSOCKSFixtureHost, originPort)
+			}
+
+			downloader := NewDownloader(&DownloaderConfig{FetchManagers: []fetcher.FetcherManager{new(httpFetcher.FetcherManager)}})
+			if err := downloader.Setup(); err != nil {
+				t.Fatal(err)
+			}
+			defer downloader.Clear()
+			downloader.cfg.DownloaderStoreConfig.Proxy = tc.global
+
+			req := &base.Request{URL: "https://" + address + "/" + filename, SkipVerifyCert: true}
+			if tc.reqMode != "" {
+				req.Proxy = &base.RequestProxy{Mode: tc.reqMode, Scheme: "socks5", Host: plain}
+			}
+
+			before := plainDials.Load() + authDials.Load() + rejectingDials.Load()
+			var expectedBefore int64
+			if tc.proxyDials != nil {
+				expectedBefore = tc.proxyDials.Load()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			rr, err := downloader.ResolveContext(ctx, req, nil)
+			if tc.proxyDials != nil {
+				if tc.proxyDials.Load() == expectedBefore {
+					t.Errorf("resolve did not use the configured SOCKS5 proxy")
+				}
+			} else if plainDials.Load()+authDials.Load()+rejectingDials.Load() != before {
+				t.Errorf("direct resolve used SOCKS5")
+			}
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("resolve succeeded after proxy rejected the connection")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := &base.Resource{
+				Size:  int64(len(content)),
+				Range: true,
+				Files: []*base.FileInfo{{Name: filename, Path: "", Size: int64(len(content))}},
+			}
+			if !test.AssertResourceEqual(want, rr.Res) {
+				t.Errorf("Resolve() got = %v, want %v", rr.Res, want)
+			}
 		})
 	}
-	rr, err := downloader.Resolve(req, nil)
-	if err != nil {
-		if errHandler == nil {
-			t.Fatal(err)
-		}
-		errHandler(err)
-		return
+}
+
+const resolveSOCKSFixtureHost = "proxy-fixture.invalid"
+
+type resolveSOCKSFixtureResolver struct{}
+
+func (resolveSOCKSFixtureResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	if name != resolveSOCKSFixtureHost {
+		return ctx, nil, fmt.Errorf("unexpected SOCKS5 hostname %q", name)
 	}
-	want := &base.Resource{
-		Size:  test.ExternalDownloadSize,
-		Range: true,
-		Files: []*base.FileInfo{
-			{
-				Name: test.ExternalDownloadName,
-				Path: "",
-				Size: test.ExternalDownloadSize,
-			},
+	return ctx, net.IPv4(127, 0, 0, 1), nil
+}
+
+func startResolveSOCKSProxy(t *testing.T, origin, user, password string, reject bool) (string, *atomic.Int64) {
+	t.Helper()
+	dials := new(atomic.Int64)
+	cfg := &socks5.Config{
+		Resolver: resolveSOCKSFixtureResolver{},
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != origin {
+				return nil, fmt.Errorf("unexpected SOCKS5 destination %q", address)
+			}
+			dials.Add(1)
+			if reject {
+				return nil, errors.New("test proxy rejected connection")
+			}
+			return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, address)
 		},
 	}
-	if !test.AssertResourceEqual(want, rr.Res) {
-		t.Errorf("Resolve() got = %v, want %v", rr.Res, want)
+	if user != "" {
+		cfg.Credentials = socks5.StaticCredentials{user: password}
 	}
+	proxy, err := socks5.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	go proxy.Serve(listener)
+	return listener.Addr().String(), dials
 }
 
 func TestDownloader_CreateRename(t *testing.T) {
