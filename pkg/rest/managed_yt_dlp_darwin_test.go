@@ -26,8 +26,8 @@ func TestManagedYtDlpRoutesRequireOwnedLocalSocketAndNoArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := "fixture-only"
-	old := Downloader
-	t.Cleanup(func() { Downloader = old })
+	previousCore, previousServer := Downloader, srv
+	t.Cleanup(func() { Downloader, srv = previousCore, previousServer })
 	start := func(network, address string) (*http.Client, string) {
 		t.Helper()
 		server, listener, err := BuildServer(&model.StartConfig{

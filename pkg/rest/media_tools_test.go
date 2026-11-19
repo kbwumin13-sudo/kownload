@@ -29,8 +29,8 @@ func TestMediaToolsRouteIsPrivateAuthenticatedAndTakesNoProbeInputs(t *testing.T
 	ff := filepath.Join(dir, "missing-ffmpeg")
 	node := filepath.Join(dir, "missing-node")
 	token := "fixture-rest-token"
-	old := Downloader
-	t.Cleanup(func() { Downloader = old })
+	previousCore, previousServer := Downloader, srv
+	t.Cleanup(func() { Downloader, srv = previousCore, previousServer })
 
 	start := func(network, address string) (*http.Client, string) {
 		t.Helper()
