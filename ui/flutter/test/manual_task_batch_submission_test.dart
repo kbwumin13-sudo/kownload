@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
@@ -15,6 +16,7 @@ import 'package:gopeed/app/modules/create/controllers/create_controller.dart';
 import 'package:gopeed/app/modules/create/views/create_view.dart';
 import 'package:gopeed/app/modules/task/controllers/task_controller.dart';
 import 'package:gopeed/app/modules/task/views/task_batch_groups.dart';
+import 'package:gopeed/app/rpc/rpc.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/database/task_batch_journal.dart';
 import 'package:gopeed/database/task_batch_journal_store.dart';
@@ -118,6 +120,7 @@ void main() {
     Get.put(CreateController());
     Get.put<MacTaskListController>(Tasks());
     MacPanel.presentation.value = 'panel';
+    MacPanel.visible.value = false;
     MacPanel.incoming.value = null;
     MacPanel.taskResult.value = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -188,6 +191,44 @@ void main() {
   Future<void> click(WidgetTester t) async {
     await t.tap(find.byTooltip('开始下载'));
     await t.pump();
+    await t.pump(const Duration(milliseconds: 250));
+    final preview = find.byKey(const ValueKey('batch-preview-confirm'));
+    if (preview.hitTestable().evaluate().isNotEmpty) {
+      await t.tap(preview);
+      await t.pump();
+      await t.pump(const Duration(milliseconds: 250));
+    }
+  }
+
+  final preview = find.byKey(const ValueKey('batch-preview'));
+  final previewConfirm = find.byKey(const ValueKey('batch-preview-confirm'));
+  final previewCancel = find.byKey(const ValueKey('batch-preview-cancel'));
+  final previewAll = find.byKey(const ValueKey('batch-preview-select-all'));
+  Finder previewRow(int number) =>
+      find.byKey(ValueKey('batch-preview-item-$number'));
+
+  Future<int> importBrowser(WidgetTester t, Map<String, Object> draft) async {
+    final inbox = Get.find<AppController>().batchPreviewInbox;
+    return (await t.runAsync(() async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final subscription = server.listen(
+          (req) => inbox.handle(RpcContext(req, req.response)));
+      final client = HttpClient();
+      try {
+        final request = await client.postUrl(
+            Uri.parse('http://127.0.0.1:${server.port}/batchPreview'));
+        final body = utf8.encode(jsonEncode(draft));
+        request.contentLength = body.length;
+        request.add(body);
+        final response = await request.close();
+        await response.drain<void>();
+        return response.statusCode;
+      } finally {
+        client.close(force: true);
+        await subscription.cancel();
+        await server.close(force: true);
+      }
+    }))!;
   }
 
   String input(WidgetTester t) => urlInput!.text;
@@ -253,6 +294,181 @@ void main() {
             (query.evaluate().isEmpty ||
                 t.widget<TextButton>(query).onPressed != null));
   }
+
+  testWidgets('pasted text previews and cancels locally, then sends only selected exact URLs and path',
+      (t) async {
+    const signedA = 'HTTPS://Fixture.invalid/blob%2FPart?b=2&sig=AB%2f';
+    const signedB = 'HTTPS://Fixture.invalid/blob%2FPart?sig=AB%2F&b=2';
+    const unchecked = 'https://fixture.invalid/unchecked';
+    await mount(t);
+    await t.enterText(find.byKey(const ValueKey('panel-download-input')),
+        '$signedA\n$signedA\n$signedB\n$unchecked\nlocal-text');
+    await t.tap(find.byTooltip('开始下载'));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 250));
+    expect(preview, findsOneWidget);
+    expect(find.textContaining('重复 1 · 无效 1'), findsOneWidget);
+    expect(find.text('需要 HTTP(S) 下载地址'), findsOneWidget);
+    expect(find.descendant(of: preview, matching: find.textContaining('AB%2f')), findsNothing);
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+    await t.tap(previewCancel);
+    await t.pumpAndSettle();
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+    expect(input(t), startsWith(signedA));
+
+    await t.tap(find.byTooltip('开始下载'));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 250));
+    await t.tap(previewAll);
+    await t.pump();
+    expect(t.widget<FilledButton>(previewConfirm).onPressed, isNull);
+    await t.tap(previewAll);
+    await t.pump();
+    await t.tap(previewRow(4));
+    await t.pump();
+    final selected = '${dir.path}/chosen';
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel,
+            (call) async => call.method == 'chooseDirectory' ? selected : null);
+    await t.tap(find.byKey(const ValueKey('batch-preview-directory')));
+    await t.pump();
+    expect(find.textContaining(selected), findsOneWidget);
+    expect(f.requests, isEmpty);
+    await t.tap(previewConfirm);
+    await spin(t, () => f.posts == 1 && input(t).isEmpty);
+    final items = f.requests.singleWhere((r) => r['method'] == 'POST')['body']['reqs'] as List;
+    expect(items.map((item) => item['req']['url']), [signedA, signedB]);
+    expect(items.map((item) => item['opts']['path']), [selected, selected]);
+    expect(journalBox.puts, 1);
+    expect(singles, 0);
+  });
+
+  testWidgets('private browser import uses the same dialog, keeps per-item auth and only queries unknown receipt',
+      (t) async {
+    const signed = 'https://fixture.invalid/private-path?b=2&sig=private-query';
+    const foreign = 'https://elsewhere.invalid/no-auth';
+    final draft = <String, Object>{
+      'version': 1,
+      'items': [
+        {'url': signed, 'context': 'doc-1', 'header': {'Authorization': 'fixture-a', 'Cookie': 'session=a'}},
+        {'url': signed, 'context': 'doc-1', 'header': {'cookie': 'session=a', 'authorization': 'fixture-a'}},
+        {'url': signed, 'context': 'doc-1', 'header': {'Authorization': 'fixture-b', 'Cookie': 'session=b'}},
+        {'url': foreign},
+      ],
+    };
+    await mount(t);
+    expect(await importBrowser(t, draft), 200);
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 250));
+    expect(preview, findsOneWidget);
+    expect(find.textContaining('重复 1 · 无效 0'), findsOneWidget);
+    expect(previewRow(1), findsOneWidget);
+    expect(previewRow(3), findsOneWidget);
+    expect(find.descendant(of: preview, matching: find.textContaining('private-')), findsNothing);
+    expect(find.descendant(of: preview, matching: find.textContaining('fixture-a')), findsNothing);
+    expect(f.requests, isEmpty);
+    expect(journalBox.puts, 0);
+    expect(await importBrowser(t, draft), 409);
+    await t.tap(previewCancel);
+    await spin(t, () => !Get.find<CreateController>().isConfirming.value);
+    await t.pump(const Duration(milliseconds: 250));
+    expect(f.requests, isEmpty);
+    expect(MacPanel.incoming.value, isNull);
+
+    f.mode = 'partial';
+    expect(await importBrowser(t, draft), 200);
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 250));
+    await t.tap(previewRow(4));
+    await t.pump();
+    await t.tap(previewConfirm);
+    await spin(t, () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final body = f.requests.singleWhere((r) => r['method'] == 'POST')['body'];
+    final items = body['reqs'] as List;
+    expect(items.map((item) => item['req']['url']), [signed, signed]);
+    expect(items.map((item) => item['req']['extra']['header']), [
+      {'Authorization': 'fixture-a', 'Cookie': 'session=a'},
+      {'Authorization': 'fixture-b', 'Cookie': 'session=b'},
+    ]);
+    expect(input(t), urls);
+    expect(await importBrowser(t, draft), 409);
+    await queryOriginal(t);
+    expect(f.posts, 1);
+    expect(journalBox.puts, 1);
+    expect(f.requests.last['uri'].pathSegments.last, body['operationId']);
+    expect(singles, 0);
+  });
+
+  testWidgets('batch preview preserves path-freeze opt-in and the chosen directory',
+      (t) async {
+    f.override = (q) async {
+      if (!q.uri.path.contains('/http-path/v1/')) return f.handle(q);
+      final caps = [httpPathCapability];
+      if (q.uri.path.endsWith('/capability')) {
+        await f.respond(q, {
+          'scopeVersion': 1,
+          'datasetId': f.dataset,
+          'kind': httpPathCreateKind,
+          'requestVersion': 1,
+          'supported': true,
+          'requiredCapabilities': caps,
+          'methods': {
+            'create': 'POST',
+            'query': 'GET',
+            'cancel': 'POST',
+            'preview': 'POST',
+          },
+        });
+      } else if (q.method == 'POST') {
+        expect(journalBox.puts, 1);
+        final op = f.requests.last['body']['operationId'] as String;
+        await f.respond(q, {
+          ...f.wrapper(f.receipt(op, count: 1)),
+          'kind': httpPathCreateKind,
+          'requiredCapabilities': caps,
+        });
+      } else {
+        await f.respond(q, {
+          ...f.wrapper(f.receipt(q.uri.pathSegments.last, state: 'unknown')),
+          'kind': httpPathCreateKind,
+          'requiredCapabilities': [],
+        });
+      }
+    };
+    await mount(t);
+    await t.tap(find.text('更多选项'));
+    await t.pumpAndSettle();
+    final optIn = find.byKey(const ValueKey('http-path-opt-in'));
+    await t.ensureVisible(optIn);
+    await t.tap(optIn);
+    await t.pump();
+    await confirmChecksum(t);
+    await t.pump(const Duration(milliseconds: 250));
+    expect(t.widget<FilledButton>(previewConfirm).onPressed, isNull);
+    expect(f.requests, isEmpty);
+    await t.tap(previewRow(1));
+    final path = '${dir.path}/chosen';
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(MacPanel.channel,
+            (call) async => call.method == 'chooseDirectory' ? path : null);
+    await t.tap(find.byKey(const ValueKey('batch-preview-directory')));
+    await t.pump();
+    expect(f.requests, isEmpty);
+    await t.tap(previewConfirm);
+    await spin(t, () => f.posts == 1 && !Get.find<CreateController>().isConfirming.value);
+    final post = f.requests.singleWhere((r) => r['method'] == 'POST');
+    expect(post['uri'].path, endsWith('/http-path/v1/operations'));
+    expect(post['body']['pathIntent'], {
+      'version': 1,
+      'path': path,
+      'origin': 'user_selected',
+    });
+    expect(post['body']['request']['req']['url'], 'https://fixture.invalid/two');
+    expect(post['body']['request']['opts']['path'], path);
+    expect(singles, 0);
+  });
 
   for (final status in [409, 200]) {
     testWidgets('verified conflict $status keeps draft after old settled GET',

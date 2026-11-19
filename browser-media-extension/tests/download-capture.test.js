@@ -132,3 +132,39 @@ test('legitimate NanoID task starting with minus or underscore can complete hand
 test('cancel error with fresh matching active original aborts held task and resumes browser',async()=>{
  const f=fixture();f.cancelError=true;await f.capture();assert.equal(f.core.state,'aborted');assert.equal(f.commits().length,0);assert.deepEqual(f.calls,[['pause',7],['cancel',7],['resume',7]]);
 });
+
+test('batch preview reads only matching ordinary request evidence without consuming it',async()=>{
+ const f=fixture();
+ const selection={url:f.item.finalUrl,tabId:1,frameId:0,documentId:'doc-real',origin:'https://files.test'};
+ const requestHeaders=[
+  {name:'Cookie',value:'fixture-cookie'}, {name:'Authorization',value:'fixture-auth'},
+  {name:'Referer',value:'https://other.test/?private=1'},
+ ];
+ await f.observe({documentId:selection.documentId,initiator:selection.origin,requestHeaders});
+ const rpcBefore = [...f.rpc];
+ assert.deepEqual(f.controller.previewHeaders(selection),{
+  Authorization:'fixture-auth',Cookie:'fixture-cookie','Accept-Encoding':'identity',
+ });
+ for(const different of [{tabId:2},{documentId:'doc-other'},{frameId:9},{origin:'https://other.test'},{url:selection.url+'?v=1'}]){
+  assert.equal(f.controller.previewHeaders({...selection,...different}),undefined);
+ }
+ assert.deepEqual(f.calls,[]);
+ assert.deepEqual(f.rpc,rpcBefore);
+ assert.deepEqual(f.journal,{});
+ // The actual browser still owns the request; the legacy transfer can use it.
+ await f.controller.capture(f.item);
+ assert.equal(f.prepares().length,1);
+ assert.equal(f.prepares()[0].req.extra.header.Authorization,'fixture-auth');
+});
+
+test('ambiguous or foreign-initiator ordinary history cannot supply preview credentials',async()=>{
+ const selection={url:'https://files.test/a.bin',tabId:1,frameId:0,documentId:'doc-real',origin:'https://files.test'};
+ const f=fixture();
+ await f.observe({documentId:selection.documentId,initiator:'https://other.test'});
+ assert.equal(f.controller.previewHeaders(selection),undefined);
+ const g=fixture();
+ await g.observe({documentId:selection.documentId,initiator:selection.origin,requestId:'first'});
+ await g.observe({documentId:selection.documentId,initiator:selection.origin,requestId:'second'});
+ assert.equal(g.controller.previewHeaders(selection),undefined);
+ assert.deepEqual(g.calls,[]);
+});

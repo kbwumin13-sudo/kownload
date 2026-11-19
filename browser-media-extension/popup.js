@@ -73,6 +73,16 @@ async function open(message) {
   try { await request(message); window.close(); }
   catch { notify('actionFailed'); }
 }
+byId('batch-preview').addEventListener('click',async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await request({type:'BATCH_PREVIEW_SELECTION'});
+    if (result === 'selectionOpened') window.close();
+    else notify(result || 'actionFailed');
+  } catch { notify('actionFailed'); }
+  finally { button.disabled = false; }
+});
 byId('resources').addEventListener('click',() => open({type:'APP_MEDIA_OPEN'}));
 byId('settings').addEventListener('click',() => open({type:'APP_BRIDGE',action:'openSettings'}));
 permission.addEventListener('click',async () => {

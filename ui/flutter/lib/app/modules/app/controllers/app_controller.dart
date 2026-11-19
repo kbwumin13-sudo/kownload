@@ -46,6 +46,7 @@ import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
 import '../../../rpc/browser_submission.dart';
 import '../../../rpc/rpc.dart';
+import '../../../services/batch_preview.dart';
 import '../../../services/browser_integration.dart';
 import '../../../services/media_path_submission.dart';
 import '../../../../identity/app_identity_rpc.dart';
@@ -92,6 +93,8 @@ class BrowserCaptureEnded implements Exception {
 
 class AppController extends GetxController with WindowListener, TrayListener {
   static StartConfig? _defaultStartConfig;
+
+  final batchPreviewInbox = BatchPreviewInbox();
 
   /// Command line --hidden flag passed from main.dart
   final bool hiddenFromArgs;
@@ -601,6 +604,7 @@ class AppController extends GetxController with WindowListener, TrayListener {
       );
       await startRpcServer({
         "/identity": identityRpc.handle,
+        if (Util.isMacos()) "/batchPreview": batchPreviewInbox.handle,
         "/create": (ctx) async {
           final params = await ctx.readJSON();
           if (browserIntegration.media.hasPendingPathCreate &&

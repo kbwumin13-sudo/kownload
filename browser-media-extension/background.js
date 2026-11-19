@@ -1,11 +1,12 @@
 import {classify,nativeData,inspectData,newOperationId,bridgeFailure,nativeSubmission,submissionOutcome,safeHeader,protectedHeaders,cookieScopeHosts,recoverableTasks,nativeCookies,applyCandidate,applyNavigation,nativeForwardMessage,createSessionStore,resetCandidateIndex,groupMedia,mediaRelatedUrls,mediaContextUrls} from './lib.js';
+import {importLinkSelection} from './batch-preview.js';
 import {installNetdiskBridge} from './netdisk.js';
 import {installDownloadCapture,createAppBridge,createAppMediaBridge} from './lib.js';
 import {checkNativeConnection,sendNativeBound,nativeBinding,validBridgeBinding} from './native-identity.js';
 
 installNetdiskBridge(chrome);
 const appBridge = createAppBridge(chrome,message => native(message,false,true));
-installDownloadCapture(chrome,message => native(message,false,true),{appBridge});
+const downloads = installDownloadCapture(chrome,message => native(message,false,true),{appBridge});
 const appMedia = createAppMediaBridge(chrome,appBridge,{call:msg => handleMediaMessage(msg,{}),preview:previewRequest});
 
 const pendingHeaders = new Map();
@@ -379,6 +380,15 @@ chrome.runtime.onMessage.addListener((msg,sender,sendResponse) => {
   if (msg?.type === 'CONNECTION_CHECK') {
     if (sender.url !== chrome.runtime.getURL('popup.html')) return false;
     void checkNativeConnection(chrome).then(data => sendResponse({ok:true,data}),() => sendResponse({ok:false}));
+    return true;
+  }
+  if (msg?.type === 'BATCH_PREVIEW_SELECTION') {
+    if (sender.id !== chrome.runtime.id || sender.tab ||
+        sender.url !== chrome.runtime.getURL('popup.html')) return false;
+    void importLinkSelection(chrome,sender,downloads?.previewHeaders,async message => {
+      await native({method:'wakeup',meta:{silent:true}});
+      await native(message);
+    }).then(result => sendResponse({ok:true,data:result}),() => sendResponse({ok:false}));
     return true;
   }
   if (msg?.type === 'DOWNLOAD_CAPTURE') return false;

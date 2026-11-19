@@ -259,7 +259,28 @@ export function installDownloadCapture(browser,send,{appBridge=createAppBridge(b
     const previous=requests.get(event.url),same=previous && previous.requestId===event.requestId && previous.tabId===event.tabId && previous.frameId===event.frameId && previous.documentId===event.documentId;
     const ambiguous=previous && (previous.ambiguous || !same);
     if(!previous && requests.size>=200){requests.clear();requestsBlockedUntil=Date.now()+60000;return;}
-    requests.set(event.url,{requestId:event.requestId,tabId:event.tabId,frameId:event.frameId,documentId:event.documentId,method:event.method,...(!ambiguous?{header}:{}),ambiguous:!!ambiguous,expires:Date.now()+60000});
+    requests.set(event.url,{requestId:event.requestId,tabId:event.tabId,frameId:event.frameId,documentId:event.documentId,initiator:event.initiator,method:event.method,...(!ambiguous?{header}:{}),ambiguous:!!ambiguous,expires:Date.now()+60000});
   });},{urls:['<all_urls>']},['requestHeaders','extraHeaders']);
-  return {capture,poll,jobs,ready:restored};
+  function previewHeaders({url,tabId,frameId,documentId,origin}) {
+    const observed=requests.get(url);
+    if (!granted || !documentId || observed?.documentId!==documentId ||
+        observed.tabId!==tabId || observed.frameId!==frameId ||
+        observed.method!=='GET' || observed.initiator!==origin || observed.ambiguous ||
+        observed.expires<=Date.now() || requestsBlockedUntil>Date.now()) return;
+    const header={};
+    const seen = new Set();
+    for (const [name,value] of Object.entries(observed.header)) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (typeof value==='string' && value && new TextEncoder().encode(value).length<=8192 &&
+          !/[\x00-\x1f\x7f]/.test(value)) header[name]=value;
+    }
+    for (const name of ['Referer','Origin']) {
+      try {if (new URL(header[name]).origin!==origin) delete header[name];}
+      catch {delete header[name];}
+    }
+    return header;
+  }
+  return {capture,poll,jobs,ready:restored,previewHeaders};
 }

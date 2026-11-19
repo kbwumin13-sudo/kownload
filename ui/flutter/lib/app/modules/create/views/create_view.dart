@@ -47,6 +47,7 @@ import '../../task/controllers/task_recovery_feedback.dart';
 import '../../task/views/task_batch_groups.dart';
 import '../../task/views/http_completion_status.dart';
 import '../../../routes/app_pages.dart';
+import '../../../services/batch_preview.dart';
 import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
 import '../../../views/mac_task_failure.dart';
@@ -55,6 +56,7 @@ import '../../app/controllers/app_controller.dart';
 import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
 import 'netdisk_view.dart';
+import 'batch_preview_dialog.dart';
 import 'create_path_intent.dart';
 import 'browser_media_view.dart';
 import 'http_checksum_input.dart';
@@ -100,7 +102,8 @@ class _ManualBatchAttempt {
   final String? expectedSha256;
   final HttpPathIntent? pathIntent;
   final bool protocolDialog;
-  final int pathDraftEpoch;
+  final bool? previewFromBrowser;
+  final int pathDraftEpoch, pathRevision;
   final List<int> selection;
   final CreateTask? captureRequest;
   ScopedTaskBatchReply? lastReply;
@@ -113,7 +116,9 @@ class _ManualBatchAttempt {
       {this.expectedSha256,
       this.pathIntent,
       this.protocolDialog = false,
+      this.previewFromBrowser,
       this.pathDraftEpoch = 0,
+      this.pathRevision = 0,
       this.selection = const [],
       this.captureRequest});
 }
@@ -335,6 +340,8 @@ class CreateViewState extends State<CreateView> {
   Completer<void>? _manualConfirmationStop;
   String _manualObservedText = '';
   bool _manualBusy = false;
+  bool _batchPreviewOpen = false;
+  Future<bool> Function(BatchPreviewDraft)? _browserBatchPreview;
   final _manualNotice = RxnString();
 
   void _manualInputChanged() {
@@ -345,7 +352,8 @@ class CreateViewState extends State<CreateView> {
     final wasWaiting = _manualBusy;
     ++_manualEpoch;
     _manualBusy = false;
-    if (_manualBatch != null && _manualBatch!.input == text.trim()) {
+    if (_manualBatch != null &&
+        (_manualBatch!.previewFromBrowser != null || _manualBatch!.input == text.trim())) {
       _manualNotice.value = '输入已变化，原批次只可查询。';
     } else {
       _manualBatch = null;
@@ -369,6 +377,23 @@ class CreateViewState extends State<CreateView> {
     if (!_manualReferenceCurrent(attempt, epoch)) return false;
     if (attempt.captureRequest != null &&
         !identical(attempt.captureRequest, _panelRequest)) return false;
+    if (attempt.previewFromBrowser != null) {
+      if (attempt.input != _urlController.text.trim() ||
+          attempt.pathDraftEpoch != _pathDraftEpoch ||
+          attempt.pathRevision != _pathRevision ||
+          _pathPolicyOptIn != (attempt.pathIntent != null)) {
+        return false;
+      }
+      if (attempt.previewFromBrowser == true) return true;
+      if (!_checksumDraftMatches(attempt)) return false;
+      final items = attempt.batch.reqs!;
+      return attempt.signature ==
+          jsonEncode(_manualPayload(
+              items.map((item) => item.req!.url).toList(),
+              Options(
+                  path: items.first.opts!.path,
+                  extra: parseReqOptsExtra())).toJson());
+    }
     if (attempt.protocolDialog)
       return _netdiskOpen.value &&
           _pathPolicyOptIn &&
@@ -515,7 +540,16 @@ class CreateViewState extends State<CreateView> {
       _manualBatch = null;
       _manualBusy = false;
       _manualNotice.value = null;
-      await _completeCreate();
+      if (attempt.previewFromBrowser == true) {
+        final ids = _createdIds.toList();
+        _createdIds.clear();
+        await MacPanel.showTaskResult(ids, null);
+        if (Get.isRegistered<MacTaskListController>()) {
+          unawaited(Get.find<MacTaskListController>().getTasksState());
+        }
+      } else {
+        await _completeCreate();
+      }
     } else if (reply.createdTaskIds.isNotEmpty) {
       await MacPanel.showTaskResult(reply.createdTaskIds, '批次尚未全部确认，请查询原批次。');
       if (Get.isRegistered<MacTaskListController>()) {
@@ -553,6 +587,8 @@ class CreateViewState extends State<CreateView> {
   Future<void> _submitManualBatch(List<String> urls, Options opts,
       {String? expectedSha256,
       HttpPathCreateRequest? preparedRequest,
+      CreateTaskBatch? previewBatch,
+      bool? previewFromBrowser,
       bool protocolDialog = false,
       String? operationId}) async {
     if (_manualBatch != null) {
@@ -565,14 +601,17 @@ class CreateViewState extends State<CreateView> {
       return;
     }
     final input = _urlController.text.trim();
-    final capture = _pathPolicyOptIn &&
+    final capture = previewFromBrowser == null &&
+            _pathPolicyOptIn &&
             _panelRequest?.browserHandoff == null &&
             _panelRequest?.browserOperationId != null
         ? _panelRequest
         : null;
     final epoch = ++_manualEpoch;
-    final raw = jsonEncode(
-        (preparedRequest?.batch ?? _manualPayload(urls, opts)).toJson());
+    final raw = jsonEncode((preparedRequest?.batch ??
+            previewBatch ??
+            _manualPayload(urls, opts))
+        .toJson());
     final frozen = CreateTaskBatch.fromJson(jsonDecode(raw));
     HttpPathCreateRequest? pathRequest = preparedRequest;
     if (_pathPolicyOptIn && pathRequest == null) {
@@ -646,7 +685,9 @@ class CreateViewState extends State<CreateView> {
           expectedSha256: expectedSha256,
           pathIntent: pathRequest?.pathIntent,
           protocolDialog: protocolDialog,
+          previewFromBrowser: previewFromBrowser,
           pathDraftEpoch: _pathDraftEpoch,
+          pathRevision: _pathRevision,
           selection: List.unmodifiable(opts.selectFiles),
           captureRequest: capture);
       // Preflight is a pure capability/domain query, never a recovered submit permit.
@@ -777,6 +818,8 @@ class CreateViewState extends State<CreateView> {
     _renameController.addListener(_invalidatePathPreview);
     _connectionsController.addListener(_invalidatePathPreview);
     if (Util.isMacos()) {
+      _browserBatchPreview = _openBrowserBatchPreview;
+      Get.find<AppController>().batchPreviewInbox.open = _browserBatchPreview;
       MacPanel.focusRequests.addListener(_focusInput);
       MacPanel.incoming.addListener(_receiveInput);
       MacPanel.taskResult.addListener(_receiveTaskResult);
@@ -830,6 +873,7 @@ class CreateViewState extends State<CreateView> {
           generation == _inputFocusGeneration &&
           MacPanel.visible.value &&
           MacPanel.presentation.value == 'panel' &&
+          !_batchPreviewOpen &&
           !_netdiskOpen.value &&
           _onboarding == null) {
         _inputFocus.requestFocus();
@@ -873,6 +917,8 @@ class CreateViewState extends State<CreateView> {
     MacPanel.incoming.removeListener(_receiveInput);
     MacPanel.taskResult.removeListener(_receiveTaskResult);
     if (Get.isRegistered<AppController>()) {
+      final inbox = Get.find<AppController>().batchPreviewInbox;
+      if (identical(inbox.open, _browserBatchPreview)) inbox.open = null;
       Get.find<AppController>()
           .browserIntegration
           .media
@@ -2264,6 +2310,7 @@ class CreateViewState extends State<CreateView> {
                   painter.dispose();
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted &&
+                        !_batchPreviewOpen &&
                         !_netdiskOpen.value &&
                         _onboarding == null &&
                         Get.isDialogOpen != true) {
@@ -2418,8 +2465,11 @@ class CreateViewState extends State<CreateView> {
                                                       mainAxisSize:
                                                           MainAxisSize.min,
                                                       children: [
-                                                          const Text('下载',
-                                                              style: TextStyle(
+                                                          Text(
+                                                              _isManualTextBatch(input.text)
+                                                                  ? '预览'
+                                                                  : '下载',
+                                                              style: const TextStyle(
                                                                   fontSize:
                                                                       12)),
                                                           const SizedBox(
@@ -2928,11 +2978,178 @@ class CreateViewState extends State<CreateView> {
     return true;
   }
 
+  bool _isManualTextBatch(String text) {
+    if (_panelRequest != null ||
+        _originalRequest != null ||
+        _netdiskRequest.value != null ||
+        Get.find<AppController>().pendingUpdateTask.value != null ||
+        controller.fileDataUri.isNotEmpty ||
+        !text.contains(RegExp(r'[\r\n]'))) {
+      return false;
+    }
+    final lines = const LineSplitter()
+        .convert(text)
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+    return lines.length > 1 &&
+        parseNetdiskInputs(text).isEmpty &&
+        lines.every((line) => !const {
+              Protocol.netdisk,
+              Protocol.bt,
+              Protocol.ed2k,
+            }.contains(parseProtocol(line)));
+  }
+
+  Future<bool> _openBrowserBatchPreview(BatchPreviewDraft draft) async {
+    final app = Get.find<AppController>();
+    if (!mounted ||
+        controller.isConfirming.value ||
+        _manualBusy ||
+        _manualBatch != null ||
+        _onboarding != null ||
+        _netdiskOpen.value ||
+        _netdiskRequest.value != null ||
+        _panelRequest != null ||
+        _originalRequest != null ||
+        app.pendingUpdateTask.value != null ||
+        app.browserIntegration.media.active != null) {
+      return false;
+    }
+    controller.isConfirming.value = true;
+    _batchPreviewOpen = true;
+    final confirmation = ++_confirmationEpoch;
+    try {
+      if (!MacPanel.visible.value || MacPanel.presentation.value != 'panel') {
+        await MacPanel.showPanel();
+      }
+      if (!mounted) return false;
+      unawaited(_runBrowserBatchPreview(draft, confirmation));
+      return true;
+    } catch (_) {
+      _batchPreviewOpen = false;
+      if (mounted && confirmation == _confirmationEpoch) {
+        _releaseConfirmation();
+      }
+      return false;
+    }
+  }
+
+  Future<void> _runBrowserBatchPreview(
+      BatchPreviewDraft draft, int confirmation) async {
+    try {
+      await _confirmBatchPreview(draft, confirmation);
+    } catch (_) {
+      if (mounted) _manualNotice.value = '无法打开或提交批量预览。';
+    } finally {
+      if (mounted && confirmation == _confirmationEpoch) {
+        _releaseConfirmation();
+      }
+    }
+  }
+
+  Future<void> _confirmBatchPreview(
+      BatchPreviewDraft draft, int confirmation) async {
+    _batchPreviewOpen = true;
+    final PathIntent initialPath;
+    final BatchPreviewSelection? selected;
+    final protectPath = _pathPolicyOptIn;
+    final manualHeaders = !draft.fromBrowser &&
+        _httpHeaderControllers.any((row) =>
+            row.name.text.trim().isNotEmpty && row.value.text.trim().isNotEmpty);
+    final input = _urlController.text;
+    final pathEpoch = _pathDraftEpoch;
+    final previousHeight = MacPanel.height;
+    try {
+      _syncDefaultDownloadPath();
+      initialPath = _pathIntent;
+      MacPanel.cancelAutoHide();
+      await MacPanel.resize(600);
+      if (!mounted || confirmation != _confirmationEpoch) return;
+      selected = await MacPanel.transient(
+          () => showDialog<BatchPreviewSelection>(
+              context: context,
+              builder: (_) => BatchPreviewDialog(
+                  draft: draft,
+                  initialPath: initialPath,
+                  singleItemOnly: protectPath || manualHeaders,
+                  singleItemHint: protectPath
+                      ? '已启用路径冻结，请只选一项。'
+                      : '已填写自定义请求头，请只选一项。')));
+    } finally {
+      _batchPreviewOpen = false;
+      await MacPanel.resize(previousHeight);
+    }
+    if (selected == null || !mounted || confirmation != _confirmationEpoch) {
+      return;
+    }
+    if (!await _ensureMacOnboarding() ||
+        !mounted ||
+        confirmation != _confirmationEpoch ||
+        pathEpoch != _pathDraftEpoch ||
+        input != _urlController.text ||
+        protectPath != _pathPolicyOptIn ||
+        Get.find<AppController>().pendingUpdateTask.value != null) {
+      return;
+    }
+    if (selected.path.origin == PathOrigin.defaultPath &&
+        selected.path.path != _pathIntent.path) {
+      _manualNotice.value = '默认目录已变化，请重新确认批量预览。';
+      return;
+    }
+    _createdIds.clear();
+    final opts = Options(
+        path: selected.path.path,
+        extra: draft.fromBrowser ? null : parseReqOptsExtra());
+    final batch = CreateTaskBatch(reqs: [
+      for (final row in selected.rows)
+        CreateTaskBatchItem(
+            req: draft.fromBrowser
+                ? Request(
+                    url: row.url,
+                    protocol: 'http',
+                    extra: row.headers.isEmpty
+                        ? null
+                        : ReqExtraHttp(header: row.headers).toJson())
+                : _requestForUrl(row.url),
+            opts: opts),
+    ]);
+    final typed = protectPath
+        ? HttpPathCreateRequest(batch,
+            pathIntent: HttpPathIntent(
+                path: selected.path.path, origin: selected.path.wireOrigin))
+        : null;
+    final stop = Completer<void>();
+    _manualConfirmationEpoch = confirmation;
+    _manualConfirmationStop = stop;
+    try {
+      await Future.any<void>([
+        _submitManualBatch(const [], opts,
+            preparedRequest: typed,
+            previewBatch: batch,
+            previewFromBrowser: draft.fromBrowser),
+        stop.future,
+      ]);
+    } finally {
+      if (_manualConfirmationEpoch == confirmation) {
+        _manualConfirmationEpoch = null;
+        _manualConfirmationStop = null;
+      }
+    }
+  }
+
   Future<void> _doConfirm() async {
     if (controller.isConfirming.value) {
       return;
     }
-    if (_checksumInputBlocked() || _pathInputBlocked()) return;
+    final textBatch = Util.isMacos() && _isManualTextBatch(_urlController.text);
+    final pendingPreview = _manualBatch;
+    final queryPreview = pendingPreview?.previewFromBrowser != null &&
+        _panelRequest == null &&
+        Get.find<AppController>().pendingUpdateTask.value == null &&
+        (textBatch || pendingPreview!.input == _urlController.text.trim());
+    if (!queryPreview &&
+        (_checksumInputBlocked() || (!textBatch && _pathInputBlocked()))) return;
     final confirmation = ++_confirmationEpoch;
     controller.isConfirming.value = true;
     _confirmingCapture = _panelRequest?.browserCapture == true
@@ -2943,6 +3160,15 @@ class CreateViewState extends State<CreateView> {
     _panelError.value = null;
     MacPanel.cancelAutoHide();
     try {
+      if (queryPreview) {
+        await _queryManualBatch();
+        return;
+      }
+      if (textBatch) {
+        await _confirmBatchPreview(
+            BatchPreviewDraft.text(_urlController.text), confirmation);
+        return;
+      }
       if (Util.isMacos()) _syncDefaultDownloadPath();
       _confirmController.start();
       if (_manualBatch?.protocolDialog == true) {
@@ -3090,7 +3316,8 @@ class CreateViewState extends State<CreateView> {
             (isMultiLine ||
                 expectedSha256 != null ||
                 _pathPolicyOptIn ||
-                _manualBatch != null) &&
+                (_manualBatch != null &&
+                    _manualBatch!.previewFromBrowser == null)) &&
             (_panelRequest == null ||
                 (_pathPolicyOptIn && _panelRequest?.browserHandoff == null)) &&
             (_originalRequest == null || _pathPolicyOptIn) &&

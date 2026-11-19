@@ -127,5 +127,17 @@
         "content": "$1"
       }
     }
+  },
+  "batchPreview": {
+    "message": "Preview selected links"
+  },
+  "selectionEmpty": {
+    "message": "Select links or HTTP(S) addresses in the main page first."
+  },
+  "selectionUnavailable": {
+    "message": "The current page selection is unavailable."
+  },
+  "selectionTooLarge": {
+    "message": "Select fewer links, up to 200 per import."
   }
 }

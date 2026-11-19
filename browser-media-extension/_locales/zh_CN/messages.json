@@ -127,5 +127,17 @@
         "content": "$1"
       }
     }
+  },
+  "batchPreview": {
+    "message": "预览选中链接"
+  },
+  "selectionEmpty": {
+    "message": "请先在网页正文中选中链接或 HTTP(S) 地址。"
+  },
+  "selectionUnavailable": {
+    "message": "无法读取当前网页的选区。"
+  },
+  "selectionTooLarge": {
+    "message": "请缩小选区，每次最多导入 200 项。"
   }
 }

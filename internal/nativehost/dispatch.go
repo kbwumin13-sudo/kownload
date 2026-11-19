@@ -89,6 +89,8 @@ func (d Dispatcher) Dispatch(ctx context.Context, body []byte) Response {
 			return failure(req.OperationID, "wakeup_failed", nil, nil)
 		}
 		return success
+	case "batchPreview":
+		return d.batchPreview(ctx, req)
 	case "browser":
 		var params struct {
 			Action   string `json:"action"`

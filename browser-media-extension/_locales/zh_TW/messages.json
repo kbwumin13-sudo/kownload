@@ -127,5 +127,17 @@
         "content": "$1"
       }
     }
+  },
+  "batchPreview": {
+    "message": "預覽已選連結"
+  },
+  "selectionEmpty": {
+    "message": "請先在網頁正文中選取連結或 HTTP(S) 地址。"
+  },
+  "selectionUnavailable": {
+    "message": "無法讀取目前網頁的選取範圍。"
+  },
+  "selectionTooLarge": {
+    "message": "請縮小選取範圍，每次最多匯入 200 項。"
   }
 }
