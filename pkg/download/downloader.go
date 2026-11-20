@@ -3138,7 +3138,12 @@ func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) 
 		}()
 		d.releaseMCPTaskLease(task)
 		if pauseErr == nil {
-			_ = d.releasePathOutput(task)
+			// Ordinary HTTP tasks have no path-output binding. Their
+			// next run can already be restoring its fetcher while this
+			// pause finishes; leave that fetcher to its own lifecycle.
+			if _, bound := d.pathOutputs.Load(task.ID); bound {
+				_ = d.releasePathOutput(task)
+			}
 		}
 		// Callbacks may invoke Close themselves. Publish persistence completion
 		// and release operation locks before delivering the event.
