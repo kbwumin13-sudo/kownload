@@ -35,6 +35,14 @@ class FixtureDrainTests(unittest.TestCase):
 
 
 class TrialEvidenceTests(unittest.TestCase):
+    def test_keeps_ramp_probe_without_exporting_raw_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = pathlib.Path(tmp) / 'trace.jsonl'
+            raw = {'kind': 'rampProbe', 'port': 1, 'atNs': 42, 'secret': 'discard'}
+            trace.with_suffix('.jsonl.budget').write_text(json.dumps(raw) + '\n')
+            self.assertEqual(trial.read_budget_timeline(trace),
+                             [{'kind': 'rampProbe', 'port': 1, 'atNs': 42}])
+
     def test_captures_outcome_before_stop_and_marks_drain_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)

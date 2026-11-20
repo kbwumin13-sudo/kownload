@@ -353,7 +353,7 @@ def read_budget_timeline(trace):
         if not line.endswith(b'\n'):
             continue
         row = json.loads(line)
-        if row.get('kind') not in {'cooldown', 'probe', 'reopened', 'probeTimeout'}:
+        if row.get('kind') not in {'cooldown', 'probe', 'reopened', 'probeTimeout', 'rampProbe'}:
             continue
         events.append({k: row[k] for k in ('kind', 'port', 'atNs', 'untilNs') if k in row})
     return events
