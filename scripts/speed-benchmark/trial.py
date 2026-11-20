@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run a trial with an instrumented core or an isolated macOS App bundle."""
 import argparse
+from contextlib import suppress
 import ctypes
 import hashlib
 import http.client
@@ -8,6 +9,7 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import resource
 import secrets
 import socket
@@ -40,6 +42,7 @@ class TrialCore:
         self.proc = None
         self.lib = None
         self.token = ''
+        self.running = False
         if app:
             info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
             if not info['CFBundleIdentifier'].endswith('.speedbench'):
@@ -78,18 +81,21 @@ class TrialCore:
         if started.error:
             raise RuntimeError('core failed to start')
         self.address = f'127.0.0.1:{started.port}'
+        self.running = True
 
     def stop(self):
         if self.proc is not None:
-            self.proc.terminate()
+            with suppress(ProcessLookupError):
+                self.proc.terminate()
             try:
                 self.proc.wait(10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
             self.proc = None
-        elif self.lib is not None:
+        elif self.running:
             self.lib.Stop()
+            self.running = False
 
     def api(self, path, data=None, method='GET'):
         connection = UnixConnection(self.address) if self.app else http.client.HTTPConnection(
@@ -103,7 +109,7 @@ class TrialCore:
                 raise RuntimeError(f'API {method} {path.split("/")[0]} returned HTTP {response.status}')
             result = json.load(response)
             if result['code'] != 0:
-                raise RuntimeError(f'API {method} {path.split("/")[0]} failed: {result.get("msg")}')
+                raise RuntimeError(f'API {method} {path.split("/")[0]} failed with code {result["code"]}')
             return result['data']
         finally:
             connection.close()
@@ -138,13 +144,75 @@ def verify(path, expected):
                 and hashlib.file_digest(handle, 'sha256').hexdigest() == expected['sha'])
 
 
-def run(core, trace, spec, work):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+REQUEST_ERRORS = (OSError, http.client.HTTPException, ValueError, RuntimeError, KeyError)
+DRAIN_SECONDS = 10
 
-    def fixture(path):
-        with opener.open(spec['fixture'] + path, timeout=10) as response:
+
+class FixtureClient:
+    def __init__(self, base):
+        self.base = base
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def get(self, path, timeout):
+        with self.opener.open(self.base + path, timeout=timeout) as response:
             return response.read()
 
+    def drain(self, timeout, detailed=False):
+        """Return the final zero-inflight snapshot or the last diagnostic sample."""
+        deadline = time.monotonic() + timeout
+        last = None
+        endpoint = '/stats?summary=1'
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                last = json.loads(self.get(endpoint, min(2, remaining)))
+            except REQUEST_ERRORS as exc:
+                return last, f'fixture_stats_{type(exc).__name__}'
+            if not isinstance(last, dict) or type(last.get('inflight')) is not int:
+                return None, 'fixture_missing_inflight'
+            if last['inflight'] == 0:
+                if not detailed or endpoint == '/stats':
+                    return last, None
+                # Read the detailed evidence only once the cheap counter sees
+                # zero, and confirm that snapshot is still drained.
+                endpoint = '/stats'
+                continue
+            endpoint = '/stats?summary=1'
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        return last, 'fixture_drain_timeout'
+
+
+def safe_last_error(value):
+    # HTTP diagnostics have a small, documented vocabulary. Core logs and
+    # arbitrary API messages can echo URLs or authentication material.
+    if not isinstance(value, str):
+        return None
+    if value in {
+        'network error', 'timeout', 'cannot verify resource identity; partial file preserved',
+        'local file write failed', 'invalid range response',
+    }:
+        return value
+    status = re.match(r'^HTTP ([1-5][0-9]{2})(?: |$)', value)
+    return f'HTTP {status[1]}' if status else None
+
+
+def failure_reason(status, correct, terminal_recorded, row, last_error, trial_error):
+    if status in ('error', 'failed'):
+        tagged = row.get('reason')
+        if isinstance(tagged, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,47}', tagged):
+            return tagged
+        return last_error or 'core_terminal_error'
+    if status == 'done':
+        if not correct:
+            return 'missing_or_invalid_file'
+        if not terminal_recorded:
+            return 'terminal_trace_missing'
+        return None
+    if status in ('running', 'wait', 'waiting', 'ready'):
+        return trial_error or 'task_nonterminal'
+    return trial_error or status
+
+
+def run(core, trace, spec, work):
     api = core.api
     version = api('info')['version']
     cfg = api('config')
@@ -157,7 +225,6 @@ def run(core, trace, spec, work):
     else:
         http_cfg.pop('tuning', None)
     api('config', cfg, 'PUT')
-    fixture('/reset')
     downloads = work / 'downloads'
     downloads.mkdir()
     tasks = spec['tasks']
@@ -179,7 +246,7 @@ def run(core, trace, spec, work):
     def task_stats(task_id):
         try:
             return api(f'tasks/{task_id}/stats') or {}
-        except (OSError, http.client.HTTPException, ValueError, RuntimeError) as exc:
+        except REQUEST_ERRORS as exc:
             stats_errors.append(type(exc).__name__)
             return {}
     try:
@@ -208,55 +275,119 @@ def run(core, trace, spec, work):
             time.sleep(0.02 if len(ids) <= 20 else 0.10)
         if len(rows) != len(tasks):
             rows = read_trace(trace)
-            error = 'deadline expired before all terminal events were recorded'
-    except (OSError, http.client.HTTPException, RuntimeError, KeyError) as exc:
-        error = str(exc)
+            error = 'terminal_deadline'
+    except REQUEST_ERRORS as exc:
+        error = f'submission_or_trace_{type(exc).__name__}'
 
     usage1 = resource.getrusage(resource.RUSAGE_SELF)
     observed = time.monotonic() - begin
-    states = {t['id']: t['status'] for t in api('tasks')}
-    server = json.loads(fixture('/stats'))
+    try:
+        states = {t['id']: t['status'] for t in api('tasks')}
+    except REQUEST_ERRORS as exc:
+        states = {}
+        error = error or f'task_snapshot_{type(exc).__name__}'
     results = []
     for index, task in enumerate(tasks):
         task_id = ids[index] if index < len(ids) else None
-        status = states.get(task_id, 'notSubmitted')
+        status = states.get(task_id, 'notSubmitted' if task_id is None else 'statusUnavailable')
         row = rows.get(task['name'], {})
-        if task_id is not None:
-            stats = task_stats(task_id) or {}
-        else:
-            stats = {}
-        correct = verify(downloads / task['name'], task)
-        results.append(dict(timeline(row, submitted_ns), name=task['name'], status=status,
-                            correct=correct, terminalRecorded=row.get('status') == status,
+        stats = task_stats(task_id) if task_id is not None else {}
+        try:
+            correct = verify(downloads / task['name'], task)
+        except OSError:
+            correct = False
+        terminal_recorded = row.get('status') == status
+        last_error = safe_last_error(stats.get('lastError'))
+        reason = failure_reason(status, correct, terminal_recorded, row, last_error, error)
+        results.append(dict(timeline(row, submitted_ns), name=task['name'], source=task['source'],
+                            status=status, correct=correct, terminalRecorded=terminal_recorded,
+                            success=reason is None, failureReason=reason, lastError=last_error,
                             protocol=stats.get('protocol'), rangeState=stats.get('rangeState'),
                             newConnections=stats.get('newConnections'), reusedConnections=stats.get('reusedConnections'),
-                            rateLimits=stats.get('rateLimits'), timings=stats.get('timings'),
-                            adaptive=stats.get('adaptive'), lastError=stats.get('lastError')))
+                            requests=stats.get('requests'), rateLimits=stats.get('rateLimits'),
+                            retries=row.get('retries'), deferrals=row.get('deferrals'),
+                            timings=stats.get('timings'), adaptive=stats.get('adaptive')))
 
     terminal = [task['elapsed'] for task in results if task['elapsed'] is not None]
-    ok = not error and all(t['status'] == 'done' and t['correct'] and t['terminalRecorded'] for t in results)
+    ok = not error and all(t['success'] for t in results)
     result = {'version': version, 'ok': ok, 'elapsed': max(terminal) if len(terminal) == len(tasks) else None,
               'observedSeconds': observed, 'timeoutSeconds': spec['timeout'],
-              'server': server, 'tasks': results, 'error': error, 'adaptiveSamples': adaptive_samples,
+              'tasks': results, 'error': error, 'adaptiveSamples': adaptive_samples,
               'statsErrors': stats_errors,
               'taskCount': len(tasks), 'correctCount': sum(t['correct'] for t in results)}
-    if not ok and spec.get('debug'):
-        log = work / 'state/logs/core.log'
-        if log.is_file():
-            result['coreDiagnostics'] = [line for line in log.read_text().splitlines()
-                                         if 'task download failed' in line][-len(tasks):]
     if not core.app:
         result['cpuSeconds'] = (usage1.ru_utime - usage0.ru_utime) + (usage1.ru_stime - usage0.ru_stime)
         result['maxRSS'] = usage1.ru_maxrss
-    elif ok:
-        try:
-            core.stop()
-            core.start()
-            restored = {t['id']: t['status'] for t in api('tasks')}
-            result['restoredCount'] = sum(restored.get(task_id) == 'done' for task_id in ids)
-            result['ok'] = result['restoredCount'] == len(ids)
-        except (OSError, http.client.HTTPException, RuntimeError) as exc:
-            result.update(ok=False, error=f'App restart verification failed: {exc}')
+    return result, ids
+
+
+def verify_restored(core, ids, result):
+    # Download task evidence was captured before stopping the measured App.
+    try:
+        core.start()
+        restored = {t['id']: t['status'] for t in core.api('tasks')}
+        result['restoredCount'] = sum(restored.get(task_id) == 'done' for task_id in ids)
+        if result['restoredCount'] != len(ids):
+            result.update(ok=False, error='app_restore_mismatch')
+    except REQUEST_ERRORS as exc:
+        result.update(ok=False, error=f'app_restore_{type(exc).__name__}')
+    finally:
+        core.stop()
+
+
+def failed_trial(spec, error, server=None):
+    return {'ok': False, 'error': error, 'timeoutSeconds': spec['timeout'],
+            'statsIncomplete': True, 'server': server,
+            'taskCount': len(spec['tasks']),
+            'tasks': [{'name': t['name'], 'source': t['source'], 'success': False,
+                       'correct': False, 'terminalRecorded': False, 'status': 'unobserved',
+                       'failureReason': error} for t in spec['tasks']]}
+
+
+def read_budget_timeline(trace):
+    path = pathlib.Path(str(trace) + '.budget')
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_bytes().splitlines(keepends=True):
+        if not line.endswith(b'\n'):
+            continue
+        row = json.loads(line)
+        if row.get('kind') not in {'cooldown', 'probe', 'reopened', 'probeTimeout'}:
+            continue
+        events.append({k: row[k] for k in ('kind', 'port', 'atNs', 'untilNs') if k in row})
+    return events
+
+
+def execute(core, trace, spec, work, fixture):
+    server, reason = fixture.drain(DRAIN_SECONDS)
+    if reason:
+        return failed_trial(spec, 'pretrial_' + reason, server)
+    try:
+        fixture.get('/reset', 2)
+    except REQUEST_ERRORS as exc:
+        return failed_trial(spec, f'fixture_reset_{type(exc).__name__}', server)
+
+    try:
+        core.start()
+        result, ids = run(core, trace, spec, work)
+    except REQUEST_ERRORS as exc:
+        result, ids = failed_trial(spec, f'core_trial_{type(exc).__name__}'), []
+    finally:
+        core.stop()
+
+    # Stopping joins the Core and closes pooled transfers. Cancelled handlers
+    # finish flushing their counters asynchronously, so take only a drained
+    # snapshot as final evidence.
+    server, reason = fixture.drain(DRAIN_SECONDS, detailed=True)
+    result['server'] = server
+    with suppress(OSError, ValueError):
+        result['budgetTimeline'] = read_budget_timeline(trace)
+    result['statsIncomplete'] = result.get('statsIncomplete', False) or bool(reason)
+    if reason:
+        result['statsIncompleteReason'] = reason
+    if core.app and result['ok'] and not result['statsIncomplete']:
+        verify_restored(core, ids, result)
     return result
 
 
@@ -273,11 +404,7 @@ def main():
         work = pathlib.Path(work)
         trace = pathlib.Path(os.environ['KOWNLOAD_SPEEDBENCH_TRACE'])
         core = TrialCore(args.lib, args.app, work, trace)
-        try:
-            core.start()
-            result = run(core, trace, spec, work)
-        finally:
-            core.stop()
+        result = execute(core, trace, spec, work, FixtureClient(spec['fixture']))
         print(json.dumps(result))
 
 

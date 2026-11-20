@@ -526,6 +526,8 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 		if m != nil {
 			admission = m
 			defer admission.Leave()
+			ctx = context.WithValue(ctx, httpBudgetSourceKey{}, m.SourceKey())
+			ctx = transfer.WithDeferral(ctx, f.ctl.QueueWaiting, f.ctl.QueueChanged)
 		}
 	}
 
@@ -536,7 +538,8 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 
 	// Build HTTP request WITHOUT Range header (normal request)
 	// This allows the response to be reused for downloading (important for one-time URLs)
-	httpReq, err := f.buildRequest(f.requestContext(ctx), req)
+	requestCtx, admissionWait := trackHTTPAdmission(ctx)
+	httpReq, err := f.buildRequest(f.requestContext(requestCtx), req)
 	if err != nil {
 		f.setState(stateError)
 		return err
@@ -561,8 +564,9 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 		return err
 	}
 	// Record connection time as baseline for fast-fail timeout
-	f.updateMaxConnTime(time.Since(connStartTime))
-	f.diag.setResolve(time.Since(connStartTime))
+	setupTime := time.Since(connStartTime) - time.Duration(admissionWait.Load())
+	f.updateMaxConnTime(setupTime)
+	f.diag.setResolve(setupTime)
 	f.diag.response(resp)
 
 	// Parse response to get resource info
@@ -610,7 +614,11 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 		}
 	}
 	if !res.Range {
-		if f.ctl.Budget != nil && !f.ctl.Budget.Probe(f.sourceKey()) {
+		probeSource := f.sourceKey()
+		if admission != nil {
+			probeSource = admission.SourceKey()
+		}
+		if f.ctl.Budget != nil && !f.ctl.Budget.Probe(probeSource) {
 			// Never wait for a second permit while holding the first response.
 			f.diag.setRange(rangeNotProbed, "sourceBusy")
 		} else {
@@ -624,7 +632,8 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 				}
 			}
 			var state, reason string
-			res.Range, state, reason = probeRangeSupport(f.requestContext(parent), client, probeReq, resp, res.Size, extra.Connections)
+			probeContext := context.WithValue(f.requestContext(parent), httpBudgetSourceKey{}, probeSource)
+			res.Range, state, reason = probeRangeSupport(probeContext, client, probeReq, resp, res.Size, extra.Connections)
 			if ahead != nil {
 				close(stopAhead)
 				resp.Body = ahead
@@ -1587,6 +1596,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 			return
 		}
 		if errors.Is(err, errSharedWaveDraining) {
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
@@ -1693,6 +1705,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 					return
 				}
 				retries++
+				if benchtrace.Enabled {
+					benchtrace.Retry(f.meta.Req.URL)
+				}
 				continue
 			}
 			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
@@ -1719,6 +1734,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 				f.diag.waited(time.Since(start))
 			}
 			retries++
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 
@@ -1727,6 +1745,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 				return
 			}
 			retries++
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 		if shouldCountHTTPFailure(err) || errors.Is(err, errInvalidRangeResponse) {
@@ -1771,6 +1792,9 @@ func (f *Fetcher) runConnection(conn *connection) {
 			retryDelay = 5 * time.Second
 		}
 		retries++
+		if benchtrace.Enabled {
+			benchtrace.Retry(f.meta.Req.URL)
+		}
 		if !sleepContext(conn.ctx, retryDelay) {
 			return
 		}
@@ -1813,6 +1837,7 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 	}
 	f.connMu.Unlock()
 
+	ctx, admissionWait := trackHTTPAdmission(ctx)
 	httpReq, err := f.buildRequest(f.requestContext(ctx), f.meta.Req)
 	if err != nil {
 		return err
@@ -1900,7 +1925,7 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 	}
 
 	// Record successful connection time for adaptive timeout and tail handoff.
-	setupTime := time.Since(connStartTime)
+	setupTime := time.Since(connStartTime) - time.Duration(admissionWait.Load())
 	f.updateMaxConnTime(setupTime)
 	f.diag.response(resp)
 	f.deferrals.Store(0)
@@ -2160,7 +2185,8 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			return
 		}
 		err := func() error {
-			httpReq, err := f.buildRequest(f.requestContext(scope.Context), f.meta.Req)
+			requestCtx, admissionWait := trackHTTPAdmission(scope.Context)
+			httpReq, err := f.buildRequest(f.requestContext(requestCtx), f.meta.Req)
 			if err != nil {
 				return err
 			}
@@ -2182,7 +2208,7 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			}
 
 			// Record successful connection time for adaptive timeout
-			f.updateMaxConnTime(time.Since(connStartTime))
+			f.updateMaxConnTime(time.Since(connStartTime) - time.Duration(admissionWait.Load()))
 			f.diag.response(resp)
 			f.deferrals.Store(0)
 			if member != nil {
@@ -2247,6 +2273,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 		}
 
 		if errors.Is(err, errSharedWaveDraining) {
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 		if handled,refreshErr := f.reportSharedRefresh(conn.ctx,f.recoveryWork(conn),err); handled {
@@ -2297,6 +2326,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 					return
 				}
 				retries++
+				if benchtrace.Enabled {
+					benchtrace.Retry(f.meta.Req.URL)
+				}
 				continue
 			}
 			wait, deferred, giveUp := f.rateLimit(re, rateLimits)
@@ -2317,6 +2349,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			}
 			f.diag.waited(time.Since(start))
 			retries++
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 
@@ -2325,6 +2360,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				return
 			}
 			retries++
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			continue
 		}
 		if shouldCountHTTPFailure(err) {
@@ -2362,6 +2400,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 				retryDelay = 5 * time.Second
 			}
 			retries++
+			if benchtrace.Enabled {
+				benchtrace.Retry(f.meta.Req.URL)
+			}
 			if !sleepContext(conn.ctx, retryDelay) {
 				return
 			}
@@ -2377,6 +2418,9 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 			retryDelay = 5 * time.Second
 		}
 		retries++
+		if benchtrace.Enabled {
+			benchtrace.Retry(f.meta.Req.URL)
+		}
 		if !sleepContext(conn.ctx, retryDelay) {
 			return
 		}

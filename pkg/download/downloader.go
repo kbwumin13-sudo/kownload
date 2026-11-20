@@ -1497,7 +1497,7 @@ func (d *Downloader) emit(eventKey EventKey, task *Task, errs ...error) {
 	if benchtrace.Enabled && task != nil && (eventKey == EventKeyDone || eventKey == EventKeyError) {
 		task.dataLock.RLock()
 		if task.Protocol == "http" && task.Meta != nil && task.Meta.Req != nil {
-			benchtrace.Terminal(task.Meta.Req.URL, string(eventKey))
+			benchtrace.Terminal(task.Meta.Req.URL, string(eventKey), benchmarkHTTPReason(errs))
 		}
 		task.dataLock.RUnlock()
 	}
@@ -2178,6 +2178,13 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 	d.lock.Unlock()
 	if !queued {
 		return
+	}
+	if benchtrace.Enabled {
+		task.dataLock.RLock()
+		if task.Protocol == "http" && task.Meta != nil && task.Meta.Req != nil {
+			benchtrace.Deferral(task.Meta.Req.URL)
+		}
+		task.dataLock.RUnlock()
 	}
 	d.emit(EventKeyProgress, task)
 	d.notifyRunning()

@@ -19,7 +19,8 @@
 //	  abortafter=B              truncate one active response after B bytes
 //	  reject=404                fail every request with a terminal HTTP status
 //	/sha?name=&size=            SHA-256 of that content
-//	/stats                      counters since the last /reset
+//	/stats                      counters and completed requests since the last /reset
+//	/stats?summary=1            counters only, for drainage polling
 package main
 
 import (
@@ -39,6 +40,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,12 +154,96 @@ type counters struct {
 	slowStreams   atomic.Int64
 }
 
+type requestEvent struct {
+	ID                int64  `json:"id"`
+	Task              string `json:"task"`
+	Group             string `json:"group"`
+	StartNs           int64  `json:"startNs"`
+	ResponseNs        int64  `json:"responseNs"`
+	EndNs             int64  `json:"endNs"`
+	Status            int    `json:"status"`
+	RefusalSource     string `json:"refusalSource,omitempty"`
+	IsRange           bool   `json:"isRange"`
+	RangeStart        *int64 `json:"rangeStart,omitempty"`
+	RangeEndExclusive *int64 `json:"rangeEndExclusive,omitempty"`
+	RetryAfterType    string `json:"retryAfterType,omitempty"`
+	RetryAfterWaitNs  *int64 `json:"retryAfterWaitNs,omitempty"`
+	BodyStart         *int64 `json:"bodyStart,omitempty"`
+	BytesSent         int64  `json:"bytesSent"`
+	file              contentKey
+}
+
+// Separate the original synthetic content key from labels suitable for output.
+type contentKey struct {
+	name string
+	size int64
+}
+
 type server struct {
-	mu     sync.Mutex
-	groups map[string]*group
-	shas   map[string]string
-	c      *counters
-	dmg    []byte
+	// Start, finish and reset a request epoch under the same lock. Consequently,
+	// a snapshot with inflight == 0 contains every completed request's totals.
+	mu       sync.Mutex
+	groups   map[string]*group
+	shas     map[string]string
+	c        *counters
+	epoch    time.Time
+	timeline []requestEvent
+	dmg      []byte
+}
+
+// Requests come from synthetic scenarios. Reject escaped, long and unexpected
+// labels in the exported trace. No URL, query string or request header is emitted.
+func fixtureLabel(label string) string {
+	if len(label) > 64 || label == "" {
+		return "_invalid_label"
+	}
+	for _, r := range label {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == '-') {
+			return "_invalid_label"
+		}
+	}
+	return label
+}
+
+func retryAfter(value string, now time.Time) (kind string, wait *int64) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "missing", nil
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 63); err == nil && seconds <= uint64((1<<63-1)/time.Second) {
+		nanos := int64(seconds) * int64(time.Second)
+		return "seconds", &nanos
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		nanos := max(int64(0), at.Sub(now).Nanoseconds())
+		return "date", &nanos
+	}
+	return "invalid", nil
+}
+
+type byteSpan struct {
+	start, end int64
+}
+
+func duplicateBytes(timeline []requestEvent) int64 {
+	byFile := map[contentKey][]byteSpan{}
+	for _, event := range timeline {
+		if event.BodyStart != nil && event.BytesSent > 0 {
+			from := *event.BodyStart
+			byFile[event.file] = append(byFile[event.file], byteSpan{from, from + event.BytesSent})
+		}
+	}
+	var duplicates int64
+	for _, spans := range byFile {
+		sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+		var coveredEnd int64
+		for _, span := range spans {
+			duplicates += max(0, min(coveredEnd, span.end)-span.start)
+			coveredEnd = max(coveredEnd, span.end)
+		}
+	}
+	return duplicates
 }
 
 func (s *server) group(name string, q map[string][]string) *group {
@@ -224,36 +310,60 @@ func parseRange(h string, size int64) (int64, int64, bool) {
 type downloadConnKey struct{}
 
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
-	c := s.c
-	if used, ok := r.Context().Value(downloadConnKey{}).(*atomic.Bool); ok && used.CompareAndSwap(false, true) {
+	entered := time.Now()
+	s.mu.Lock()
+	c, epoch := s.c, s.epoch
+	if used, ok := r.Context().Value(downloadConnKey{}).(*atomic.Pointer[counters]); ok && used.Swap(c) != c {
 		c.connections.Add(1)
 	}
-	c.requests.Add(1)
+	id := c.requests.Add(1)
 	n := c.inflight.Add(1)
-	entered := time.Now()
-	defer func() {
-		c.inflight.Add(-1)
-		c.requestNanos.Add(time.Since(entered).Nanoseconds())
-	}()
-	for {
-		m := c.maxInflight.Load()
-		if n <= m || c.maxInflight.CompareAndSwap(m, n) {
-			break
-		}
+	if n > c.maxInflight.Load() {
+		c.maxInflight.Store(n)
 	}
+	s.mu.Unlock()
+
 	q := r.URL.Query()
 	name := strings.TrimPrefix(r.URL.Path, "/f/")
 	size := int64(num(q, "size"))
+	groupName := str(q, "group", name)
+	rangeHeader := r.Header.Get("Range")
+	event := requestEvent{
+		ID: id, Task: fixtureLabel(name), Group: fixtureLabel(groupName),
+		StartNs: max(0, entered.Sub(epoch).Nanoseconds()), IsRange: rangeHeader != "",
+		file: contentKey{name, size},
+	}
+	defer func() {
+		now := time.Now()
+		event.EndNs = now.Sub(epoch).Nanoseconds()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.timeline = append(s.timeline, event)
+		c.requestNanos.Add(now.Sub(entered).Nanoseconds())
+		c.inflight.Add(-1)
+	}()
+	writeHeader := func(status int) {
+		now := time.Now()
+		event.ResponseNs, event.Status = now.Sub(epoch).Nanoseconds(), status
+		if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+			event.RetryAfterType, event.RetryAfterWaitNs = retryAfter(w.Header().Get("Retry-After"), now)
+		}
+		w.WriteHeader(status)
+	}
+	if event.IsRange {
+		c.rangeRequests.Add(1)
+		if start, end, ok := parseRange(rangeHeader, size); ok {
+			endExclusive := end + 1
+			event.RangeStart, event.RangeEndExclusive = &start, &endExclusive
+		}
+	}
 	if size <= 0 {
+		event.ResponseNs, event.Status = time.Since(epoch).Nanoseconds(), http.StatusBadRequest
 		http.Error(w, "size required", http.StatusBadRequest)
 		return
 	}
 	mode := str(q, "mode", "declared")
-	g := s.group(str(q, "group", name), q)
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" {
-		c.rangeRequests.Add(1)
-	}
+	g := s.group(groupName, q)
 	if *rtt > 0 {
 		time.Sleep(*rtt)
 	}
@@ -270,6 +380,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if g.bucket != nil {
 		if ok, wait := g.bucket.take(); !ok {
+			event.RefusalSource = "tokenBucket"
 			g.refused.Add(1)
 			c.refused.Add(1)
 			switch str(q, "retry", "auto") {
@@ -281,11 +392,12 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
 			}
 			status, _ := strconv.Atoi(str(q, "status", "429"))
-			w.WriteHeader(status)
+			writeHeader(status)
 			return
 		}
 	}
 	if rangeHeader != "" && g.limited.Load() > 0 && g.limited.Add(-1) >= 0 {
+		event.RefusalSource = "finiteRange"
 		g.refused.Add(1)
 		c.refused.Add(1)
 		switch retry := str(q, "retry", "2"); {
@@ -297,7 +409,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", retry)
 		}
 		status, _ := strconv.Atoi(str(q, "status", "429"))
-		w.WriteHeader(status)
+		writeHeader(status)
 		return
 	}
 	seed := seedOf(name + "/" + strconv.FormatInt(size, 10))
@@ -311,12 +423,12 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 	start, end := int64(0), size-1
 	status := http.StatusOK
 	if rangeHeader != "" && mode != "ignore" {
-		var ok bool
-		if start, end, ok = parseRange(rangeHeader, size); !ok {
+		if event.RangeStart == nil {
 			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			writeHeader(http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
+		start, end = *event.RangeStart, *event.RangeEndExclusive-1
 		status = http.StatusPartialContent
 		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 	}
@@ -324,11 +436,13 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 		g.resumed.Add(1)
 	}
 	if forced := int(num(q, "reject")); forced >= 400 {
-		w.WriteHeader(forced)
+		event.RefusalSource = "forced"
+		writeHeader(forced)
 		return
 	}
 	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-	w.WriteHeader(status)
+	event.BodyStart = &start
+	writeHeader(status)
 	var stream *pacer
 	rate := num(q, "perconn")
 	if slow := num(q, "slowonce"); slow > 0 && start >= size/3 && g.slow.CompareAndSwap(false, true) {
@@ -364,6 +478,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 			fill(block, seed, off)
 		}
 		written, err := w.Write(block)
+		event.BytesSent += int64(written)
 		c.bytesSent.Add(int64(written))
 		if err != nil {
 			return
@@ -408,41 +523,66 @@ func (s *server) sha(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(sum))
 }
 
-func (s *server) stats(w http.ResponseWriter, _ *http.Request) {
+func (s *server) stats(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
 	c := s.c
 	groups := map[string]int64{}
 	resumes := map[string]map[string]int64{}
-	s.mu.Lock()
 	for name, g := range s.groups {
-		groups[name] = g.refused.Load()
+		label := fixtureLabel(name)
+		groups[label] += g.refused.Load()
 		if at := g.abortAt.Load(); at > 0 {
-			resumes[name] = map[string]int64{"missingFrom": at, "exactResumeRequests": g.resumed.Load()}
+			resumes[label] = map[string]int64{"missingFrom": at, "exactResumeRequests": g.resumed.Load()}
 		}
 	}
-	s.mu.Unlock()
-	json.NewEncoder(w).Encode(map[string]any{
+	result := map[string]any{
+		"epochUnixNs": s.epoch.UnixNano(),
 		"connections": c.connections.Load(), "requests": c.requests.Load(),
 		"rangeRequests": c.rangeRequests.Load(), "refused": c.refused.Load(),
-		"bytesSent": c.bytesSent.Load(), "maxInflight": c.maxInflight.Load(),
+		"bytesSent": c.bytesSent.Load(), "inflight": c.inflight.Load(), "maxInflight": c.maxInflight.Load(),
 		"refusedByGroup": groups, "aborts": c.aborts.Load(), "slowStreams": c.slowStreams.Load(),
 		"requestSeconds": float64(c.requestNanos.Load()) / float64(time.Second),
 		"disconnections": resumes,
+	}
+	if r.URL.Query().Get("summary") == "1" {
+		s.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(result)
+		return
+	}
+	timeline := append([]requestEvent{}, s.timeline...)
+	s.mu.Unlock()
+
+	// Arrival order is independent of when handler completions were published.
+	sort.Slice(timeline, func(i, j int) bool {
+		a, b := timeline[i], timeline[j]
+		return a.StartNs < b.StartNs || a.StartNs == b.StartNs && a.ID < b.ID
 	})
+	statuses := map[int]int64{}
+	retryKinds := map[string]int64{}
+	for _, event := range timeline {
+		statuses[event.Status]++
+		if event.RetryAfterType != "" {
+			retryKinds[event.RetryAfterType]++
+		}
+	}
+	result["duplicateBytesSent"] = duplicateBytes(timeline)
+	result["statusCounts"] = statuses
+	result["retryAfterCounts"] = retryKinds
+	result["requestTimeline"] = timeline
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (s *server) reset(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.c.inflight.Load() != 0 {
+		http.Error(w, "download requests still in flight", http.StatusConflict)
+		return
+	}
 	s.groups = map[string]*group{}
-	s.mu.Unlock()
-	s.c.connections.Store(0)
-	s.c.requests.Store(0)
-	s.c.rangeRequests.Store(0)
-	s.c.refused.Store(0)
-	s.c.bytesSent.Store(0)
-	s.c.maxInflight.Store(0)
-	s.c.aborts.Store(0)
-	s.c.slowStreams.Store(0)
-	s.c.requestNanos.Store(0)
+	s.timeline = nil
+	s.c = &counters{}
+	s.epoch = time.Now()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -478,7 +618,7 @@ func selfSigned() tls.Certificate {
 
 func main() {
 	flag.Parse()
-	s := &server{groups: map[string]*group{}, shas: map[string]string{}, c: &counters{}}
+	s := &server{groups: map[string]*group{}, shas: map[string]string{}, c: &counters{}, epoch: time.Now()}
 	if *dmgFixture != "" {
 		var err error
 		s.dmg, err = os.ReadFile(*dmgFixture)
@@ -492,7 +632,7 @@ func main() {
 	mux.HandleFunc("/stats", s.stats)
 	mux.HandleFunc("/reset", s.reset)
 	connContext := func(ctx context.Context, _ net.Conn) context.Context {
-		return context.WithValue(ctx, downloadConnKey{}, new(atomic.Bool))
+		return context.WithValue(ctx, downloadConnKey{}, new(atomic.Pointer[counters]))
 	}
 	cert := selfSigned()
 	ports := map[string]int{}
