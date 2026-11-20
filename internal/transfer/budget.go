@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/GopeedLab/gopeed/internal/benchtrace"
 )
 
 // SourceKey groups requests that share a server-side limit: an origin plus
@@ -103,18 +105,21 @@ type Budget struct {
 }
 
 type source struct {
-	key       SourceKey
-	members   []*Member // join order
-	active    int
-	shedding  int
-	cooldown  time.Time
-	status    int
-	strikes   int
-	wake      chan struct{}
-	timer     wakeup
-	bytes     atomic.Int64
-	adapt     *adaptiveState
-	lastLimit time.Time // last 429/503, for diagnostics
+	key           SourceKey
+	members       []*Member // join order
+	active        int
+	shedding      int
+	cooldown      time.Time
+	status        int
+	strikes       int
+	wake          chan struct{}
+	timer         wakeup
+	bytes         atomic.Int64
+	adapt         *adaptiveState
+	lastLimit     time.Time // last 429/503, for diagnostics
+	ramp          *recoveryRamp
+	httpNotBefore time.Time
+	httpWake      wakeup
 	// After a cooldown (recoverPending) the source recovers: one probe permit
 	// goes out (probing) and the rest wait for its outcome, so waiters do not
 	// all retry at the moment the cooldown ends.
@@ -122,6 +127,10 @@ type source struct {
 	recovering     bool
 	probing        bool
 	stopProbe      func() bool
+}
+
+func (s *source) effectiveCooldown() time.Time {
+	return maxTime(s.cooldown, s.httpNotBefore)
 }
 
 // Member is one running task's view of its source budget.
@@ -164,6 +173,7 @@ func (b *Budget) Close() error {
 	}
 	for key, s := range b.sources {
 		s.timer.cancel()
+		s.httpWake.cancel()
 		s.endRecovery()
 		s.broadcast()
 		delete(b.sources, key)
@@ -402,11 +412,14 @@ func (m *Member) TryAcquireOrWait() (granted bool, wake <-chan struct{}, cooldow
 		return true, nil, time.Time{}, false
 	}
 	b.armCooldownLocked(m.src)
-	if b.clock.Now().Before(m.src.cooldown) {
-		cooldown = m.src.cooldown
+	if b.clock.Now().Before(m.src.effectiveCooldown()) {
+		cooldown = m.src.effectiveCooldown()
 	}
 	return false, m.src.wake, cooldown, false
 }
+
+// SourceKey returns the immutable source selected when the member joined.
+func (m *Member) SourceKey() SourceKey { return m.src.key }
 
 // RateLimited records a 429/503 and returns when the source may be retried.
 // See RateLimitedEpisode.
@@ -463,10 +476,16 @@ func (b *Budget) rateLimitedLocked(s *source, status int, retryAfter time.Durati
 		until = now.Add(Backoff(max(1, s.strikes), b.random))
 	}
 	if until.After(s.cooldown) {
+		if fresh || s.ramp == nil {
+			s.resetHTTPRamp(until.Sub(now))
+		}
 		// A pending wake-up re-arms itself for the extended end; waiters look
 		// again in case the longer wait should be deferred.
 		s.cooldown = until
 		s.status = status
+		if benchtrace.Enabled {
+			benchtrace.Budget(string(s.key), "cooldown", now, until)
+		}
 		s.broadcast()
 	}
 	s.endRecovery()
@@ -476,7 +495,7 @@ func (b *Budget) rateLimitedLocked(s *source, status int, retryAfter time.Durati
 		s.adapt.rateLimited(now)
 	}
 	b.armCooldownLocked(s)
-	return s.cooldown, fresh
+	return s.effectiveCooldown(), fresh
 }
 
 // addWait adds a server-requested wait to now without overflowing.
@@ -498,6 +517,9 @@ func (m *Member) Succeeded() {
 		s.strikes = 0
 	}
 	if s.recovering {
+		if benchtrace.Enabled {
+			benchtrace.Budget(string(s.key), "reopened", b.clock.Now(), time.Time{})
+		}
 		s.endRecovery()
 		s.broadcast()
 	}
@@ -526,15 +548,15 @@ func (m *Member) CoolingDown() bool {
 	b := m.b
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.clock.Now().Before(m.src.cooldown)
+	return b.clock.Now().Before(m.src.effectiveCooldown())
 }
 
 // Cooldown returns the end of the source cooldown, or zero when none applies.
 func (b *Budget) Cooldown(key SourceKey) time.Time {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if s := b.sources[key]; s != nil && b.clock.Now().Before(s.cooldown) {
-		return s.cooldown
+	if s := b.sources[key]; s != nil && b.clock.Now().Before(s.effectiveCooldown()) {
+		return s.effectiveCooldown()
 	}
 	return time.Time{}
 }
@@ -548,7 +570,7 @@ func (b *Budget) Probe(key SourceKey) bool {
 	if s == nil {
 		return true
 	}
-	if b.clock.Now().Before(s.cooldown) {
+	if b.clock.Now().Before(s.effectiveCooldown()) {
 		return false
 	}
 	return s.adapt == nil || len(s.members) == 0 || s.active < s.capacity()
@@ -584,8 +606,8 @@ func (m *Member) Snapshot() MemberSnapshot {
 	s := m.src
 	out := MemberSnapshot{Active: m.active, Limit: m.limit, SourceActive: s.active,
 		SourceCapacity: s.capacity(), Members: len(s.members)}
-	if b.clock.Now().Before(s.cooldown) {
-		out.CooldownUntil, out.CooldownStatus = s.cooldown, s.status
+	if b.clock.Now().Before(s.effectiveCooldown()) {
+		out.CooldownUntil, out.CooldownStatus = s.effectiveCooldown(), s.status
 	}
 	if s.adapt != nil {
 		snap := s.adapt.snapshot()
@@ -624,7 +646,7 @@ func (b *Budget) grantLocked(m *Member) bool {
 		m.waiting = false
 		return false
 	}
-	if b.clock.Now().Before(s.cooldown) {
+	if b.clock.Now().Before(s.effectiveCooldown()) {
 		return false
 	}
 	s.beginRecovery()
@@ -650,10 +672,16 @@ func (b *Budget) grantLocked(m *Member) bool {
 // refused.
 func (b *Budget) startProbeLocked(s *source) {
 	s.probing = true
+	if benchtrace.Enabled {
+		benchtrace.Budget(string(s.key), "probe", b.clock.Now(), time.Time{})
+	}
 	s.stopProbe = b.clock.AfterFunc(recoveryProbeTimeout, func() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if s.recovering {
+			if benchtrace.Enabled {
+				benchtrace.Budget(string(s.key), "probeTimeout", b.clock.Now(), time.Time{})
+			}
 			s.recovering, s.probing, s.stopProbe = false, false, nil
 			s.broadcast()
 		}
@@ -673,13 +701,13 @@ func (b *Budget) unfairLocked(m *Member) bool {
 
 // armCooldownLocked schedules a wake-up at the end of the source cooldown.
 func (b *Budget) armCooldownLocked(s *source) {
-	if b.clock.Now().Before(s.cooldown) {
-		s.timer.set(b, s.cooldown, func() { b.sourceWakeLocked(s) })
+	if b.clock.Now().Before(s.effectiveCooldown()) {
+		s.timer.set(b, s.effectiveCooldown(), func() { b.sourceWakeLocked(s) })
 	}
 }
 
 func (b *Budget) sourceWakeLocked(s *source) {
-	if b.clock.Now().Before(s.cooldown) {
+	if b.clock.Now().Before(s.effectiveCooldown()) {
 		b.armCooldownLocked(s)
 		return
 	}
@@ -699,11 +727,20 @@ func (b *Budget) forgetIdleLocked(s *source) {
 		b.armCooldownLocked(s)
 		return
 	}
-	if forget := s.cooldown.Add(strikeMemory); s.strikes > 0 && now.Before(forget) {
+	if now.Before(s.httpNotBefore) {
+		s.timer.set(b, s.httpNotBefore, func() { b.sourceWakeLocked(s) })
+		return
+	}
+	// The temporary member used by Resolve can leave between the first
+	// paced response and the download joining. Retain only ramps that
+	// admitted a request across that gap.
+	hasPacedRequest := s.ramp != nil && !s.ramp.next.IsZero()
+	if forget := s.cooldown.Add(strikeMemory); (s.strikes > 0 || hasPacedRequest) && now.Before(forget) {
 		s.timer.set(b, forget, func() { b.sourceWakeLocked(s) })
 		return
 	}
 	s.endRecovery()
+	s.httpWake.cancel()
 	delete(b.sources, s.key)
 }
 

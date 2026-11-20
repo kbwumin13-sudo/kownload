@@ -514,6 +514,18 @@ func (f *Fetcher) RecoveryCleanPause() bool {
 	return true
 }
 
+// Initial resolution can use a temporary source member, before the fetcher
+// installs its run member. Carry that source across redirects and probes.
+type httpBudgetSourceKey struct{}
+type httpAdmissionWaitKey struct{}
+
+// Request timing starts at the caller to include dial, TLS and response
+// setup. Source queue time must not inflate the adaptive dial timeout.
+func trackHTTPAdmission(ctx context.Context) (context.Context, *atomic.Int64) {
+	wait := new(atomic.Int64)
+	return context.WithValue(ctx, httpAdmissionWaitKey{}, wait), wait
+}
+
 type recoveryGuardTransport struct {
 	transport http.RoundTripper
 	fetcher   *Fetcher
@@ -540,14 +552,53 @@ func (t *recoveryGuardTransport) RoundTrip(req *http.Request) (*http.Response, e
 	if err := recoveryContextError(req.Context()); err != nil {
 		return nil, err
 	}
-	response, err := t.transport.RoundTrip(req)
-	if err == nil {
-		if obsolete := recoveryContextError(req.Context()); obsolete != nil {
-			response.Body.Close()
-			return nil, obsolete
+	var permit *transfer.HTTPRecoveryPermit
+	var budget *transfer.Budget
+	var source transfer.SourceKey
+	if f := t.fetcher; f != nil && f.ctl != nil && f.ctl.Budget != nil {
+		budget = f.ctl.Budget
+		var err error
+		source, _ = req.Context().Value(httpBudgetSourceKey{}).(transfer.SourceKey)
+		if source == "" {
+			if m := f.member.Load(); m != nil {
+				source = m.SourceKey()
+			} else {
+				source = f.sourceKey()
+			}
+		}
+		start := time.Now()
+		permit, err = budget.AdmitHTTPRequest(req.Context(), source)
+		waited := time.Since(start)
+		if wait, ok := req.Context().Value(httpAdmissionWaitKey{}).(*atomic.Int64); ok {
+			wait.Add(waited.Nanoseconds())
+		}
+		if waited >= 10*time.Millisecond {
+			f.diag.waited(waited)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := recoveryContextError(req.Context()); err != nil {
+			permit.Finish(false)
+			return nil, err
 		}
 	}
-	if err == nil && work != nil {
+	response, err := t.transport.RoundTrip(req)
+	if err != nil {
+		permit.Finish(false)
+		return response, err
+	}
+	obsolete := recoveryContextError(req.Context())
+	if budget != nil && transfer.IsRateLimitStatus(response.StatusCode) {
+		after, _ := transfer.ParseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+		budget.ObserveHTTPRefusal(source, response.StatusCode, after, obsolete != nil)
+	}
+	permit.Finish(obsolete == nil && response.StatusCode >= 200 && response.StatusCode < 300)
+	if obsolete != nil {
+		response.Body.Close()
+		return nil, obsolete
+	}
+	if work != nil {
 		response.Body = wrapSharedWaveBody(response.Body, work)
 		keep = true
 	}

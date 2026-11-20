@@ -166,8 +166,9 @@ func (f *Fetcher) admitFirstRequest(ctx context.Context) (*transfer.Member, erro
 		}
 		queued := f.queueChanged()
 		if !until.IsZero() && f.shouldDefer(time.Until(until)) {
+			status := m.Snapshot().CooldownStatus
 			m.Leave()
-			return nil, &transfer.DeferredError{Until: until}
+			return nil, &transfer.DeferredError{Until: until, Status: status}
 		}
 		select {
 		case <-ctx.Done():
@@ -209,11 +210,12 @@ func (f *Fetcher) deferIfCooling() bool {
 	if m == nil {
 		return false
 	}
-	until := m.Snapshot().CooldownUntil
+	cooldown := m.Snapshot()
+	until := cooldown.CooldownUntil
 	if until.IsZero() || !f.shouldDefer(time.Until(until)) {
 		return false
 	}
-	if handled, err := f.sharedRateLimited(f.recoveryContext(f.boundRunContext()), "worker/0", until, 0); handled {
+	if handled, err := f.sharedRateLimited(f.recoveryContext(f.boundRunContext()), "worker/0", until, cooldown.CooldownStatus); handled {
 		if err != nil {
 			if _, deferred := transfer.AsDeferred(err); !deferred {
 				f.policyFailure.CompareAndSwap(nil, &credentialFailure{err: err})
@@ -225,7 +227,7 @@ func (f *Fetcher) deferIfCooling() bool {
 		}
 		return false
 	}
-	f.deferRun(&transfer.DeferredError{Until: until})
+	f.deferRun(&transfer.DeferredError{Until: until, Status: cooldown.CooldownStatus})
 	return true
 }
 

@@ -1497,7 +1497,7 @@ func (d *Downloader) emit(eventKey EventKey, task *Task, errs ...error) {
 	if benchtrace.Enabled && task != nil && (eventKey == EventKeyDone || eventKey == EventKeyError) {
 		task.dataLock.RLock()
 		if task.Protocol == "http" && task.Meta != nil && task.Meta.Req != nil {
-			benchtrace.Terminal(task.Meta.Req.URL, string(eventKey))
+			benchtrace.Terminal(task.Meta.Req.URL, string(eventKey), benchmarkHTTPReason(errs))
 		}
 		task.dataLock.RUnlock()
 	}
@@ -2178,6 +2178,13 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 	d.lock.Unlock()
 	if !queued {
 		return
+	}
+	if benchtrace.Enabled {
+		task.dataLock.RLock()
+		if task.Protocol == "http" && task.Meta != nil && task.Meta.Req != nil {
+			benchtrace.Deferral(task.Meta.Req.URL)
+		}
+		task.dataLock.RUnlock()
 	}
 	d.emit(EventKeyProgress, task)
 	d.notifyRunning()
@@ -3131,7 +3138,12 @@ func (d *Downloader) doPauseChecked(task *Task, check func() error) (err error) 
 		}()
 		d.releaseMCPTaskLease(task)
 		if pauseErr == nil {
-			_ = d.releasePathOutput(task)
+			// Ordinary HTTP tasks have no path-output binding. Their
+			// next run can already be restoring its fetcher while this
+			// pause finishes; leave that fetcher to its own lifecycle.
+			if _, bound := d.pathOutputs.Load(task.ID); bound {
+				_ = d.releasePathOutput(task)
+			}
 		}
 		// Callbacks may invoke Close themselves. Publish persistence completion
 		// and release operation locks before delivering the event.

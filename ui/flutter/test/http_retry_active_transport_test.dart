@@ -2,12 +2,14 @@ import 'dart:io';
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:get/get.dart' show GetMaterialApp;
 import 'package:gopeed/api/api.dart' as api;
 import 'package:gopeed/api/model/meta.dart';
 import 'package:gopeed/api/model/options.dart';
 import 'package:gopeed/api/model/request.dart';
 import 'package:gopeed/api/model/task.dart';
 import 'package:gopeed/app/modules/task/views/http_task_retry_button.dart';
+import 'package:gopeed/i18n/message.dart' as i18n;
 import 'support/http_recovery_fixture.dart';
 import 'manual_task_batch_submission_test.dart' show spin;
 
@@ -44,7 +46,10 @@ void main() {
       createdAt: DateTime.utc(2026),
       updatedAt: DateTime.utc(2026))
     ..protocol = Protocol.http;
-  Future<void> mount(WidgetTester t) => t.pumpWidget(MaterialApp(
+  Future<void> mount(WidgetTester t) => t.pumpWidget(GetMaterialApp(
+      translations: i18n.messages,
+      locale: const Locale('zh', 'CN'),
+      fallbackLocale: const Locale('en', 'US'),
       home: Scaffold(
           body: HttpTaskRetryButton(
               task: sample(),

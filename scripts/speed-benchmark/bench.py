@@ -14,10 +14,13 @@ Variants are NAME=LIB or NAME=LIB:TUNING_JSON, optionally suffixed with
       --output results/b1-h1.json
 """
 import argparse
+from collections import Counter
 from contextlib import suppress
 import json
+import math
 import os
 import pathlib
+import random
 import signal
 import statistics
 import subprocess
@@ -165,11 +168,10 @@ def run_trial(variant, scenario, fixture, work_dir):
         'connections': variant['connections'] or scenario['connections'],
         'maxRunning': scenario.get('maxRunning', 5),
         'submission': scenario.get('submission', 'batch'),
-        'debug': scenario.get('debug', False),
         'tuning': variant['tuning'],
         'timeout': scenario.get('timeout', 600),
         'workDir': work_dir,
-        'tasks': [{'url': fixture.url(t), 'name': t['name'], 'size': t['size'], 'sha': t['sha']}
+        'tasks': [{'url': fixture.url(t), 'name': t['name'], 'size': t['size'], 'sha': t['sha'], 'source': t['listener']}
                   for t in scenario['tasks']],
     }
     parent = '/private/tmp' if variant['lib'].endswith('.app') else work_dir
@@ -186,27 +188,32 @@ def run_trial(variant, scenario, fixture, work_dir):
             env=dict(os.environ, KOWNLOAD_SPEEDBENCH_TRACE=trace),
         ) as process:
             try:
-                stdout, stderr = process.communicate(timeout=spec['timeout'] + 75)
+                stdout, _ = process.communicate(timeout=spec['timeout'] + 100)
             except subprocess.TimeoutExpired:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
-                return {'ok': False, 'error': 'trial process deadline exceeded',
-                        'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
+                return incomplete_trial(spec, 'trial_process_deadline')
             finally:
-                # The App launch can leave a descendant even after the direct
-                # subprocess has exited. Only this trial owns the session.
+                # The isolated App may leave descendants after its direct
+                # subprocess exits. No other trial shares this process group.
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGTERM)
             exit_code = process.returncode
     if exit_code != 0:
-        return {'ok': False, 'error': (stderr or stdout)[-2000:],
-                'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
+        return incomplete_trial(spec, f'trial_process_exit_{exit_code}')
     try:
         return json.loads(stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
-        return {'ok': False, 'error': 'trial produced no valid result',
-                'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
+        return incomplete_trial(spec, 'trial_result_unreadable')
+
+
+def incomplete_trial(spec, error):
+    return {'ok': False, 'error': error, 'timeoutSeconds': spec['timeout'],
+            'taskCount': len(spec['tasks']), 'statsIncomplete': True,
+            'tasks': [{'name': t['name'], 'source': t['source'], 'status': 'unobserved',
+                       'success': False, 'correct': False, 'terminalRecorded': False,
+                       'failureReason': error} for t in spec['tasks']]}
 
 
 def spread(values):
@@ -214,44 +221,181 @@ def spread(values):
     return (max(values) - min(values)) / median if median else 0.0
 
 
+def percentile(ascending, fraction):
+    index = (len(ascending) - 1) * fraction
+    lower, upper = math.floor(index), math.ceil(index)
+    return ascending[lower] + (ascending[upper] - ascending[lower]) * (index - lower)
+
+
+def wilson_interval(rate, n):
+    z = 1.959963984540054
+    denom = 1 + z * z / n
+    midpoint = (rate + z * z / (2 * n)) / denom
+    half_width = z * math.sqrt(rate * (1 - rate) / n + z * z / (4 * n * n)) / denom
+    return [max(0.0, midpoint - half_width), min(1.0, midpoint + half_width)]
+
+
+def bootstrap_interval(batches, stat):
+    rng = random.Random(51)
+    quantiles = sorted(stat(rng.choices(batches, k=len(batches))) for _ in range(10_000))
+    return [percentile(quantiles, .025), percentile(quantiles, .975)]
+
+
+def ratio(batches):
+    return sum(done for done, _ in batches) / sum(total for _, total in batches)
+
+
+def task_counts(run, source=None):
+    tasks = [t for t in run.get('tasks', []) if source is None or t['source'] == source]
+    return sum(t['success'] for t in tasks), len(tasks)
+
+
+def task_summary(runs, source=None):
+    counts = [task_counts(r, source) for r in runs]
+    counts = [(done, total) for done, total in counts if total]
+    total = sum(total for _, total in counts)
+    done = sum(done for done, _ in counts)
+    rate = done / total if total else None
+    if not counts:
+        interval = method = None
+    elif len({done / total for done, total in counts}) == 1:
+        interval = wilson_interval(rate, len(counts))
+        method = 'wilson_effective_n_batches_boundary_or_no_variation'
+    else:
+        interval = bootstrap_interval(counts, ratio)
+        method = 'percentile_bootstrap_resampling_batches'
+    return {'tasks': total, 'verifiedTasks': done, 'taskSuccessRate': rate,
+            'taskSuccessRate95CI': interval, 'taskSuccessRate95CIMethod': method,
+            'failureReasons': dict(Counter(
+                t['failureReason'] for r in runs for t in r.get('tasks', [])
+                if not t['success'] and (source is None or t['source'] == source)))}
+
+
+def deadline_score(run):
+    return run['elapsed'] if run['ok'] and run.get('elapsed') is not None else run['timeoutSeconds']
+
+
+def compare_deltas(deltas):
+    if not deltas:
+        return None
+    positive = sum(d > 0 for d in deltas)
+    negative = sum(d < 0 for d in deltas)
+    nonzero = positive + negative
+    p = min(1.0, 2 * sum(math.comb(nonzero, i) for i in range(min(positive, negative) + 1))
+            / (2 ** nonzero)) if nonzero else 1.0
+    return {'meanDifference': statistics.mean(deltas), 'medianDifference': statistics.median(deltas),
+            'difference95CI': bootstrap_interval(deltas, statistics.mean) if len(set(deltas)) > 1 else None,
+            'positivePairs': positive, 'negativePairs': negative, 'tiedPairs': len(deltas) - nonzero,
+            'pairedSignTestPValue': p, 'differences': deltas}
+
+
+def paired_summary(results, names, sources):
+    pairs = {}
+    for row in results:
+        pairs.setdefault(row['pair'], {})[row['variant']] = row['result']
+    eligible = [(i, pair[names[0]], pair[names[1]]) for i, pair in pairs.items()
+                if all(n in pair and not pair[n].get('statsIncomplete', False) for n in names)]
+
+    def task_deltas(source=None):
+        differences = []
+        for _, base, candidate in eligible:
+            left, n_left = task_counts(base, source)
+            right, n_right = task_counts(candidate, source)
+            if n_left and n_right:
+                differences.append(right / n_right - left / n_left)
+        return compare_deltas(differences)
+
+    return {'base': names[0], 'candidate': names[1], 'totalPairs': len(pairs),
+            'validPairs': len(eligible), 'pairNumbers': [i for i, _, _ in eligible],
+            'excludedPairs': sorted(set(pairs) - {i for i, _, _ in eligible}),
+            'taskSuccessRateDifference': task_deltas(),
+            'taskSuccessRateDifferenceBySource': {source: task_deltas(source) for source in sources},
+            'batchSuccessRateDifference': compare_deltas([int(right['ok']) - int(left['ok'])
+                                                          for _, left, right in eligible]),
+            'deadlineScoredSecondsDifference': compare_deltas([deadline_score(right) - deadline_score(left)
+                                                                for _, left, right in eligible])}
+
+
 def summarize(name, results, variants):
     summary = {'scenario': name, 'variants': {}}
-    for v in variants:
-        runs = [r['result'] for r in results if r['variant'] == v['name']]
+    sources = sorted({t['source'] for row in results for t in row['result'].get('tasks', [])})
+    for variant in variants:
+        observed = [r['result'] for r in results if r['variant'] == variant['name']]
+        runs = [r for r in observed if not r.get('statsIncomplete', False)]
         good = [r for r in runs if r['ok']]
-        times = [r['elapsed'] for r in good]
-        entry = {'runs': len(runs), 'ok': len(good), 'failed': len(runs) - len(good),
-                 'failureRate': (len(runs) - len(good)) / len(runs),
-                 'tasks': sum(r['taskCount'] for r in runs),
-                 'verifiedTasks': sum(sum(t['correct'] and t['status'] == 'done' and t['terminalRecorded']
-                                           for t in r.get('tasks', [])) for r in runs)}
-        # A failed trial cannot deliver the requested batch. Charge its
-        # configured deadline in the all-run score, even for fast failures.
-        scored = [r['elapsed'] if r['ok'] else r['timeoutSeconds'] for r in runs]
-        entry['medianDeadlineScoredSeconds'] = statistics.median(scored)
-        entry['meanDeadlineScoredSeconds'] = statistics.mean(scored)
+        times = sorted(r['elapsed'] for r in good if r.get('elapsed') is not None)
+        entry = dict(task_summary(runs), runs=len(observed), validRuns=len(runs),
+                     statsIncompleteRuns=len(observed) - len(runs),
+                     statsIncompleteReasons=dict(Counter(r.get('statsIncompleteReason') or r['error']
+                                                         for r in observed if r.get('statsIncomplete'))),
+                     ok=len(good), failed=len(runs) - len(good),
+                     batchSuccessRate=len(good) / len(runs) if runs else None,
+                     failureRate=(len(runs) - len(good)) / len(runs) if runs else None,
+                     sources={source: task_summary(runs, source) for source in sources})
+        # Keep incomplete evidence out of the score, but retain terminal task
+        # failures and timeouts with their predeclared deadline penalty.
+        scored = sorted(deadline_score(r) for r in runs)
+        if scored:
+            entry.update(medianDeadlineScoredSeconds=statistics.median(scored),
+                         p95DeadlineScoredSeconds=percentile(scored, .95),
+                         meanDeadlineScoredSeconds=statistics.mean(scored))
         if times:
-            entry.update(medianSeconds=statistics.median(times), seconds=times, spread=spread(times))
+            entry.update(medianSeconds=statistics.median(times), p95Seconds=percentile(times, .95),
+                         seconds=times, spread=spread(times))
         for metric in ('cpuSeconds',):
             values = [r[metric] for r in runs if metric in r]
             if values:
                 entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
-        for metric in ('connections', 'requests', 'refused', 'bytesSent', 'requestSeconds', 'maxInflight'):
-            values = [r['server'][metric] for r in runs if metric in r.get('server', {})]
+        for metric in ('connections', 'requests', 'refused', 'bytesSent', 'duplicateBytesSent',
+                       'requestSeconds', 'maxInflight'):
+            values = [r['server'][metric] for r in runs if metric in (r.get('server') or {})]
             if values:
                 entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
+        for metric in ('retries', 'deferrals'):
+            values = [sum(t.get(metric) or 0 for t in r['tasks']) for r in runs
+                      if all(t.get(metric) is not None for t in r['tasks'])]
+            if values:
+                entry['total' + metric.title()] = sum(values)
+                entry['median' + metric.title()] = statistics.median(values)
+            entry[metric + 'ObservedRuns'] = len(values)
+        for field in ('statusCounts', 'retryAfterCounts'):
+            total = Counter()
+            for r in runs:
+                total.update((r.get('server') or {}).get(field, {}))
+            entry[field] = dict(total)
+        waits = {}
+        for r in runs:
+            for request in (r.get('server') or {}).get('requestTimeline', []):
+                wait = request.get('retryAfterWaitNs')
+                if wait is not None and request['status'] in (429, 503):
+                    waits.setdefault(request.get('retryAfterType'), []).append(wait / 1e9)
+        entry['retryAfterWaitSecondsByType'] = {
+            kind: {'count': len(seconds), 'p50': statistics.median(seconds),
+                   'p95': percentile(sorted(seconds), .95)} for kind, seconds in waits.items()}
         for metric in ('startupSeconds', 'throughputPhaseSeconds', 'tailSeconds', 'deliverySeconds'):
-            values = [t[metric] for r in good for t in r['tasks'] if t[metric] is not None]
+            values = sorted(t[metric] for r in runs for t in r['tasks']
+                            if t['success'] and t[metric] is not None)
             if values:
                 entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
-        summary['variants'][v['name']] = entry
+                entry['p95' + metric[0].upper() + metric[1:]] = percentile(values, .95)
+        summary['variants'][variant['name']] = entry
     if len(variants) == 2:
-        a, b = (summary['variants'][v['name']] for v in variants)
-        summary['deadlineScoredTimeChange'] = b['medianDeadlineScoredSeconds'] / a['medianDeadlineScoredSeconds'] - 1
-        summary['meanDeadlineScoredTimeChange'] = b['meanDeadlineScoredSeconds'] / a['meanDeadlineScoredSeconds'] - 1
-        if a['failed'] == b['failed'] == 0:
-            summary['timeChange'] = b['medianSeconds'] / a['medianSeconds'] - 1
+        names = [v['name'] for v in variants]
+        summary['paired'] = paired_summary(results, names, sources)
+        left, right = (summary['variants'][n] for n in names)
+        if summary['paired']['validPairs'] == left['runs'] == right['runs'] and left['runs']:
+            summary['deadlineScoredTimeChange'] = right['medianDeadlineScoredSeconds'] / left['medianDeadlineScoredSeconds'] - 1
+            summary['meanDeadlineScoredTimeChange'] = right['meanDeadlineScoredSeconds'] / left['meanDeadlineScoredSeconds'] - 1
+            if left['failed'] == right['failed'] == 0:
+                summary['timeChange'] = right['medianSeconds'] / left['medianSeconds'] - 1
     return summary
+
+
+def write_report(output, report):
+    # Readers can inspect partial evidence while long matrices are running.
+    tmp = output.with_suffix(output.suffix + '.tmp')
+    tmp.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+    tmp.replace(output)
 
 
 def main():
@@ -261,11 +405,19 @@ def main():
     parser.add_argument('--fixture-bin', required=True)
     parser.add_argument('--dmg', type=pathlib.Path, help='synthetic macOS image for app-dmg')
     parser.add_argument('--pairs', type=int, default=3)
-    parser.add_argument('--max-pairs', type=int, default=5)
-    parser.add_argument('--output', required=True)
+    parser.add_argument('--max-pairs', type=int)
+    parser.add_argument('--pair-offset', type=int, default=0, help='next pair number for a separate supplemental run')
+    parser.add_argument('--output', required=True, type=pathlib.Path)
     parser.add_argument('--work-dir', default=None)
     args = parser.parse_args()
     variants = [parse_variant(v) for v in args.variant]
+    if args.max_pairs is None:
+        args.max_pairs = max(5, args.pairs)
+    if not 0 < args.pairs <= args.max_pairs or args.pair_offset < 0:
+        parser.error('require 0 < pairs <= max-pairs and a nonnegative pair-offset')
+    if len({v['name'] for v in variants}) != len(variants):
+        parser.error('variant names must be distinct')
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     scenario = SCENARIOS[args.scenario]
     flags = scenario.get('server', [])
     if args.scenario == 'app-dmg':
@@ -275,16 +427,22 @@ def main():
         flags = [*flags, '-dmg', str(args.dmg.resolve())]
     fixture = Fixture(args.fixture_bin, flags)
     results = []
+    report = {'schemaVersion': 2, 'scenario': args.scenario, 'variants': variants,
+              'completed': False, 'results': results, 'pairOffset': args.pair_offset,
+              'minimumPairs': args.pairs, 'maximumPairs': args.max_pairs}
     try:
         for task in scenario['tasks']:
             task['sha'] = fixture.sha(task)
         pair = 0
         while True:
-            order = variants if pair % 2 == 0 else list(reversed(variants))
+            pair_number = pair + args.pair_offset
+            order = variants if pair_number % 2 == 0 else list(reversed(variants))
             for variant in order:
                 result = run_trial(variant, scenario, fixture, args.work_dir)
-                results.append({'pair': pair, 'variant': variant['name'], 'result': result})
-                print(json.dumps({'pair': pair, 'variant': variant['name'], 'ok': result.get('ok'),
+                results.append({'pair': pair_number, 'variant': variant['name'], 'result': result})
+                write_report(args.output, report)
+                print(json.dumps({'pair': pair_number, 'variant': variant['name'], 'ok': result.get('ok'),
+                                  'statsIncomplete': result.get('statsIncomplete', False),
                                   'elapsed': result.get('elapsed'), 'cpu': result.get('cpuSeconds'),
                                   'conns': (result.get('server') or {}).get('connections'),
                                   'requests': (result.get('server') or {}).get('requests'),
@@ -292,16 +450,15 @@ def main():
             pair += 1
             if pair < args.pairs:
                 continue
-            times = [[r['result']['elapsed'] for r in results if r['variant'] == v['name'] and r['result'].get('ok')]
+            times = [[r['result']['elapsed'] for r in results if r['variant'] == v['name'] and r['result'].get('ok')
+                      and not r['result'].get('statsIncomplete') and r['result'].get('elapsed') is not None]
                      for v in variants]
             if pair >= args.max_pairs or all(len(t) == pair and spread(t) <= 0.05 for t in times):
                 break
     finally:
         fixture.close()
-    report = {'scenario': args.scenario, 'variants': variants,
-              'summary': summarize(args.scenario, results, variants), 'results': results}
-    pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    pathlib.Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+    report.update(summary=summarize(args.scenario, results, variants), completed=True)
+    write_report(args.output, report)
     print(json.dumps(report['summary'], ensure_ascii=False))
 
 

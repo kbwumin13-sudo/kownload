@@ -20,6 +20,7 @@ import 'package:gopeed/app/modules/task/views/task_batch_groups.dart';
 import 'package:gopeed/app/modules/task/views/http_task_retry_button.dart';
 import 'package:gopeed/database/database.dart';
 import 'package:gopeed/database/task_batch_journal_store.dart';
+import 'package:gopeed/i18n/message.dart' as i18n;
 import 'package:gopeed/macos/mac_onboarding.dart';
 import 'package:gopeed/macos/mac_panel.dart';
 import 'package:gopeed/macos/mac_theme.dart';
@@ -94,9 +95,11 @@ void main() {
   });
   testWidgets('HTTP error retry is reachable in full list and compact panel',
       (t) async {
+    const rawFailure = 'HTTP 429 fixture diagnostic';
+    final failureLabel = find.textContaining('来源限流');
     f.override = (request) async {
-      if (request.uri.path.endsWith('/stats')) {
-        await f.respond(request, {'lastError': 'fixture failure'});
+      if (request.uri.path == '/api/v1/tasks/_retry-task/stats') {
+        await f.respond(request, {'lastError': rawFailure});
       } else {
         await f.handle(request);
       }
@@ -121,16 +124,23 @@ void main() {
       page.dispose();
       await t.binding.setSurfaceSize(null);
     });
-    await t.pumpWidget(
-        GetMaterialApp.router(theme: macTheme(Brightness.light), getPages: [
-      GetPage(
-          name: '/',
-          page: () => ValueListenableBuilder<Widget>(
-              valueListenable: page, builder: (_, view, __) => view))
-    ]));
+    await t.pumpWidget(GetMaterialApp.router(
+      translations: i18n.messages,
+      locale: const Locale('zh', 'CN'),
+      fallbackLocale: const Locale('en', 'US'),
+      theme: macTheme(Brightness.light),
+      getPages: [
+        GetPage(
+            name: '/',
+            page: () => ValueListenableBuilder<Widget>(
+                valueListenable: page, builder: (_, view, __) => view))
+      ],
+    ));
     await t.pumpAndSettle();
-    await spin(
-        t, () => find.textContaining('fixture failure').evaluate().isNotEmpty);
+    // Wait for the classified stats result on each surface. The row never
+    // displays the raw diagnostic, which may contain request credentials.
+    await spin(t, () => failureLabel.evaluate().isNotEmpty);
+    expect(find.textContaining(rawFailure), findsNothing);
     await spin(t, () {
       final refresh = find.byKey(const ValueKey('task-batch-refresh'));
       return refresh.evaluate().isNotEmpty &&
@@ -141,8 +151,8 @@ void main() {
     expect(find.byTooltip('重试'), findsOneWidget);
     page.value = const CreateView();
     await t.pumpAndSettle();
-    await spin(
-        t, () => find.textContaining('fixture failure').evaluate().isNotEmpty);
+    await spin(t, () => failureLabel.evaluate().isNotEmpty);
+    expect(find.textContaining(rawFailure), findsNothing);
     expect(find.byType(HttpTaskRetryButton), findsOneWidget);
     expect(find.byTooltip('重试'), findsOneWidget);
     expect(f.posts, 0);
