@@ -1,14 +1,14 @@
 # kownload 使用指南
 
-[← 返回主页](../README.md) · [发行说明](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.37)
+[← 返回主页](../README.md) · [发行说明](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.38)
 
-本指南适用于正式版 **1.9.3-kownload.37（build 50）**。应用、助手、[完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.37/kownload-v1.9.3-kownload.37-source.tar.gz)和 [SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.37/SHA256SUMS.txt)均由同一 Release 提供。
+本指南适用于正式版 **1.9.3-kownload.38（build 51）**。应用、助手、[完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-v1.9.3-kownload.38-source.tar.gz)和 [SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/SHA256SUMS.txt)均由同一 Release 提供。
 
 ## 安装与升级
 
 需要 macOS 12 或更新系统、Apple Silicon（M 系列芯片）。
 
-1. 下载 [macOS arm64 DMG](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.37/kownload-v1.9.3-kownload.37-macos-arm64.dmg)，打开后将 `kownload.app` 拖入 `Applications`。
+1. 下载 [macOS arm64 DMG](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-v1.9.3-kownload.38-macos-arm64.dmg)，打开后将 `kownload.app` 拖入 `Applications`。
 2. 打开应用，跟随使用引导选择下载目录。
 3. 按 **⌃⌥D** 唤起面板，粘贴链接并回车。
 
@@ -26,7 +26,7 @@
 
 支持 Chrome 与 Edge，负责普通下载交接以及网页媒体、网盘文件选择。
 
-扩展版本为 0.6.1，请使用 build 50 配套的 [新版助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.37/kownload-browser-helper-0.6.1-1.9.3-kownload.37.zip)。解压后按 [浏览器助手安装与首次连接](../browser-media-extension/README.md#安装与首次连接) 加载助手，在弹窗检查连接，再按需同步设置、授权接管。Chrome 和 Edge 商店仍处于送审材料准备阶段。
+扩展版本为 0.6.1，请使用 build 51 配套的 [新版助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-browser-helper-0.6.1-1.9.3-kownload.38.zip)。解压后按 [浏览器助手安装与首次连接](../browser-media-extension/README.md#安装与首次连接) 加载助手，在弹窗检查连接，再按需同步设置、授权接管。Chrome 和 Edge 商店仍处于送审材料准备阶段。
 
 在普通网页中选中链接后，可从助手弹窗打开「预览选中链接」。也可以在 App 内粘贴多行 HTTP(S) 地址。预览中可核对重复或无效项、选定目录，确认后才创建勾选的任务。
 
