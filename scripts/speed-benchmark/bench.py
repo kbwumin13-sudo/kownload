@@ -14,6 +14,7 @@ Variants are NAME=LIB or NAME=LIB:TUNING_JSON, optionally suffixed with
       --output results/b1-h1.json
 """
 import argparse
+from contextlib import suppress
 import json
 import os
 import pathlib
@@ -187,10 +188,16 @@ def run_trial(variant, scenario, fixture, work_dir):
             try:
                 stdout, stderr = process.communicate(timeout=spec['timeout'] + 75)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
                 return {'ok': False, 'error': 'trial process deadline exceeded',
                         'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
+            finally:
+                # The App launch can leave a descendant even after the direct
+                # subprocess has exited. Only this trial owns the session.
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
             exit_code = process.returncode
     if exit_code != 0:
         return {'ok': False, 'error': (stderr or stdout)[-2000:],
