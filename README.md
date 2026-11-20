@@ -16,7 +16,7 @@
 
 A keyboard-first download manager for macOS. One shortcut. Your downloads, in one place.
 
-[**下载 macOS 版 ↗**](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-v1.9.3-kownload.38-macos-arm64.dmg) · [发行说明](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.38) · [三步开始](#安装) · [功能一览](#功能) · [使用指南](docs/GETTING_STARTED.md) · [反馈问题](https://github.com/kbwumin13-sudo/kownload/issues)
+[**下载 macOS 版 ↗**](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.39/kownload-v1.9.3-kownload.39-macos-arm64.dmg) · [发行说明](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.39) · [三步开始](#安装) · [功能一览](#功能) · [使用指南](docs/GETTING_STARTED.md) · [反馈问题](https://github.com/kbwumin13-sudo/kownload/issues)
 
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-202b27)
 ![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-arm64-267454)
@@ -36,13 +36,13 @@ A keyboard-first download manager for macOS. One shortcut. Your downloads, in on
 
 **macOS 12+ · Apple Silicon（M 系列芯片）**
 
-1. **下载并安装** — 在 [最新 Release](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.38) 下载 DMG，将 **kownload.app** 拖入 **Applications**。升级前先正常退出旧版。
+1. **下载并安装** — 在 [最新 Release](https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.39) 下载 DMG，将 **kownload.app** 拖入 **Applications**。升级前先正常退出旧版。
 2. **选好保存位置** — 打开应用，按首次引导选择下载目录；需要从网页接管下载时，再连接浏览器助手。
 3. **按下 ⌃⌥D** — 粘贴链接，按 **↩** 开始。面板可以收起，任务留在后台。
 
 安装包采用 ad-hoc 签名，尚未经过 Apple 公证。首次打开被拦截时，到「系统设置 → 隐私与安全性」选择「仍要打开」；如系统询问访问「下载」文件夹，请允许。更多步骤见 [安装与升级](docs/GETTING_STARTED.md#安装与升级)。
 
-> **正式发行版 1.9.3-kownload.38（build 51）**。浏览器助手的扩展版本为 0.6.1，请下载 build 51 配套的 [新版助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-browser-helper-0.6.1-1.9.3-kownload.38.zip)。同一发行版提供 [完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/kownload-v1.9.3-kownload.38-source.tar.gz) 和 [SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.38/SHA256SUMS.txt)。
+> **正式发行版 1.9.3-kownload.39（build 52）**。浏览器助手的扩展版本为 0.6.1，请下载 build 52 配套的 [新版助手 ZIP](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.39/kownload-browser-helper-0.6.1-1.9.3-kownload.39.zip)。同一发行版提供 [完整源码包](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.39/kownload-v1.9.3-kownload.39-source.tar.gz) 和 [SHA-256 校验文件](https://github.com/kbwumin13-sudo/kownload/releases/download/v1.9.3-kownload.39/SHA256SUMS.txt)。
 
 <a id="功能"></a>
 
@@ -144,5 +144,5 @@ kownload 基于 [Gopeed](https://github.com/GopeedLab/gopeed) v1.9.3 的 Go 下�
   <br>
   <strong>粘贴，回车，继续专注。</strong>
   <br>
-  <a href="https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.38">下载 kownload</a> · <a href="#readme-top">回到顶部 ↑</a>
+  <a href="https://github.com/kbwumin13-sudo/kownload/releases/tag/v1.9.3-kownload.39">下载 kownload</a> · <a href="#readme-top">回到顶部 ↑</a>
 </p>
