@@ -70,7 +70,7 @@ func TestRecoveryRampKeepsSourceCooldownAndStagesContenders(t *testing.T) {
 	}
 	assertRampBlocked(t, permits)
 	first.Finish(false)
-	b.ObserveHTTPRefusal(key, 2*time.Second, false)
+	b.ObserveHTTPRefusal(key, 503, 2*time.Second, false)
 	m.RateLimited(503, 2*time.Second, true)
 	clock.Advance(time.Second)
 	assertRampBlocked(t, permits)
@@ -158,7 +158,7 @@ func TestRecoveryRampKeepsLateRetryAfterAndCanDefer(t *testing.T) {
 
 	m.RateLimited(429, time.Second, true)
 	clock.Advance(time.Second)
-	b.ObserveHTTPRefusal(key, 2*time.Second, true)
+	b.ObserveHTTPRefusal(key, 503, 2*time.Second, true)
 	old.Finish(true)
 	clock.Advance(time.Millisecond)
 	want := clock.Now().Add(1999 * time.Millisecond)
@@ -168,7 +168,7 @@ func TestRecoveryRampKeepsLateRetryAfterAndCanDefer(t *testing.T) {
 	ctx := WithDeferral(context.Background(), func() bool { return true }, nil)
 	if _, err := b.AdmitHTTPRequest(ctx, key); err == nil {
 		t.Fatal("near-two-second cooldown should release the slot")
-	} else if deferred, ok := AsDeferred(err); !ok || !deferred.Until.Equal(want) {
+	} else if deferred, ok := AsDeferred(err); !ok || !deferred.Until.Equal(want) || deferred.Status != 503 {
 		t.Fatalf("deferral changed the Retry-After deadline: %v", err)
 	}
 	clock.Advance(1999 * time.Millisecond)

@@ -121,7 +121,7 @@ func maxTime(a, b time.Time) time.Time {
 // before the response is handed to its (possibly obsolete) worker. The worker
 // still owns episode accounting. An obsolete refusal without a usable hint
 // uses the existing fallback only if there is no current cooldown to honor.
-func (b *Budget) ObserveHTTPRefusal(key SourceKey, wait time.Duration, obsolete bool) {
+func (b *Budget) ObserveHTTPRefusal(key SourceKey, status int, wait time.Duration, obsolete bool) {
 	if wait <= 0 && !obsolete {
 		return
 	}
@@ -141,6 +141,9 @@ func (b *Budget) ObserveHTTPRefusal(key SourceKey, wait time.Duration, obsolete 
 	}
 	if until := addWait(now, wait); until.After(s.httpNotBefore) {
 		s.httpNotBefore = until
+		if until.After(s.cooldown) {
+			s.status = status
+		}
 		if obsolete && fresh {
 			s.resetHTTPRamp(wait)
 		}

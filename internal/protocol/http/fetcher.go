@@ -1183,6 +1183,7 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 			// the independent loop goroutine, never a worker joining itself.
 			f.wg.Wait()
 		}
+		member := f.member.Load()
 		f.leaveBudget()
 		deferred := f.deferred.Load()
 		if deferred != nil || f.policyFailure.Load() != nil {
@@ -1192,6 +1193,15 @@ func (f *Fetcher) downloadLoop(verifyOverlap bool) {
 			// Budget changes can request deferral before a stream finishes
 			// classifying its refusal. An exhausted retry budget or excessive
 			// Retry-After must remain terminal after all streams have stopped.
+			// Concurrent responses may extend Retry-After while the
+			// deferral is draining. Publish the latest deadline with the
+			// same terminal snapshot as the task's progress.
+			if deferred != nil && member != nil {
+				cooldown := member.Snapshot()
+				if cooldown.CooldownUntil.After(deferred.Until) {
+					deferred = &transfer.DeferredError{Until: cooldown.CooldownUntil, Status: cooldown.CooldownStatus}
+				}
+			}
 			var result error = deferred
 			f.connMu.Lock()
 			for _, conn := range f.connections {

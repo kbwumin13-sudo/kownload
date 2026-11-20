@@ -591,7 +591,7 @@ func (t *recoveryGuardTransport) RoundTrip(req *http.Request) (*http.Response, e
 	obsolete := recoveryContextError(req.Context())
 	if budget != nil && transfer.IsRateLimitStatus(response.StatusCode) {
 		after, _ := transfer.ParseRetryAfter(response.Header.Get("Retry-After"), time.Now())
-		budget.ObserveHTTPRefusal(source, after, obsolete != nil)
+		budget.ObserveHTTPRefusal(source, response.StatusCode, after, obsolete != nil)
 	}
 	permit.Finish(obsolete == nil && response.StatusCode >= 200 && response.StatusCode < 300)
 	if obsolete != nil {

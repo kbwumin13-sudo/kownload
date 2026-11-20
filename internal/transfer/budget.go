@@ -495,7 +495,7 @@ func (b *Budget) rateLimitedLocked(s *source, status int, retryAfter time.Durati
 		s.adapt.rateLimited(now)
 	}
 	b.armCooldownLocked(s)
-	return s.cooldown, fresh
+	return s.effectiveCooldown(), fresh
 }
 
 // addWait adds a server-requested wait to now without overflowing.
