@@ -731,7 +731,11 @@ func (b *Budget) forgetIdleLocked(s *source) {
 		s.timer.set(b, s.httpNotBefore, func() { b.sourceWakeLocked(s) })
 		return
 	}
-	if forget := s.cooldown.Add(strikeMemory); (s.strikes > 0 || s.ramp != nil) && now.Before(forget) {
+	// The temporary member used by Resolve can leave between the first
+	// paced response and the download joining. Retain only ramps that
+	// admitted a request across that gap.
+	hasPacedRequest := s.ramp != nil && !s.ramp.next.IsZero()
+	if forget := s.cooldown.Add(strikeMemory); (s.strikes > 0 || hasPacedRequest) && now.Before(forget) {
 		s.timer.set(b, forget, func() { b.sourceWakeLocked(s) })
 		return
 	}

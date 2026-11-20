@@ -178,3 +178,37 @@ func TestRecoveryRampKeepsLateRetryAfterAndCanDefer(t *testing.T) {
 	}
 	next.Finish(true)
 }
+
+func TestRecoveryRampSurvivesResolveMemberLeaving(t *testing.T) {
+	b, clock := testBudget()
+	defer b.Close()
+	const key SourceKey = "origin|http://limited.test|direct"
+	resolve := b.Join(key, 2, false)
+	resolve.RateLimited(429, time.Second, true)
+	clock.Advance(time.Second)
+	if !resolve.TryAcquire() {
+		t.Fatal("Resolve did not get the stream probe")
+	}
+	probe, err := b.AdmitHTTPRequest(context.Background(), key)
+	if err != nil || probe == nil || !probe.probe {
+		t.Fatalf("Resolve did not get the network probe: %+v %v", probe, err)
+	}
+	probe.Finish(true)
+	resolve.Succeeded()
+	resolve.Release()
+	resolve.Leave()
+
+	run := b.Join(key, 4, false)
+	defer run.Leave()
+	clock.Advance(time.Second)
+	next, err := b.AdmitHTTPRequest(context.Background(), key)
+	if err != nil || next == nil || next.probe {
+		t.Fatalf("download should continue paced recovery after Resolve: %+v %v", next, err)
+	}
+	next.Finish(true)
+	run.Leave()
+	clock.Advance(strikeMemory)
+	if b.sources[key] != nil || pendingTimers(clock) != 0 {
+		t.Fatal("unused pacing state must expire")
+	}
+}
