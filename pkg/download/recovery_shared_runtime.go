@@ -777,7 +777,7 @@ func (d *Downloader) queueSharedUntil(task *Task, until time.Time) {
 	}
 	task.statusLock.Unlock()
 	d.lock.Unlock()
-	time.AfterFunc(time.Until(until)+10*time.Millisecond, func() { d.signalQueue(); d.notifyRunning() })
+	d.wakeDeferredQueue(until)
 }
 
 // Preparation has returned and released task.lock; Resolve's response was

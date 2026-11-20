@@ -305,17 +305,16 @@ func (m *Member) ShedOne() bool {
 	if m.left || s.adapt == nil || s.active-s.shedding <= s.capacity() || m.active-m.shedding <= 1 {
 		return false
 	}
-	// Shed from the first member that holds the most effective streams.
-	for _, o := range s.members {
-		if o.active-o.shedding > m.active-m.shedding {
-			return false
+	// Find the largest holder across the whole source. Stable ties keep
+	// concurrent reservations deterministic.
+	largest := s.members[0]
+	for _, other := range s.members[1:] {
+		if other.active-other.shedding > largest.active-largest.shedding {
+			largest = other
 		}
-		if o.active-o.shedding == m.active-m.shedding {
-			if o != m {
-				return false
-			}
-			break
-		}
+	}
+	if largest != m {
+		return false
 	}
 	m.shedding++
 	s.shedding++

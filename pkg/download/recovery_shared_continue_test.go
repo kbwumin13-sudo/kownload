@@ -21,7 +21,7 @@ import (
 // first Task has a durable deferral, the second is independently runnable;
 // neither a schema version nor a RAM permit is injected by this fixture.
 func TestSharedRecoveryColdContinueCollectionsQueueCooldown(t *testing.T) {
-	for _, mode := range []string{"all", "batch"} {
+	for _, mode := range []string{"all", "batch", "queue"} {
 		t.Run(mode, func(t *testing.T) {
 			payload := bytes.Repeat([]byte("collection-peer"), 4096)
 			var coldRequests, peerRequests atomic.Int32
@@ -92,10 +92,25 @@ func TestSharedRecoveryColdContinueCollectionsQueueCooldown(t *testing.T) {
 				t.Fatalf("cooldown fixture already expired: %v %v", until, err)
 			}
 			coldBaseline, peerBaseline := coldRequests.Load(), peerRequests.Load()
-			if mode == "all" {
+			switch mode {
+			case "all":
 				err = d2.Continue(nil)
-			} else {
+			case "batch":
 				err = d2.ContinueBatch(&TaskFilter{IDs: []string{coldID, peerID}})
+			case "queue":
+				// An on-disk cooldown can be discovered while dispatching.
+				// Model the queue before it learns this newer deadline.
+				d2.lock.Lock()
+				d2.cfg.MaxRunning = 1
+				for _, task := range loaded {
+					task.updateStatus(base.DownloadStatusWait)
+					task.dataLock.Lock()
+					task.notBefore = time.Time{}
+					task.dataLock.Unlock()
+					d2.enqueueLocked(task)
+				}
+				d2.lock.Unlock()
+				d2.notifyRunning()
 			}
 			if err != nil {
 				t.Fatalf("collection rejected a legitimate cooldown instead of queuing it: %v; cold=%s peer=%s", err, d2.GetTask(coldID).Status, d2.GetTask(peerID).Status)

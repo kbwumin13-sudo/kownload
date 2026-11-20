@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/GopeedLab/gopeed/internal/benchtrace"
 )
 
 // A declared Range capability without a total length still needs a full stream;
@@ -75,6 +77,9 @@ func (f *Fetcher) writeDownloadAt(data []byte, offset int64, proofs ...*coverage
 	}
 	if err != nil {
 		return &localFileError{err}
+	}
+	if benchtrace.Enabled && f.meta != nil && f.meta.Req != nil && f.meta.Res != nil {
+		benchtrace.Payload(f.meta.Req.URL, f.meta.Res.Size, offset, n)
 	}
 	return nil
 }

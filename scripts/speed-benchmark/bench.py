@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import pathlib
+import signal
 import statistics
 import subprocess
 import sys
@@ -35,6 +36,34 @@ def files(prefix, count, size, listener, query=''):
 
 # Each scenario fixes the content, listener, server latency and limits.
 SCENARIOS = {
+    'cooldown-slots': dict(tasks=files('cs-rate-', 1, 6 * MIB, 'plain',
+                                     'perconn=4194304&limit=1&retry=2')
+                           + files('cs-other-', 2, 2 * MIB, 'tls1', 'perconn=4194304'),
+                           connections=4, maxRunning=1, timeout=30),
+    'terminal-error': dict(tasks=files('er-', 1, MIB, 'plain', 'reject=404'), connections=4, timeout=8),
+    'probe-delayed': dict(tasks=files('pd-', 1, 12 * MIB, 'plain',
+                                    'mode=hidden&probedelay=1000&perconn=4194304'), connections=4),
+    'probe-ignored': dict(tasks=files('pi-', 1, 4 * MIB, 'plain',
+                                    'mode=ignore&probedelay=1000&perconn=2097152'), connections=4),
+    'probe-high-rtt': dict(tasks=files('ph-', 1, 12 * MIB, 'plain', 'mode=hidden&perconn=4194304'),
+                           connections=4, server=['-rtt', '200ms']),
+    'slow-stream': dict(tasks=files('ss-', 1, 48 * MIB, 'plain',
+                                   'perconn=4194304&slowonce=400000'), connections=4),
+    'disconnect': dict(tasks=files('dc-', 1, 32 * MIB, 'plain',
+                                   'perconn=4194304&abortafter=2097152'), connections=4),
+    'adaptive-capped': dict(tasks=files('ac-', 1, 96 * MIB, 'plain',
+                                       'total=2097152&group=ac'), connections=8, timeout=180),
+    'adaptive-batch': dict(tasks=files('am-', 3, 32 * MIB, 'plain',
+                                       'total=2097152&group=am'), connections=8, timeout=180, debug=True),
+    'adaptive-changing': dict(tasks=files('an-', 1, 96 * MIB, 'plain',
+                                          'perconn=524288&total=4194304&group=an&dropafter=8&droprate=1048576'),
+                              connections=8, timeout=180),
+    'app-dmg': dict(tasks=[{'name': 'valid.dmg', 'size': 0, 'listener': 'plain', 'query': ''}],
+                    connections=4, submission='resolve-create'),
+    'app-small': dict(tasks=files('as-', 1, 64 * 1024, 'plain'),
+                      connections=4, submission='resolve-create'),
+    'app-batch': dict(tasks=files('ab-', 5, 2 * MIB, 'plain', 'perconn=4194304'),
+                      connections=4, maxRunning=3),
     # Hidden Range, every connection limited: segmentation should pay off.
     'r1': dict(tasks=files('r1-', 1, 32 * MIB, 'plain', 'mode=hidden&perconn=2097152'), connections=4),
     # The same over TLS, with and without HTTP/2 on the server.
@@ -134,24 +163,43 @@ def run_trial(variant, scenario, fixture, work_dir):
         'fixture': fixture.base,
         'connections': variant['connections'] or scenario['connections'],
         'maxRunning': scenario.get('maxRunning', 5),
+        'submission': scenario.get('submission', 'batch'),
+        'debug': scenario.get('debug', False),
         'tuning': variant['tuning'],
         'timeout': scenario.get('timeout', 600),
         'workDir': work_dir,
         'tasks': [{'url': fixture.url(t), 'name': t['name'], 'size': t['size'], 'sha': t['sha']}
                   for t in scenario['tasks']],
     }
-    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
-        json.dump(spec, handle)
-        spec_path = handle.name
+    parent = '/private/tmp' if variant['lib'].endswith('.app') else work_dir
+    with tempfile.TemporaryDirectory(prefix='kown-bench-', dir=parent) as scratch:
+        scratch = pathlib.Path(scratch)
+        spec['workDir'] = str(scratch)
+        spec_path = scratch / 'spec.json'
+        spec_path.write_text(json.dumps(spec))
+        trace = str(scratch / 'timeline.jsonl')
+        surface = '--app' if variant['lib'].endswith('.app') else '--lib'
+        with subprocess.Popen(
+            [sys.executable, '-I', str(HERE / 'trial.py'), surface, variant['lib'], '--spec', spec_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            env=dict(os.environ, KOWNLOAD_SPEEDBENCH_TRACE=trace),
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=spec['timeout'] + 75)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                return {'ok': False, 'error': 'trial process deadline exceeded',
+                        'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
+            exit_code = process.returncode
+    if exit_code != 0:
+        return {'ok': False, 'error': (stderr or stdout)[-2000:],
+                'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
     try:
-        out = subprocess.run([sys.executable, '-I', str(HERE / 'trial.py'), '--lib', variant['lib'],
-                              '--spec', spec_path], capture_output=True, text=True,
-                             timeout=spec['timeout'] + 120)
-    finally:
-        os.unlink(spec_path)
-    if out.returncode != 0:
-        return {'ok': False, 'error': (out.stderr or out.stdout)[-2000:]}
-    return json.loads(out.stdout.strip().splitlines()[-1])
+        return json.loads(stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return {'ok': False, 'error': 'trial produced no valid result',
+                'timeoutSeconds': spec['timeout'], 'taskCount': len(spec['tasks'])}
 
 
 def spread(values):
@@ -162,22 +210,40 @@ def spread(values):
 def summarize(name, results, variants):
     summary = {'scenario': name, 'variants': {}}
     for v in variants:
-        runs = [r for r in results if r['variant'] == v['name']]
-        good = [r for r in runs if r['result'].get('ok')]
-        times = [r['result']['elapsed'] for r in good]
-        entry = {'runs': len(runs), 'ok': len(good)}
+        runs = [r['result'] for r in results if r['variant'] == v['name']]
+        good = [r for r in runs if r['ok']]
+        times = [r['elapsed'] for r in good]
+        entry = {'runs': len(runs), 'ok': len(good), 'failed': len(runs) - len(good),
+                 'failureRate': (len(runs) - len(good)) / len(runs),
+                 'tasks': sum(r['taskCount'] for r in runs),
+                 'verifiedTasks': sum(sum(t['correct'] and t['status'] == 'done' and t['terminalRecorded']
+                                           for t in r.get('tasks', [])) for r in runs)}
+        # A failed trial cannot deliver the requested batch. Charge its
+        # configured deadline in the all-run score, even for fast failures.
+        scored = [r['elapsed'] if r['ok'] else r['timeoutSeconds'] for r in runs]
+        entry['medianDeadlineScoredSeconds'] = statistics.median(scored)
+        entry['meanDeadlineScoredSeconds'] = statistics.mean(scored)
         if times:
-            entry.update(medianSeconds=round(statistics.median(times), 4), seconds=times,
-                         spread=round(spread(times), 4),
-                         medianCpuSeconds=round(statistics.median(r['result']['cpuSeconds'] for r in good), 4),
-                         medianConnections=statistics.median(r['result']['server']['connections'] for r in good),
-                         medianRequests=statistics.median(r['result']['server']['requests'] for r in good),
-                         medianRefused=statistics.median(r['result']['server']['refused'] for r in good))
+            entry.update(medianSeconds=statistics.median(times), seconds=times, spread=spread(times))
+        for metric in ('cpuSeconds',):
+            values = [r[metric] for r in runs if metric in r]
+            if values:
+                entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
+        for metric in ('connections', 'requests', 'refused', 'bytesSent', 'requestSeconds', 'maxInflight'):
+            values = [r['server'][metric] for r in runs if metric in r.get('server', {})]
+            if values:
+                entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
+        for metric in ('startupSeconds', 'throughputPhaseSeconds', 'tailSeconds', 'deliverySeconds'):
+            values = [t[metric] for r in good for t in r['tasks'] if t[metric] is not None]
+            if values:
+                entry['median' + metric[0].upper() + metric[1:]] = statistics.median(values)
         summary['variants'][v['name']] = entry
-    a, b = (summary['variants'][v['name']] for v in variants[:2])
-    if a.get('medianSeconds') and b.get('medianSeconds'):
-        summary['timeChange'] = round(b['medianSeconds'] / a['medianSeconds'] - 1, 4)
-        summary['cpuChange'] = round(b['medianCpuSeconds'] / a['medianCpuSeconds'] - 1, 4) if a['medianCpuSeconds'] else None
+    if len(variants) == 2:
+        a, b = (summary['variants'][v['name']] for v in variants)
+        summary['deadlineScoredTimeChange'] = b['medianDeadlineScoredSeconds'] / a['medianDeadlineScoredSeconds'] - 1
+        summary['meanDeadlineScoredTimeChange'] = b['meanDeadlineScoredSeconds'] / a['meanDeadlineScoredSeconds'] - 1
+        if a['failed'] == b['failed'] == 0:
+            summary['timeChange'] = b['medianSeconds'] / a['medianSeconds'] - 1
     return summary
 
 
@@ -186,6 +252,7 @@ def main():
     parser.add_argument('--scenario', required=True, choices=sorted(SCENARIOS))
     parser.add_argument('--variant', action='append', required=True)
     parser.add_argument('--fixture-bin', required=True)
+    parser.add_argument('--dmg', type=pathlib.Path, help='synthetic macOS image for app-dmg')
     parser.add_argument('--pairs', type=int, default=3)
     parser.add_argument('--max-pairs', type=int, default=5)
     parser.add_argument('--output', required=True)
@@ -193,7 +260,13 @@ def main():
     args = parser.parse_args()
     variants = [parse_variant(v) for v in args.variant]
     scenario = SCENARIOS[args.scenario]
-    fixture = Fixture(args.fixture_bin, scenario.get('server', []))
+    flags = scenario.get('server', [])
+    if args.scenario == 'app-dmg':
+        if not args.dmg or not args.dmg.is_file():
+            parser.error('app-dmg requires a synthetic --dmg file')
+        scenario['tasks'][0]['size'] = args.dmg.stat().st_size
+        flags = [*flags, '-dmg', str(args.dmg.resolve())]
+    fixture = Fixture(args.fixture_bin, flags)
     results = []
     try:
         for task in scenario['tasks']:
@@ -214,7 +287,7 @@ def main():
                 continue
             times = [[r['result']['elapsed'] for r in results if r['variant'] == v['name'] and r['result'].get('ok')]
                      for v in variants]
-            if pair >= args.max_pairs or all(t and spread(t) <= 0.05 for t in times):
+            if pair >= args.max_pairs or all(len(t) == pair and spread(t) <= 0.05 for t in times):
                 break
     finally:
         fixture.close()

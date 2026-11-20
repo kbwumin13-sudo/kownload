@@ -14,6 +14,10 @@
 //	                            is refused, Retry-After telling when one is free
 //	  tailfrom=F&tailrate=B     bytes after fraction F of the file go at B bytes/s per stream
 //	  dropafter=S&droprate=B    the group's total pace drops to B after S seconds
+//	  probedelay=MS             delay only a single-byte capability probe
+//	  slowonce=B                one range stream transfers at B bytes/s
+//	  abortafter=B              truncate one active response after B bytes
+//	  reject=404                fail every request with a terminal HTTP status
 //	/sha?name=&size=            SHA-256 of that content
 //	/stats                      counters since the last /reset
 package main
@@ -48,6 +52,7 @@ var (
 	acceptDelay = flag.Duration("accept-delay", 0, "delay before a new connection's first read (handshake latency)")
 	rtt         = flag.Duration("rtt", 0, "delay before every response header")
 	readyFile   = flag.String("ready-file", "", "write listening ports here as JSON")
+	dmgFixture  = flag.String("dmg", "", "fixture file served as valid.dmg")
 	fixedPorts  = flag.String("ports", "", "plain,tls,tls1 ports to listen on (default: any free ports)")
 )
 
@@ -105,6 +110,10 @@ type group struct {
 	limited atomic.Int64
 	refused atomic.Int64
 	bucket  *bucket
+	slow    atomic.Bool
+	aborted atomic.Bool
+	abortAt atomic.Int64
+	resumed atomic.Int64
 }
 
 // bucket is a token-bucket request limiter, the usual model behind 429.
@@ -138,6 +147,9 @@ type counters struct {
 	bytesSent     atomic.Int64
 	inflight      atomic.Int64
 	maxInflight   atomic.Int64
+	requestNanos  atomic.Int64
+	aborts        atomic.Int64
+	slowStreams   atomic.Int64
 }
 
 type server struct {
@@ -145,6 +157,7 @@ type server struct {
 	groups map[string]*group
 	shas   map[string]string
 	c      *counters
+	dmg    []byte
 }
 
 func (s *server) group(name string, q map[string][]string) *group {
@@ -208,11 +221,20 @@ func parseRange(h string, size int64) (int64, int64, bool) {
 	return start, end, true
 }
 
+type downloadConnKey struct{}
+
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 	c := s.c
+	if used, ok := r.Context().Value(downloadConnKey{}).(*atomic.Bool); ok && used.CompareAndSwap(false, true) {
+		c.connections.Add(1)
+	}
 	c.requests.Add(1)
 	n := c.inflight.Add(1)
-	defer c.inflight.Add(-1)
+	entered := time.Now()
+	defer func() {
+		c.inflight.Add(-1)
+		c.requestNanos.Add(time.Since(entered).Nanoseconds())
+	}()
 	for {
 		m := c.maxInflight.Load()
 		if n <= m || c.maxInflight.CompareAndSwap(m, n) {
@@ -234,6 +256,17 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if *rtt > 0 {
 		time.Sleep(*rtt)
+	}
+	if rangeHeader == "bytes=0-0" {
+		if delay := num(q, "probedelay"); delay > 0 {
+			timer := time.NewTimer(time.Duration(delay * float64(time.Millisecond)))
+			defer timer.Stop()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-timer.C:
+			}
+		}
 	}
 	if g.bucket != nil {
 		if ok, wait := g.bucket.take(); !ok {
@@ -287,10 +320,23 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusPartialContent
 		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 	}
+	if at := g.abortAt.Load(); at > 0 && start == at {
+		g.resumed.Add(1)
+	}
+	if forced := int(num(q, "reject")); forced >= 400 {
+		w.WriteHeader(forced)
+		return
+	}
 	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	w.WriteHeader(status)
 	var stream *pacer
-	if rate := num(q, "perconn"); rate > 0 {
+	rate := num(q, "perconn")
+	if slow := num(q, "slowonce"); slow > 0 && start >= size/3 && g.slow.CompareAndSwap(false, true) {
+		c.slowStreams.Add(1)
+		rate = slow
+	}
+	abort := int64(num(q, "abortafter"))
+	if rate > 0 {
 		stream = &pacer{rate: rate}
 	}
 	tailFrom := int64(num(q, "tailfrom") * float64(size))
@@ -311,13 +357,24 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request) {
 		if tail != nil && off+int64(n) > tailFrom && tail.wait(ctx, n) != nil {
 			return
 		}
-		fill(buf[:n], seed, off)
-		written, err := w.Write(buf[:n])
+		block := buf[:n]
+		if name == "valid.dmg" && int64(len(s.dmg)) == size {
+			block = s.dmg[off : off+int64(n)]
+		} else {
+			fill(block, seed, off)
+		}
+		written, err := w.Write(block)
 		c.bytesSent.Add(int64(written))
 		if err != nil {
 			return
 		}
 		off += int64(n)
+		if abort > 0 && off-start >= abort && off <= end && g.aborted.CompareAndSwap(false, true) {
+			g.abortAt.Store(off)
+			_ = http.NewResponseController(w).Flush()
+			c.aborts.Add(1)
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
@@ -325,6 +382,11 @@ func (s *server) sha(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	name := str(q, "name", "")
 	size := int64(num(q, "size"))
+	if name == "valid.dmg" && size > 0 && int64(len(s.dmg)) == size {
+		sum := sha256.Sum256(s.dmg)
+		w.Write([]byte(hex.EncodeToString(sum[:])))
+		return
+	}
 	key := name + "/" + strconv.FormatInt(size, 10)
 	s.mu.Lock()
 	sum, ok := s.shas[key]
@@ -349,16 +411,22 @@ func (s *server) sha(w http.ResponseWriter, r *http.Request) {
 func (s *server) stats(w http.ResponseWriter, _ *http.Request) {
 	c := s.c
 	groups := map[string]int64{}
+	resumes := map[string]map[string]int64{}
 	s.mu.Lock()
 	for name, g := range s.groups {
 		groups[name] = g.refused.Load()
+		if at := g.abortAt.Load(); at > 0 {
+			resumes[name] = map[string]int64{"missingFrom": at, "exactResumeRequests": g.resumed.Load()}
+		}
 	}
 	s.mu.Unlock()
 	json.NewEncoder(w).Encode(map[string]any{
 		"connections": c.connections.Load(), "requests": c.requests.Load(),
 		"rangeRequests": c.rangeRequests.Load(), "refused": c.refused.Load(),
 		"bytesSent": c.bytesSent.Load(), "maxInflight": c.maxInflight.Load(),
-		"refusedByGroup": groups,
+		"refusedByGroup": groups, "aborts": c.aborts.Load(), "slowStreams": c.slowStreams.Load(),
+		"requestSeconds": float64(c.requestNanos.Load()) / float64(time.Second),
+		"disconnections": resumes,
 	})
 }
 
@@ -372,6 +440,9 @@ func (s *server) reset(w http.ResponseWriter, _ *http.Request) {
 	s.c.refused.Store(0)
 	s.c.bytesSent.Store(0)
 	s.c.maxInflight.Store(0)
+	s.c.aborts.Store(0)
+	s.c.slowStreams.Store(0)
+	s.c.requestNanos.Store(0)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -408,15 +479,20 @@ func selfSigned() tls.Certificate {
 func main() {
 	flag.Parse()
 	s := &server{groups: map[string]*group{}, shas: map[string]string{}, c: &counters{}}
+	if *dmgFixture != "" {
+		var err error
+		s.dmg, err = os.ReadFile(*dmgFixture)
+		if err != nil {
+			panic(err)
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/f/", s.serveFile)
 	mux.HandleFunc("/sha", s.sha)
 	mux.HandleFunc("/stats", s.stats)
 	mux.HandleFunc("/reset", s.reset)
-	state := func(_ net.Conn, st http.ConnState) {
-		if st == http.StateNew {
-			s.c.connections.Add(1)
-		}
+	connContext := func(ctx context.Context, _ net.Conn) context.Context {
+		return context.WithValue(ctx, downloadConnKey{}, new(atomic.Bool))
 	}
 	cert := selfSigned()
 	ports := map[string]int{}
@@ -435,7 +511,7 @@ func main() {
 			panic(err)
 		}
 		ports[name] = ln.Addr().(*net.TCPAddr).Port
-		srv := &http.Server{Handler: mux, ConnState: state}
+		srv := &http.Server{Handler: mux, ConnContext: connContext}
 		var l net.Listener = delayedListener{ln}
 		if protos != nil {
 			srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: protos}

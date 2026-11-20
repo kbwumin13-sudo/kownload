@@ -72,7 +72,7 @@ func TestStopPrefetchJoinsBlockedReader(t *testing.T) {
 	body := &blockedPrefetchBody{started: make(chan struct{}), closed: make(chan struct{})}
 	t.Cleanup(func() { _ = body.Close() })
 	f := &Fetcher{resolveResp: &http.Response{Body: body}, prefetchStopCh: make(chan struct{}), prefetchDoneCh: make(chan struct{})}
-	go f.asyncPrefetch()
+	go f.asyncPrefetch("", 0)
 	<-body.started
 	// The read-start signal also publishes the temporary file's creation.
 	tempPath := f.prefetchFilePath

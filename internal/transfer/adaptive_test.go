@@ -211,7 +211,7 @@ func TestAdaptiveRateLimitEndsExperiment(t *testing.T) {
 }
 
 func TestAdaptiveSkipsExperimentsForShortTransfers(t *testing.T) {
-	// 30 MiB left at 1 MiB/s is 30 seconds, below the two-minute threshold.
+	// 30 MiB left at 1 MiB/s is 30 seconds, below the experiment horizon.
 	sim := newAdaptiveSim(t, []int{4}, 30*mib, func(n, _ int) float64 { return mib })
 	sim.run(60)
 	if snap := sim.adaptive(); snap.Experiments != 0 || snap.Target != 0 {
@@ -236,5 +236,31 @@ func TestAdaptiveGivesEveryTaskAStreamAndResetsOnJoin(t *testing.T) {
 	sim.step()
 	if late.Snapshot().Active == 0 {
 		t.Fatal("the new task gets streams immediately")
+	}
+}
+
+func TestAdaptiveRechecksWhenTheCapChanges(t *testing.T) {
+	capacity := 4 * float64(mib)
+	sim := newAdaptiveSim(t, []int{4}, 10<<30, func(n, _ int) float64 {
+		return min(float64(n)*mib, capacity)
+	})
+	sim.run(45)
+	if got := sim.adaptive().Target; got != 4 {
+		t.Fatalf("expected all useful streams before cap change, got %d", got)
+	}
+	capacity = mib
+	sim.run(75)
+	if got := sim.adaptive().Level; got > 2 {
+		t.Fatalf("expected to shed under the new cap, got %d", got)
+	}
+}
+
+func TestAdaptiveShedsFromLargestMember(t *testing.T) {
+	sim := newAdaptiveSim(t, []int{2, 4}, 10<<30, func(n, _ int) float64 { return mib })
+	sim.run(1)
+	earlier, larger := sim.members[0], sim.members[1]
+	earlier.src.adapt.target = 3
+	if earlier.ShedOne() || !larger.ShedOne() {
+		t.Fatal("the smaller member must keep its streams while the largest sheds")
 	}
 }

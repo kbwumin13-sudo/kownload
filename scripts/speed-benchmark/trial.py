@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Run one controlled download trial against one kownload core library.
-
-The core runs in this process with in-memory storage and its own temporary
-download directory, so the installed app, its tasks and its settings are never
-touched. Prints one JSON result. Output holds no URLs beyond the local fixture.
-"""
+"""Run a trial with an instrumented core or an isolated macOS App bundle."""
 import argparse
 import ctypes
 import hashlib
+import http.client
 import json
 import os
 import pathlib
+import plistlib
 import resource
 import secrets
-import sys
+import socket
+import subprocess
 import tempfile
 import time
 import urllib.request
@@ -23,141 +21,264 @@ class StartResult(ctypes.Structure):
     _fields_ = [('port', ctypes.c_longlong), ('error', ctypes.c_void_p)]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--lib', required=True)
-    parser.add_argument('--spec', required=True, help='JSON file describing the trial')
-    args = parser.parse_args()
-    spec = json.loads(pathlib.Path(args.spec).read_text())
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__('localhost', timeout=10)
+        self.path = str(path)
 
-    def fixture(path):
-        with opener.open(spec['fixture'] + path, timeout=60) as response:
-            return response.read()
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
 
-    lib = ctypes.CDLL(args.lib)
-    lib.Start.argtypes = [ctypes.c_char_p]
-    lib.Start.restype = StartResult
-    lib.Stop.restype = None
-    token = secrets.token_hex(16)
-    with tempfile.TemporaryDirectory(prefix='kownload-trial-', dir=spec.get('workDir')) as work:
-        work = pathlib.Path(work)
-        started = lib.Start(json.dumps({'network': 'tcp', 'address': '127.0.0.1:0', 'apiToken': token,
-                                        'storage': 'mem', 'refreshInterval': 100,
-                                        'storageDir': str(work / 'state')}).encode())
+
+class TrialCore:
+    def __init__(self, lib_path, app, work, trace):
+        self.app = app
+        self.work = work
+        self.trace = trace
+        self.proc = None
+        self.lib = None
+        self.token = ''
+        if app:
+            info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+            if not info['CFBundleIdentifier'].endswith('.speedbench'):
+                raise ValueError('App bundle must have the isolated .speedbench identifier')
+            self.executable = app / 'Contents/MacOS' / info['CFBundleExecutable']
+        else:
+            self.lib = ctypes.CDLL(lib_path)
+            self.lib.Start.argtypes = [ctypes.c_char_p]
+            self.lib.Start.restype = StartResult
+            self.lib.Stop.restype = None
+
+    def start(self):
+        state = self.work / 'state'
+        if self.app:
+            home = self.work / 'home'
+            home.mkdir(exist_ok=True)
+            self.proc = subprocess.Popen(
+                [str(self.executable), '--hidden'],
+                env=dict(os.environ, HOME=str(home), CFFIXED_USER_HOME=str(home),
+                         GOPEED_PREVIEW_STORAGE=str(state),
+                         KOWNLOAD_SPEEDBENCH_TRACE=str(self.trace)),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.address = state / 'ipc/api.sock'
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline and self.proc.poll() is None:
+                try:
+                    self.api('info')
+                    return
+                except (OSError, http.client.HTTPException):
+                    time.sleep(0.05)
+            raise RuntimeError(f'isolated App did not start (exit={self.proc.poll()})')
+        self.token = secrets.token_hex(16)
+        config = {'network': 'tcp', 'address': '127.0.0.1:0', 'apiToken': self.token,
+                  'storage': 'mem', 'refreshInterval': 100, 'storageDir': str(state)}
+        started = self.lib.Start(json.dumps(config).encode())
         if started.error:
-            raise SystemExit('core failed to start')
+            raise RuntimeError('core failed to start')
+        self.address = f'127.0.0.1:{started.port}'
 
-        def api(path, data=None, method='GET'):
-            request = urllib.request.Request(f'http://127.0.0.1:{started.port}/api/v1/{path}',
-                                             data=None if data is None else json.dumps(data).encode(),
-                                             method=method,
-                                             headers={'X-Api-Token': token, 'Content-Type': 'application/json'})
-            with opener.open(request, timeout=60) as response:
-                result = json.load(response)
+    def stop(self):
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc = None
+        elif self.lib is not None:
+            self.lib.Stop()
+
+    def api(self, path, data=None, method='GET'):
+        connection = UnixConnection(self.address) if self.app else http.client.HTTPConnection(
+            self.address, timeout=60)
+        try:
+            connection.request(method, f'/api/v1/{path}',
+                               body=None if data is None else json.dumps(data),
+                               headers={'X-Api-Token': self.token, 'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            if response.status >= 400:
+                raise RuntimeError(f'API {method} {path.split("/")[0]} returned HTTP {response.status}')
+            result = json.load(response)
             if result['code'] != 0:
                 raise RuntimeError(f'API {method} {path.split("/")[0]} failed: {result.get("msg")}')
             return result['data']
-
-        try:
-            version = api('info')['version']
-            cfg = api('config')
-            cfg['proxy'] = {'enable': False}
-            cfg['maxRunning'] = spec.get('maxRunning', 5)
-            http_cfg = cfg['protocolConfig'].setdefault('http', {})
-            http_cfg['connections'] = spec['connections']
-            if spec.get('tuning') is not None:
-                http_cfg['tuning'] = spec['tuning']
-            else:
-                http_cfg.pop('tuning', None)
-            api('config', cfg, 'PUT')
-            fixture('/reset')
-            downloads = work / 'downloads'
-            downloads.mkdir()
-            usage0 = resource.getrusage(resource.RUSAGE_SELF)
-            begin = time.monotonic()
-            reqs = [{'req': {'url': t['url'], 'skipVerifyCert': True, 'proxy': {'mode': 'none'}},
-                     'opts': {'path': str(downloads), 'name': t['name'],
-                              'extra': {'connections': spec['connections']}}} for t in spec['tasks']]
-            ids = api('tasks/batch', {'reqs': reqs, 'opts': {'path': str(downloads)}}, 'POST')
-            pending = set(ids)
-            finished = {}
-            peak_streams = {}
-            # Integral of running streams over time: the cost a stream policy pays.
-            stream_seconds = {}
-            last_sample = {}
-            deadline = begin + spec.get('timeout', 600)
-            poll = 0
-            interval = 0.1 if len(ids) <= 20 else 0.25
-            while pending and time.monotonic() < deadline:
-                unfinished = {t['id'] for t in api('tasks?notStatus=done&notStatus=error')}
-                now = time.monotonic() - begin
-                for task_id in list(pending):
-                    if task_id not in unfinished:
-                        finished[task_id] = {'elapsed': now}
-                        pending.discard(task_id)
-                # Sample stream counts of a few running tasks without slowing small batches.
-                if poll % 5 == 0:
-                    for task_id in list(pending)[:4]:
-                        stats = api(f'tasks/{task_id}/stats')
-                        active = stats.get('activeStreams')
-                        if active is None:
-                            active = sum(1 for c in stats.get('connections') or [] if not c.get('completed'))
-                        peak_streams[task_id] = max(peak_streams.get(task_id, 0), active)
-                        sampled = time.monotonic()
-                        if task_id in last_sample:
-                            stream_seconds[task_id] = stream_seconds.get(task_id, 0) + active * (sampled - last_sample[task_id])
-                        last_sample[task_id] = sampled
-                poll += 1
-                time.sleep(interval)
-            elapsed = time.monotonic() - begin
-            for task in api('tasks'):
-                if task['id'] in finished:
-                    finished[task['id']]['status'] = task['status']
-            usage1 = resource.getrusage(resource.RUSAGE_SELF)
-            results = []
-            ok = not pending
-            for index, task_id in enumerate(ids):
-                expected = spec['tasks'][index]
-                path = downloads / expected['name']
-                digest = hashlib.sha256()
-                written = 0
-                if path.exists():
-                    with path.open('rb') as handle:
-                        for block in iter(lambda: handle.read(1 << 20), b''):
-                            digest.update(block)
-                            written += len(block)
-                stats = api(f'tasks/{task_id}/stats')
-                correct = digest.hexdigest() == expected['sha'] and written == expected['size']
-                ok = ok and correct and finished.get(task_id, {}).get('status') == 'done'
-                results.append({
-                    'status': finished.get(task_id, {}).get('status', 'timeout'),
-                    'elapsed': round(finished.get(task_id, {}).get('elapsed', elapsed), 4),
-                    'correct': correct,
-                    'streams': len(stats.get('connections') or []),
-                    'peakActiveStreams': peak_streams.get(task_id),
-                    'streamSeconds': round(stream_seconds.get(task_id, 0), 1),
-                    'protocol': stats.get('protocol'),
-                    'rangeState': stats.get('rangeState'),
-                    'newConnections': stats.get('newConnections'),
-                    'reusedConnections': stats.get('reusedConnections'),
-                    'rateLimits': stats.get('rateLimits'),
-                    'timings': stats.get('timings'),
-                    'adaptive': stats.get('adaptive'),
-                })
-            server = json.loads(fixture('/stats'))
-            total_bytes = sum(t['size'] for t in spec['tasks'])
-            cpu = (usage1.ru_utime - usage0.ru_utime) + (usage1.ru_stime - usage0.ru_stime)
-            print(json.dumps({
-                'version': version, 'ok': ok, 'elapsed': round(elapsed, 4),
-                'cpuSeconds': round(cpu, 4), 'cpuSecondsPerGiB': round(cpu / (total_bytes / (1 << 30)), 4),
-                'maxRSS': usage1.ru_maxrss, 'bytes': total_bytes,
-                'server': server, 'tasks': results if len(results) <= 20 else results[:5],
-                'taskCount': len(results), 'correctCount': sum(1 for r in results if r['correct']),
-            }))
-            api('tasks?force=true', method='DELETE')
         finally:
-            lib.Stop()
+            connection.close()
+
+
+def read_trace(path):
+    if not path.exists():
+        return {}
+    # A terminal event may be appended as we read. Only consume complete lines.
+    raw = path.read_bytes()
+    rows = [json.loads(line) for line in raw.splitlines(keepends=True) if line.endswith(b'\n')]
+    return {row['name']: row for row in rows}
+
+
+def timeline(row, submitted_ns):
+    def seconds(start, end):
+        return (end - start) / 1e9 if start is not None and end is not None else None
+
+    first, p90, last, terminal = (row.get(k) for k in ('firstNs', 'p90Ns', 'lastNs', 'terminalNs'))
+    return {'elapsed': seconds(submitted_ns, terminal),
+            'startupSeconds': seconds(submitted_ns, first),
+            'throughputPhaseSeconds': seconds(first, p90),
+            'tailSeconds': seconds(p90, last),
+            'deliverySeconds': seconds(last, terminal)}
+
+
+def verify(path, expected):
+    if not path.is_file():
+        return False
+    with path.open('rb') as handle:
+        return (path.stat().st_size == expected['size']
+                and hashlib.file_digest(handle, 'sha256').hexdigest() == expected['sha'])
+
+
+def run(core, trace, spec, work):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def fixture(path):
+        with opener.open(spec['fixture'] + path, timeout=10) as response:
+            return response.read()
+
+    api = core.api
+    version = api('info')['version']
+    cfg = api('config')
+    cfg['proxy'] = {'enable': False}
+    cfg['maxRunning'] = spec.get('maxRunning', 5)
+    http_cfg = cfg['protocolConfig'].setdefault('http', {})
+    http_cfg['connections'] = spec['connections']
+    if spec.get('tuning') is not None:
+        http_cfg['tuning'] = spec['tuning']
+    else:
+        http_cfg.pop('tuning', None)
+    api('config', cfg, 'PUT')
+    fixture('/reset')
+    downloads = work / 'downloads'
+    downloads.mkdir()
+    tasks = spec['tasks']
+    requests = [{'req': {'url': t['url'], 'skipVerifyCert': True, 'proxy': {'mode': 'none'}},
+                 'opts': {'path': str(downloads), 'name': t['name'],
+                          'extra': {'connections': spec['connections']}}} for t in tasks]
+
+    submitted_ns = time.time_ns()
+    begin = time.monotonic()
+    usage0 = resource.getrusage(resource.RUSAGE_SELF)
+    deadline = begin + spec['timeout']
+    error = ''
+    ids = []
+    rows = {}
+    adaptive_samples = []
+    stats_errors = []
+    next_sample = begin + 1
+
+    def task_stats(task_id):
+        try:
+            return api(f'tasks/{task_id}/stats') or {}
+        except (OSError, http.client.HTTPException, ValueError, RuntimeError) as exc:
+            stats_errors.append(type(exc).__name__)
+            return {}
+    try:
+        if spec.get('submission') == 'resolve-create':
+            resolved = api('resolve', requests[0], 'POST')
+            ids = [api('tasks', {'rid': resolved['id']}, 'POST')]
+        else:
+            ids = api('tasks/batch', {'reqs': requests, 'opts': {'path': str(downloads)}}, 'POST')
+        if len(ids) != len(tasks):
+            raise RuntimeError(f'submitted {len(ids)} of {len(tasks)} tasks')
+        while time.monotonic() < deadline:
+            rows = read_trace(trace)
+            if len(rows) == len(tasks):
+                break
+            now = time.monotonic()
+            if (spec.get('tuning') or {}).get('adaptive') and now >= next_sample:
+                next_sample = now + 1
+                for task_id, task in zip(ids, tasks):
+                    if task['name'] in rows:
+                        continue
+                    stats = task_stats(task_id)
+                    if stats and stats.get('adaptive'):
+                        adaptive_samples.append({'name': task['name'], 'seconds': now - begin,
+                                                 'streams': stats.get('activeStreams'),
+                                                 **stats['adaptive']})
+            time.sleep(0.02 if len(ids) <= 20 else 0.10)
+        if len(rows) != len(tasks):
+            rows = read_trace(trace)
+            error = 'deadline expired before all terminal events were recorded'
+    except (OSError, http.client.HTTPException, RuntimeError, KeyError) as exc:
+        error = str(exc)
+
+    usage1 = resource.getrusage(resource.RUSAGE_SELF)
+    observed = time.monotonic() - begin
+    states = {t['id']: t['status'] for t in api('tasks')}
+    server = json.loads(fixture('/stats'))
+    results = []
+    for index, task in enumerate(tasks):
+        task_id = ids[index] if index < len(ids) else None
+        status = states.get(task_id, 'notSubmitted')
+        row = rows.get(task['name'], {})
+        if task_id is not None:
+            stats = task_stats(task_id) or {}
+        else:
+            stats = {}
+        correct = verify(downloads / task['name'], task)
+        results.append(dict(timeline(row, submitted_ns), name=task['name'], status=status,
+                            correct=correct, terminalRecorded=row.get('status') == status,
+                            protocol=stats.get('protocol'), rangeState=stats.get('rangeState'),
+                            newConnections=stats.get('newConnections'), reusedConnections=stats.get('reusedConnections'),
+                            rateLimits=stats.get('rateLimits'), timings=stats.get('timings'),
+                            adaptive=stats.get('adaptive'), lastError=stats.get('lastError')))
+
+    terminal = [task['elapsed'] for task in results if task['elapsed'] is not None]
+    ok = not error and all(t['status'] == 'done' and t['correct'] and t['terminalRecorded'] for t in results)
+    result = {'version': version, 'ok': ok, 'elapsed': max(terminal) if len(terminal) == len(tasks) else None,
+              'observedSeconds': observed, 'timeoutSeconds': spec['timeout'],
+              'server': server, 'tasks': results, 'error': error, 'adaptiveSamples': adaptive_samples,
+              'statsErrors': stats_errors,
+              'taskCount': len(tasks), 'correctCount': sum(t['correct'] for t in results)}
+    if not ok and spec.get('debug'):
+        log = work / 'state/logs/core.log'
+        if log.is_file():
+            result['coreDiagnostics'] = [line for line in log.read_text().splitlines()
+                                         if 'task download failed' in line][-len(tasks):]
+    if not core.app:
+        result['cpuSeconds'] = (usage1.ru_utime - usage0.ru_utime) + (usage1.ru_stime - usage0.ru_stime)
+        result['maxRSS'] = usage1.ru_maxrss
+    elif ok:
+        try:
+            core.stop()
+            core.start()
+            restored = {t['id']: t['status'] for t in api('tasks')}
+            result['restoredCount'] = sum(restored.get(task_id) == 'done' for task_id in ids)
+            result['ok'] = result['restoredCount'] == len(ids)
+        except (OSError, http.client.HTTPException, RuntimeError) as exc:
+            result.update(ok=False, error=f'App restart verification failed: {exc}')
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    surface = parser.add_mutually_exclusive_group(required=True)
+    surface.add_argument('--lib')
+    surface.add_argument('--app', type=pathlib.Path)
+    parser.add_argument('--spec', required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    spec = json.loads(args.spec.read_text())
+    # The parent prepares a private, short path for the App's Unix socket.
+    with tempfile.TemporaryDirectory(prefix='trial-', dir=spec.get('workDir')) as work:
+        work = pathlib.Path(work)
+        trace = pathlib.Path(os.environ['KOWNLOAD_SPEEDBENCH_TRACE'])
+        core = TrialCore(args.lib, args.app, work, trace)
+        try:
+            core.start()
+            result = run(core, trace, spec, work)
+        finally:
+            core.stop()
+        print(json.dumps(result))
 
 
 if __name__ == '__main__':

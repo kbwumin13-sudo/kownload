@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GopeedLab/gopeed/internal/benchtrace"
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/netdisk/mailru"
@@ -32,8 +33,7 @@ const (
 
 	// Work stealing parameters
 	// When a connection finishes its chunk, it can "steal" work from slow connections.
-	stealThresholdSeconds = 3          // Only steal if victim needs > 3 seconds to finish
-	stealMinChunkSize     = 512 * 1024 // Min steal size: 512KB (avoid tiny chunks)
+	stealMinChunkSize = 512 * 1024
 
 	// How long a file too small to split may finish on its first response
 	// before the rest is fetched with a range request.
@@ -119,9 +119,11 @@ type connection struct {
 	// means the stream stops after its shortened chunk; parked means the chunk
 	// waits for a stream and no goroutine owns it. Guarded by connMu except
 	// permit, which only the owning goroutine (or the launcher before it) uses.
-	permit   bool
-	shedding bool
-	parked   bool
+	permit             bool
+	shedding           bool
+	shedAt             int64 // absolute offset where a shedding stream can return its tail
+	parkedContinuation parkedWorkerAuthorization
+	parked             bool
 	// handoffs counts consecutive 403s on the current range; such a range is
 	// parked for a running stream to take over, up to maxHandoffs times.
 	handoffs int
@@ -136,6 +138,7 @@ type connection struct {
 	stealTarget bool
 
 	// Speed tracking for work stealing decisions
+	setupTime         time.Duration // most recent successful request to response headers
 	speed             int64 // bytes per second
 	lastSpeedCheck    int64 // timestamp in nanoseconds
 	lastSpeedDownload int64 // bytes downloaded at last check
@@ -611,8 +614,21 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 			// Never wait for a second permit while holding the first response.
 			f.diag.setRange(rangeNotProbed, "sourceBusy")
 		} else {
+			var ahead *rangeReadAhead
+			var stopAhead chan struct{}
+			if !f.verifiedOutputPolicy.Load() &&
+				probeEligibility(probeReq, resp, res.Size, extra.Connections) == "" {
+				if scope, scopeErr := f.enterSharedIO(ctx, "resolve-read-ahead"); scopeErr == nil {
+					stopAhead = make(chan struct{})
+					ahead = readWhileProbing(resp, req.URL, res.Size, stopAhead, scope)
+				}
+			}
 			var state, reason string
 			res.Range, state, reason = probeRangeSupport(f.requestContext(parent), client, probeReq, resp, res.Size, extra.Connections)
+			if ahead != nil {
+				close(stopAhead)
+				resp.Body = ahead
+			}
 			f.diag.setRange(state, reason)
 		}
 	}
@@ -667,7 +683,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 	if res.Range && res.Size > 0 && !f.verifiedOutputPolicy.Load() {
 		f.prefetchStopCh = make(chan struct{})
 		f.prefetchDoneCh = make(chan struct{})
-		go f.asyncPrefetch()
+		go f.asyncPrefetch(req.URL, res.Size)
 	}
 	f.setState(stateResolved)
 	f.resolvedOnce.Do(func() {
@@ -692,7 +708,7 @@ func (f *Fetcher) ResolveContext(ctx context.Context, req *base.Request, opts *b
 
 // asyncPrefetch downloads data in background during resolve phase
 // This data can be reused when Start is called to save time
-func (f *Fetcher) asyncPrefetch() {
+func (f *Fetcher) asyncPrefetch(sourceURL string, size int64) {
 	if f.sharedRun() != nil {
 		scope, err := f.enterSharedIO(f.recoveryContext(f.boundRunContext()), "prefetch")
 		if err != nil {
@@ -753,7 +769,10 @@ func (f *Fetcher) asyncPrefetch() {
 				f.prefetchErr = writeErr
 				return
 			}
-			f.prefetchSize.Add(int64(n))
+			end := f.prefetchSize.Add(int64(n))
+			if benchtrace.Enabled {
+				benchtrace.Payload(sourceURL, size, end-int64(n), n)
+			}
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -1314,6 +1333,7 @@ func (f *Fetcher) superviseStreams(expand bool) {
 				f.govern()
 			}
 		case <-f.streamExit:
+			f.launchParked()
 		}
 	}
 }
@@ -1432,13 +1452,16 @@ func (f *Fetcher) expandConnections() {
 	f.connMu.Lock()
 	denied := false
 	newConns := make([]*connection, 0, batchSize)
-	for i := launched; i < batchSize; i++ {
+	// A parked worker can resume, but opening a new split consumes a slot
+	// from the fixed initial worker set. Completed/returned ranges keep
+	// their accounting and do not make new worker IDs available.
+	for i := launched; i < batchSize && len(f.connections) < int(f.configuredStreams.Load()); i++ {
 		// Find the connection with most remaining work
 		var maxRemainConn *connection
 		var maxRemain int64
 
 		for _, conn := range f.connections {
-			if conn.Completed || conn.State == connFailed || conn.parked || conn.shedding {
+			if conn.Completed || conn.State == connFailed || conn.parked || conn.shedding || conn.stealTarget {
 				continue
 			}
 			remain := conn.Chunk.remain()
@@ -1522,9 +1545,15 @@ func (f *Fetcher) runConnection(conn *connection) {
 		f.stopForCredentialFailure(conn, err)
 		return
 	}
+	settings := f.tuning()
+	var authorization parkedWorkerAuthorization
+	if settings.adaptive {
+		authorization = f.captureParkedWorkerAuthorization(conn.ctx)
+	}
+
 	// Use fast-fail client for quick retry during download phase
 	client := f.buildFastFailClient()
-	buf := transfer.GetBuffer(f.tuning().readBuffer)
+	buf := transfer.GetBuffer(settings.readBuffer)
 	defer transfer.PutBuffer(buf)
 
 	retries := 0
@@ -1568,6 +1597,13 @@ func (f *Fetcher) runConnection(conn *connection) {
 			rateLimits = 0
 			f.connMu.Lock()
 			shedding := conn.shedding
+			if shedding && conn.Chunk.remain() > 0 {
+				conn.State = connNotStarted
+				conn.parked = true
+				conn.parkedContinuation = authorization
+				f.connMu.Unlock()
+				return
+			}
 			f.connMu.Unlock()
 			if shedding || !f.usesRanges() || f.yieldStream() || !f.helpOtherConnection(conn) {
 				f.connMu.Lock()
@@ -1863,8 +1899,9 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 		}
 	}
 
-	// Record successful connection time for adaptive timeout
-	f.updateMaxConnTime(time.Since(connStartTime))
+	// Record successful connection time for adaptive timeout and tail handoff.
+	setupTime := time.Since(connStartTime)
+	f.updateMaxConnTime(setupTime)
 	f.diag.response(resp)
 	f.deferrals.Store(0)
 	member := f.member.Load()
@@ -1878,6 +1915,7 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 	}
 
 	f.connMu.Lock()
+	conn.setupTime = setupTime
 	conn.State = connDownloading
 	conn.failed = false
 	f.connMu.Unlock()
@@ -1929,6 +1967,9 @@ func (f *Fetcher) downloadChunkAttempt(conn *connection, client *http.Client, bu
 			f.connMu.Lock()
 			conn.Chunk.Downloaded += int64(n)
 			conn.Downloaded += int64(n)
+			if conn.shedding && conn.Chunk.Begin+conn.Chunk.Downloaded >= conn.shedAt {
+				finished = true
+			}
 			if member != nil {
 				member.Transferred(int64(n))
 			}
@@ -2342,60 +2383,82 @@ func (f *Fetcher) runConnectionFallback(conn *connection) {
 	}
 }
 
-// helpOtherConnection implements work stealing: when a connection finishes its chunk,
-// it looks for connections that need more than stealThresholdSeconds to finish and steals half of its work.
+// helpOtherConnection prefers the split with the largest predicted time saving.
+// No ownership changes until the replacement response is validated.
 func (f *Fetcher) helpOtherConnection(helper *connection) bool {
 	f.connMu.Lock()
 	defer f.connMu.Unlock()
 
-	// A range handed back by a shed stream has no owner: take all of it.
 	if f.takeParked(helper) {
 		return true
 	}
 
-	// Find the connection with longest remaining time
-	var slowestConn *connection
-	var maxRemainSeconds int64
-	for _, r := range f.connections {
-		if r == helper || r.Completed || r.State == connFailed || r.parked || r.stealTarget {
+	requestTime := helper.setupTime
+	if requestTime == 0 {
+		requestTime = time.Duration(f.maxConnTime.Load())
+	}
+	requestTime = max(requestTime, 25*time.Millisecond)
+	guard := 2 * max(int64(f.tuning().readBuffer), transfer.SmallBuffer)
+	var plan pendingSteal
+	var best float64
+	now := time.Now().UnixNano()
+	for _, victim := range f.connections {
+		if victim == helper || victim.Completed || victim.State == connFailed || victim.parked || victim.stealTarget || victim.shedding {
 			continue
 		}
-
-		remain := r.Chunk.remain()
-		if remain < stealMinChunkSize {
-			continue
+		victimRate := victim.speed
+		// A stream that went quiet since its last sample cannot be receiving
+		// faster than the bytes observed in that entire silent interval.
+		if gap := now - victim.lastSpeedCheck; victimRate > 0 && victim.lastSpeedCheck != 0 && gap > int64(time.Second) {
+			victimRate = max(1, min(victimRate, int64(float64(victim.Downloaded-victim.lastSpeedDownload)*float64(time.Second)/float64(gap))))
 		}
-
-		// Calculate remaining time in seconds for this connection
-		var remainSeconds int64
-		if r.speed > 0 {
-			remainSeconds = remain / r.speed
-		} else {
-			// Speed unknown, assume it needs help if chunk is large enough
-			remainSeconds = stealThresholdSeconds + 1
-		}
-
-		// Only consider if it needs more than threshold seconds to finish
-		if remainSeconds > stealThresholdSeconds && remainSeconds > maxRemainSeconds {
-			slowestConn = r
-			maxRemainSeconds = remainSeconds
+		size, gain := profitableSteal(victim.Chunk.remain(), victimRate, helper.speed, guard, requestTime)
+		if gain > best {
+			best = gain
+			plan = pendingSteal{victim: victim, begin: victim.Chunk.End - size + 1, end: victim.Chunk.End}
 		}
 	}
 
-	if slowestConn == nil {
+	if plan.victim == nil {
 		return false
 	}
-
-	// Plan to take the second half of the remaining work; the slower stream
-	// keeps it until this stream's request for it succeeds (commitSteal).
-	helper.steal = &pendingSteal{
-		victim: slowestConn,
-		begin:  slowestConn.Chunk.End - slowestConn.Chunk.remain()/2,
-		end:    slowestConn.Chunk.End,
-	}
+	helper.steal = &plan
 	helper.handoffs = 0
-	slowestConn.stealTarget = true
+	plan.victim.stealTarget = true
 	return true
+}
+
+func profitableSteal(remaining, victimRate, helperRate, guard int64, setup time.Duration) (size int64, gain float64) {
+	if remaining < stealMinChunkSize {
+		return 0, 0
+	}
+	if victimRate <= 0 {
+		// Before a rate can be sampled, retain a conservative rescue for
+		// larger ranges and avoid betting on a costly new request.
+		if setup >= time.Second || remaining-guard < stealMinChunkSize/2 {
+			return 0, 0
+		}
+		return min(remaining/2, remaining-guard), 0.25
+	}
+	if helperRate <= 0 {
+		helperRate = victimRate
+	}
+	victim, helper := float64(victimRate), float64(helperRate)
+	requestSeconds := setup.Seconds()
+	// Balance the estimated remaining work of the victim against the
+	// helper's request time plus transfer, with room for the in-flight read.
+	ideal := (float64(remaining) - requestSeconds*victim) * helper / (victim + helper)
+	size = int64(min(ideal, float64(remaining-guard)))
+	if size < stealMinChunkSize/2 {
+		return 0, 0
+	}
+	before := float64(remaining) / victim
+	after := max(float64(remaining-size)/victim, requestSeconds+float64(size)/helper)
+	gain = before - after
+	if gain < max(0.25, 2*requestSeconds, before*0.20) {
+		return 0, 0
+	}
+	return size, gain
 }
 
 // commitSteal hands conn the tail it planned to steal, now that its response
@@ -2489,6 +2552,7 @@ func (f *Fetcher) resumeConnections() {
 		conn.failed = false // Clear failed flag for resumed connection
 		conn.parked = false
 		conn.shedding = false
+		conn.parkedContinuation = parkedWorkerAuthorization{}
 		conn.handoffs = 0
 		toResume = append(toResume, conn)
 	}

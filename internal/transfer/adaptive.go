@@ -4,18 +4,21 @@ import "time"
 
 const (
 	// Throughput is measured over stable windows after streams settle.
-	adaptiveWindow  = 5 * time.Second
+	adaptiveWindow  = 2 * time.Second
 	adaptiveWindows = 2
-	adaptiveSettle  = 2 * time.Second
+	adaptiveSettle  = time.Second
 	// No new experiment for this long after one finishes.
 	adaptiveHold = 30 * time.Second
+	// Continue removing excess streams sooner after a validated reduction.
+	adaptiveShedHold = 6 * time.Second
 	// A higher stream level is kept only if it beats its lower neighbour by 10%.
 	adaptiveGain = 0.10
 	// Streams are shed only when the lower level keeps 97% of the throughput,
 	// so a shed costs at most a few percent of speed.
 	adaptiveKeep = 0.97
 	// Experiments need this much remaining transfer time to repay their cost.
-	adaptiveMinRemaining = 120 * time.Second
+	adaptiveMinRemaining = 40 * time.Second
+	adaptiveRateChange   = 0.25
 )
 
 type adaptPhase string
@@ -38,19 +41,20 @@ const (
 // from what the tasks' own limits allow and only runs experiments when the
 // remaining transfer is long enough to absorb their cost.
 type adaptiveState struct {
-	target      int // stream target; 0 means the members' combined limits
-	level       int // streams the current rate was measured at
-	rate        float64
-	confirmed   bool // level beat its lower neighbour
-	phase       adaptPhase
-	trial       int
-	samples     []float64
-	windowStart time.Time
-	windowBytes int64
-	lastActive  int
-	settleUntil time.Time
-	holdUntil   time.Time
-	experiments int
+	target        int // stream target; 0 means the members' combined limits
+	level         int // streams the current rate was measured at
+	rate          float64
+	confirmedRate float64
+	confirmed     bool // level beat its lower neighbour
+	phase         adaptPhase
+	trial         int
+	samples       []float64
+	windowStart   time.Time
+	windowBytes   int64
+	lastActive    int
+	settleUntil   time.Time
+	holdUntil     time.Time
+	experiments   int
 }
 
 // AdaptiveSnapshot is the diagnostic view of a source's adaptive state.
@@ -114,33 +118,50 @@ func (a *adaptiveState) tick(now time.Time, s *source) {
 	if len(a.samples) < adaptiveWindows {
 		return
 	}
-	mean := 0.0
+	lo, hi, sum := a.samples[0], a.samples[0], 0.0
 	for _, rate := range a.samples {
-		mean += rate
+		lo, hi = min(lo, rate), max(hi, rate)
+		sum += rate
 	}
-	mean /= float64(len(a.samples))
+	mean := sum / float64(len(a.samples))
 	a.samples = a.samples[:0]
+	// A shaping change or transient stall inside the measurement window
+	// cannot establish a benefit. Restore the last known level and wait.
+	if lo < (1-adaptiveRateChange)*hi {
+		if a.phase == phaseLower || a.phase == phaseHigher {
+			a.finish(now)
+		}
+		return
+	}
 	a.measured(now, s, current, mean)
 }
 
 func (a *adaptiveState) measured(now time.Time, s *source, current int, mean float64) {
 	switch a.phase {
 	case phaseLower:
-		if current < a.level {
-			if mean >= adaptiveKeep*a.rate {
-				a.level, a.rate, a.confirmed = current, mean, false
-			} else {
-				a.confirmed = true
+		if current < a.level && mean >= adaptiveKeep*a.rate {
+			a.level, a.rate, a.confirmed = current, mean, false
+			a.finish(now)
+			if current > len(s.members) {
+				a.holdUntil = now.Add(adaptiveShedHold)
 			}
+			return
+		}
+		if current < a.level {
+			a.confirmed, a.confirmedRate = true, a.rate
 		}
 		a.finish(now)
 	case phaseHigher:
 		if current > a.level && mean >= (1+adaptiveGain)*a.rate {
-			a.level, a.rate, a.confirmed = current, mean, true
+			a.level, a.rate, a.confirmed, a.confirmedRate = current, mean, true, mean
 		}
 		a.finish(now)
 	default:
-		// Ramp and hold keep the baseline current at the running level.
+		// A new steady throughput invalidates the previous comparison.
+		if a.confirmed && (current != a.level || mean < (1-adaptiveRateChange)*a.confirmedRate ||
+			mean > (1+adaptiveRateChange)*a.confirmedRate) {
+			a.confirmed = false
+		}
 		a.level, a.rate = current, mean
 		if a.phase == phaseRamp {
 			a.phase, a.holdUntil = phaseHold, now
@@ -162,7 +183,6 @@ func (a *adaptiveState) finish(now time.Time) {
 func (a *adaptiveState) next(now time.Time, s *source) {
 	floor, top := len(s.members), s.limitSum()
 	if a.rate <= 0 || !a.worthExperiment(s) {
-		a.holdUntil = now.Add(adaptiveHold)
 		return
 	}
 	switch {

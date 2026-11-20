@@ -261,6 +261,25 @@ func (f *Fetcher) configureInitialRecoveryWork(limit int) error {
 	}
 	return nil
 }
+// A deliberately parked worker may resume only in the recovery wave that
+// already authorized it. A restarted or replaced worker makes a fresh claim.
+type parkedWorkerAuthorization struct {
+	run   *httpRecoveryRun
+	token transfer.RecoveryToken
+	round uint64
+}
+
+func (f *Fetcher) captureParkedWorkerAuthorization(ctx context.Context) parkedWorkerAuthorization {
+	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(ctx))
+	run := f.recovery.Load()
+	if lease == nil || run == nil || run.lease.Token != lease.Token {
+		return parkedWorkerAuthorization{}
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return parkedWorkerAuthorization{run: run, token: lease.Token, round: run.round}
+}
+
 func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
 	lease := transfer.RecoveryLeaseFromContext(f.recoveryContext(conn.ctx))
 	if lease == nil {
@@ -273,7 +292,17 @@ func (f *Fetcher) authorizeInitialRecoveryWork(conn *connection) error {
 	if run == nil || run.lease.Token != lease.Token {
 		return transfer.ErrRecoveryStale
 	}
+	// A deliberate park keeps the same logical worker. A valid continuation
+	// within its original lease does not reopen a spent startup attempt.
+	f.connMu.Lock()
+	continuation := conn.parkedContinuation
+	conn.parkedContinuation = parkedWorkerAuthorization{}
+	f.connMu.Unlock()
 	run.mu.Lock()
+	if continuation.run == run && continuation.token == lease.Token && continuation.round == run.round {
+		run.mu.Unlock()
+		return lease.Check()
+	}
 	if run.shared != nil && conn.recoveryInitialized && conn.recoveryRound == run.round {
 		run.shared.mu.Lock()
 		admitted := run.shared.completed[f.recoveryWork(conn)]

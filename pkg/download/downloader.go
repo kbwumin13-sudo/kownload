@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GopeedLab/gopeed/internal/benchtrace"
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/logger"
@@ -848,7 +849,12 @@ func (d *Downloader) notifyRunning() {
 					wt.notBefore = deferred.Until
 					wt.dataLock.Unlock()
 					d.enqueueLocked(wt)
+					d.wakeDeferredQueue(deferred.Until)
 				}
+				// A just-discovered durable cooldown did not use the slot.
+				// The next task moved into the index we removed.
+				i--
+				continue
 			}
 			break
 		}
@@ -1488,6 +1494,13 @@ func (d *Downloader) Listener(fn Listener) {
 }
 
 func (d *Downloader) emit(eventKey EventKey, task *Task, errs ...error) {
+	if benchtrace.Enabled && task != nil && (eventKey == EventKeyDone || eventKey == EventKeyError) {
+		task.dataLock.RLock()
+		if task.Protocol == "http" && task.Meta != nil && task.Meta.Req != nil {
+			benchtrace.Terminal(task.Meta.Req.URL, string(eventKey))
+		}
+		task.dataLock.RUnlock()
+	}
 	d.listenerLock.RLock()
 	listener := d.listener
 	d.listenerLock.RUnlock()
@@ -2168,11 +2181,17 @@ func (d *Downloader) deferTask(task *Task, deferred *transfer.DeferredError, gen
 	}
 	d.emit(EventKeyProgress, task)
 	d.notifyRunning()
-	// Once the cooldown is over the task can run again: start it if a slot is
-	// free, and otherwise let tasks idling in a cooldown reconsider their slot.
-	time.AfterFunc(time.Until(deferred.Until)+10*time.Millisecond, func() {
-		d.signalQueue()
-		d.notifyRunning()
+	d.wakeDeferredQueue(deferred.Until)
+}
+
+// Once the cooldown is over a free slot can run the task. Signal other
+// cooling tasks as well so they can make room if the queue now has work.
+func (d *Downloader) wakeDeferredQueue(until time.Time) {
+	time.AfterFunc(time.Until(until)+10*time.Millisecond, func() {
+		if !d.closed.Load() {
+			d.signalQueue()
+			d.notifyRunning()
+		}
 	})
 }
 

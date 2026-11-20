@@ -93,15 +93,15 @@ func (f *Fetcher) releasePermit(conn *connection) {
 	}
 	conn.permit = false
 	m := f.member.Load()
-	if m == nil {
-		return
-	}
 	// A shed reservation is returned once; a stream that later gets a new
 	// permit runs as an ordinary stream.
 	f.connMu.Lock()
 	shedding := conn.shedding
 	conn.shedding = false
 	f.connMu.Unlock()
+	if m == nil {
+		return
+	}
 	if shedding {
 		m.ReleaseShed()
 	} else {
@@ -195,7 +195,9 @@ func (f *Fetcher) shouldDefer(wait time.Duration) bool {
 	if f.ctl.Budget == nil {
 		return false
 	}
-	queued := f.ctl.QueueWaiting != nil && wait >= transfer.QueuedDeferThreshold && f.ctl.QueueWaiting()
+	// Retry-After uses whole seconds. Setup and classification have already
+	// consumed part of that wait by the time a queued task can take the slot.
+	queued := f.ctl.QueueWaiting != nil && wait.Round(time.Second) >= transfer.QueuedDeferThreshold && f.ctl.QueueWaiting()
 	return wait > transfer.DeferThreshold || queued
 }
 
@@ -290,8 +292,8 @@ func (f *Fetcher) shedMargin() int64 {
 	return max(int64(256*1024), 4*int64(f.tuning().readBuffer))
 }
 
-// govern applies a lowered adaptive target: the stream with the most work left
-// finishes a short margin and hands the rest back as a parked range.
+// govern applies a lowered adaptive target. The stream finishes a short margin
+// and parks the unfinished tail on the same recovery worker slot.
 func (f *Fetcher) govern() {
 	m := f.member.Load()
 	if m == nil {
@@ -311,7 +313,7 @@ func (f *Fetcher) parkOne() bool {
 	defer f.connMu.Unlock()
 	var victim *connection
 	for _, c := range f.connections {
-		if c.parked || c.shedding || c.Completed || c.State != connDownloading || c.steal != nil {
+		if c.parked || c.shedding || c.Completed || c.State != connDownloading || c.steal != nil || c.stealTarget {
 			continue
 		}
 		if victim == nil || c.Chunk.remain() > victim.Chunk.remain() {
@@ -322,14 +324,7 @@ func (f *Fetcher) parkOne() bool {
 		return false
 	}
 	victim.shedding = true
-	cut := victim.Chunk.Begin + victim.Chunk.Downloaded + f.shedMargin()
-	if cut <= victim.Chunk.End {
-		parked := &connection{ID: len(f.connections), Role: roleWorker, State: connNotStarted,
-			Chunk: newChunk(cut, victim.Chunk.End), parked: true}
-		parked.ctx, parked.cancel = context.WithCancel(f.ctx)
-		victim.Chunk.End = cut - 1
-		f.connections = append(f.connections, parked)
-	}
+	victim.shedAt = min(victim.Chunk.End+1, victim.Chunk.Begin+victim.Chunk.Downloaded+f.shedMargin())
 	return true
 }
 
@@ -343,7 +338,7 @@ func (f *Fetcher) launchParked() int {
 		f.connMu.Lock()
 		var next *connection
 		for _, c := range f.connections {
-			if c.parked && !c.Completed && c.Chunk.remain() > 0 && (c.handoffs == 0 || live == 0) {
+			if c.parked && !c.shedding && !c.Completed && c.Chunk.remain() > 0 && (c.handoffs == 0 || live == 0) {
 				next = c
 				break
 			}
@@ -355,7 +350,7 @@ func (f *Fetcher) launchParked() int {
 		// A finishing stream may have taken the range meanwhile; claim it only
 		// if it is still parked and unfinished.
 		f.connMu.Lock()
-		claimed := next.parked && !next.Completed && next.Chunk.remain() > 0
+		claimed := next.parked && !next.shedding && !next.Completed && next.Chunk.remain() > 0
 		if claimed {
 			next.parked = false
 			next.permit = true
@@ -389,7 +384,7 @@ func (f *Fetcher) hasParkedWork() bool {
 // takeParked hands a whole parked range to a helper. Caller holds connMu.
 func (f *Fetcher) takeParked(helper *connection) bool {
 	for _, p := range f.connections {
-		if !p.parked || p.Completed || p.Chunk.remain() <= 0 {
+		if !p.parked || p.shedding || p.Completed || p.Chunk.remain() <= 0 {
 			continue
 		}
 		helper.Chunk.Begin = p.Chunk.Begin + p.Chunk.Downloaded
@@ -398,6 +393,7 @@ func (f *Fetcher) takeParked(helper *connection) bool {
 		helper.handoffs = p.handoffs
 		p.Chunk.End = p.Chunk.Begin + p.Chunk.Downloaded - 1
 		p.parked = false
+		p.parkedContinuation = parkedWorkerAuthorization{}
 		p.failed = false
 		p.Completed = true
 		p.State = connCompleted

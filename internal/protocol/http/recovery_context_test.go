@@ -148,6 +148,13 @@ func TestRecoveryInitialSlotsAreBoundedAndReplacementCannotBeFree(t *testing.T) 
 	if owner.retries.Load() != 0 {
 		t.Fatal("normal slow-start slots charged as retries")
 	}
+	a.parkedContinuation = f.captureParkedWorkerAuthorization(ctx)
+	if err := f.authorizeInitialRecoveryWork(a); err != nil {
+		t.Fatal(err)
+	}
+	if owner.retries.Load() != 0 || a.parkedContinuation.run != nil {
+		t.Fatal("the parked worker should continue the same attempt exactly once")
+	}
 	for i := int32(1); i <= 2; i++ {
 		replacement := &connection{ID: 0, ctx: ctx, Chunk: newChunk(int64(i), 100)}
 		if err := f.authorizeInitialRecoveryWork(replacement); err != nil {
